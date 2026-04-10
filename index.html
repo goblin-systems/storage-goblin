@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Storage Goblin</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <div class="window-frame-row" data-tauri-drag-region>
+        <div class="window-title-wrap">
+          <div class="window-title">Storage Goblin</div>
+          <div class="window-subtitle" id="window-subtitle">Set up a connection, then review sync state here</div>
+        </div>
+        <div class="window-actions" aria-label="Window controls">
+          <button id="window-minimize-btn" class="icon-btn window-action-btn" type="button" aria-label="Minimize window">
+            <i data-lucide="minus"></i>
+          </button>
+          <button id="window-maximize-btn" class="icon-btn window-action-btn" type="button" aria-label="Maximize window">
+            <i data-lucide="maximize-2"></i>
+          </button>
+          <button id="window-close-btn" class="icon-btn window-action-btn" type="button" aria-label="Close window">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+      </div>
+
+      <div class="top-bar-row">
+        <nav id="app-nav" class="nav-bar" aria-label="App menu">
+          <div class="nav-item">
+            <button class="nav-trigger" type="button"><span id="nav-trigger-label">Menu</span> <i data-lucide="chevron-down"></i></button>
+            <div class="nav-dropdown">
+              <button class="nav-option" type="button" data-nav-id="nav-home">
+                <span class="nav-option-icon"><i data-lucide="house"></i></span>
+                <span class="nav-option-label">Home</span>
+              </button>
+              <button class="nav-option" type="button" data-nav-id="nav-locations">
+                <span class="nav-option-icon"><i data-lucide="link"></i></span>
+                <span class="nav-option-label">Sync Locations</span>
+              </button>
+              <button class="nav-option" type="button" data-nav-id="nav-credentials">
+                <span class="nav-option-icon"><i data-lucide="key-round"></i></span>
+                <span class="nav-option-label">Credentials</span>
+              </button>
+              <button class="nav-option" type="button" data-nav-id="nav-activity">
+                <span class="nav-option-icon"><i data-lucide="logs"></i></span>
+                <span class="nav-option-label">Activity</span>
+              </button>
+              <button class="nav-option" type="button" data-nav-id="nav-settings">
+                <span class="nav-option-icon"><i data-lucide="settings-2"></i></span>
+                <span class="nav-option-label">Advanced</span>
+              </button>
+            </div>
+          </div>
+        </nav>
+
+        <div class="top-bar-actions">
+          <span id="sync-phase-badge" class="badge default">Unconfigured</span>
+        </div>
+      </div>
+
+      <section class="settings-section workspace-card dashboard-shell">
+        <div class="screen-stack">
+        <section id="screen-home" class="screen-panel is-active">
+          <div class="settings-section home-toolbar">
+            <div class="section-heading-row">
+              <select id="active-location-select">
+                <option value="">Select a sync location</option>
+              </select>
+              <span id="status-phase-inline" class="badge default">Unconfigured</span>
+            </div>
+            <p id="status-summary" class="hint">Choose a sync location to view its files.</p>
+            <div class="stat-grid overview-grid">
+              <div class="stat-card stat-card-emphasis">
+                <span>Local</span>
+                <strong id="status-overview-local">0</strong>
+              </div>
+              <div class="stat-card stat-card-emphasis">
+                <span>Remote</span>
+                <strong id="status-overview-remote">0</strong>
+              </div>
+              <div class="stat-card stat-card-emphasis">
+                <span>In sync</span>
+                <strong id="status-overview-in-sync">0</strong>
+              </div>
+              <div class="stat-card stat-card-emphasis">
+                <span>Conflicts</span>
+                <strong id="status-overview-not-in-sync">0</strong>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section file-tree-section">
+            <div id="file-tree-empty-state" class="empty-state">
+              <div class="empty-state-card">Select a sync location to browse files.</div>
+            </div>
+            <ul id="file-tree" class="tree tree--dot-left" hidden></ul>
+          </div>
+        </section>
+
+        <section id="screen-credentials" class="modal-backdrop storage-modal" hidden>
+          <div class="modal-card storage-modal-card storage-modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="screen-credentials-title">
+            <div class="modal-header">
+              <h3 id="screen-credentials-title">Credentials</h3>
+              <button class="icon-btn modal-close-btn modal-btn-reject" type="button" aria-label="Close credentials dialog">
+                <i data-lucide="x"></i>
+              </button>
+            </div>
+            <div class="panel-grid storage-modal-grid credentials-modal-grid">
+              <div class="settings-section storage-modal-section">
+                <div class="section-heading-row">
+                  <h2>Saved credentials</h2>
+                  <span id="credentials-count-badge" class="badge default">0 saved</span>
+                </div>
+                <p id="credentials-list-status" class="hint">Each credential shows secure storage state and test state separately.</p>
+                <div id="credentials-empty-state" class="empty-state">
+                  <div class="empty-state-card">No saved credentials yet.</div>
+                </div>
+                <ul id="credentials-list" class="compact-list credential-list" hidden></ul>
+              </div>
+
+              <div class="settings-section storage-modal-section">
+                <div class="section-heading-row">
+                  <h2>Create credential</h2>
+                  <span id="credentials-support-badge" class="badge default">Desktop app</span>
+                </div>
+                <p id="credentials-support-text" class="hint">Create a named credential once, then reuse it from the Connection dialog without re-entering raw keys there.</p>
+                <div class="form-grid">
+                  <label class="field-block form-span-2">
+                    <span>Name</span>
+                    <input id="credential-name-input" type="text" placeholder="Primary bucket access" autocomplete="off" />
+                  </label>
+                  <label class="field-block form-span-2">
+                    <span>Access key ID</span>
+                    <input id="credential-access-key-input" type="text" placeholder="AKIA..." autocomplete="off" />
+                  </label>
+                  <label class="field-block form-span-2">
+                    <span>Secret access key</span>
+                    <input id="credential-secret-key-input" type="password" placeholder="Stored securely after creation" autocomplete="off" />
+                  </label>
+                </div>
+                <div class="stack-actions primary-action-row">
+                  <button id="create-credential-btn" class="secondary-btn" type="button">
+                    <i data-lucide="plus"></i>
+                    <span>Create credential</span>
+                  </button>
+                </div>
+                <div id="credentials-result" class="callout">Create named credentials here. After saving, the UI will show whether the credential was tested.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="screen-activity" class="modal-backdrop storage-modal" hidden>
+          <div class="modal-card storage-modal-card" role="dialog" aria-modal="true" aria-labelledby="screen-activity-title">
+            <div class="modal-header">
+              <h3 id="screen-activity-title">Activity</h3>
+              <button class="icon-btn modal-close-btn modal-btn-reject" type="button" aria-label="Close activity dialog">
+                <i data-lucide="x"></i>
+              </button>
+            </div>
+            <div class="settings-section storage-modal-section">
+              <div class="section-heading-row">
+                <h2>Activity</h2>
+                <span class="hint">Recent setup, sync, and native activity updates.</span>
+              </div>
+              <div id="activity-empty-state" class="empty-state">
+                <div class="empty-state-card">No activity yet. Connect a folder to get started.</div>
+              </div>
+              <ul id="activity-list" class="compact-list activity-list" hidden></ul>
+            </div>
+          </div>
+        </section>
+
+        <section id="screen-settings" class="modal-backdrop storage-modal" hidden>
+          <div class="modal-card storage-modal-card storage-modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="screen-settings-title">
+            <div class="modal-header">
+              <h3 id="screen-settings-title">Advanced</h3>
+              <button class="icon-btn modal-close-btn modal-btn-reject" type="button" aria-label="Close advanced dialog">
+                <i data-lucide="x"></i>
+              </button>
+            </div>
+            <div class="panel-grid storage-modal-grid">
+              <div class="settings-section storage-modal-section">
+                <div class="section-heading-row">
+                  <h2>Polling</h2>
+                </div>
+                <div class="form-grid">
+                  <label class="checkbox-label form-span-2">
+                    <input id="remote-polling-input" type="checkbox" checked />
+                    <span>Keep watching for remote changes after the first connect</span>
+                  </label>
+                  <label class="field-block">
+                    <span>Poll interval seconds</span>
+                    <input id="poll-interval-input" type="number" min="15" max="3600" step="15" value="60" />
+                  </label>
+                </div>
+              </div>
+
+              <div class="settings-section storage-modal-section">
+                <div class="section-heading-row">
+                  <h2>Activity debug</h2>
+                  <span id="debug-log-status-badge" class="badge default">Unavailable</span>
+                </div>
+                <div class="form-grid">
+                  <label class="checkbox-label form-span-2">
+                    <input id="activity-debug-mode-input" type="checkbox" />
+                    <span>Capture richer native activity debug details for troubleshooting</span>
+                  </label>
+                </div>
+                <p id="debug-log-status-text" class="hint">Debug logging is not available in the browser preview.</p>
+                <ul class="compact-list status-list debug-log-list">
+                  <li><span>Debug log file</span><strong id="debug-log-file-path">Unavailable</strong></li>
+                </ul>
+                <div class="stack-actions primary-action-row">
+                  <button id="open-debug-log-folder-btn" class="secondary-btn" type="button" disabled>
+                    <i data-lucide="folder-search-2"></i>
+                    <span>Open log folder</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="settings-section storage-modal-section">
+                <div class="section-heading-row">
+                  <h2>Conflict + delete defaults</h2>
+                </div>
+                <div class="form-grid">
+                  <label class="field-block">
+                    <span>Conflict strategy</span>
+                    <select id="conflict-strategy-select">
+                      <option value="preserve-both">Preserve both</option>
+                    </select>
+                  </label>
+                  <label class="field-block">
+                    <span>Delete safety hours</span>
+                    <input id="delete-safety-input" type="number" min="1" max="168" step="1" value="24" />
+                  </label>
+                </div>
+                <p class="hint">Connect and sync may upload when the backend says it is safe. This UI still does not claim automatic downloads, deletes, or conflict resolution.</p>
+                <div class="stack-actions primary-action-row">
+                  <button id="save-settings-btn" class="secondary-btn" type="button">
+                    <i data-lucide="save"></i>
+                    <span>Save settings</span>
+                  </button>
+                </div>
+                <div id="settings-result" class="callout">Settings changes stay local until you save them.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="screen-locations" class="modal-backdrop storage-modal" hidden>
+          <div class="modal-card storage-modal-card storage-modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="screen-locations-title">
+            <div class="modal-header">
+              <h3 id="screen-locations-title">Sync Locations</h3>
+              <button class="icon-btn modal-close-btn modal-btn-reject" type="button" aria-label="Close sync locations dialog">
+                <i data-lucide="x"></i>
+              </button>
+            </div>
+            <div class="panel-grid storage-modal-grid locations-modal-grid">
+              <div class="settings-section storage-modal-section">
+                <div class="section-heading-row">
+                  <h2>Saved sync locations</h2>
+                  <span id="locations-count-badge" class="badge default">0 sync locations</span>
+                </div>
+                <p id="locations-list-status" class="hint">Each sync location connects a local folder to a remote bucket. Sync locations run independently.</p>
+                <div id="locations-empty-state" class="empty-state">
+                  <div class="empty-state-card">No sync locations yet. Create one to get started.</div>
+                </div>
+                <ul id="locations-list" class="compact-list location-list" hidden></ul>
+              </div>
+
+              <div class="settings-section storage-modal-section">
+                <div class="section-heading-row">
+                  <h2 id="location-form-title">Create sync location</h2>
+                </div>
+                <p class="hint">Define a folder-to-bucket sync connection. Each sync location syncs independently with its own credential and settings.</p>
+                <div class="form-grid">
+                  <label class="field-block form-span-2">
+                    <span>Label</span>
+                    <input id="location-label-input" type="text" placeholder="My photos backup" autocomplete="off" />
+                  </label>
+                  <label class="field-block form-span-2">
+                    <span>Local folder</span>
+                    <input id="location-local-folder-input" type="text" placeholder="C:\Users\you\Photos" />
+                  </label>
+                  <label class="field-block">
+                    <span>Region</span>
+                    <select id="location-region-select">
+                      <option value="">Auto-detect</option>
+                      <option value="us-east-1">US East (N. Virginia) — us-east-1</option>
+                      <option value="us-east-2">US East (Ohio) — us-east-2</option>
+                      <option value="us-west-1">US West (N. California) — us-west-1</option>
+                      <option value="us-west-2">US West (Oregon) — us-west-2</option>
+                      <option value="af-south-1">Africa (Cape Town) — af-south-1</option>
+                      <option value="ap-east-1">Asia Pacific (Hong Kong) — ap-east-1</option>
+                      <option value="ap-south-1">Asia Pacific (Mumbai) — ap-south-1</option>
+                      <option value="ap-south-2">Asia Pacific (Hyderabad) — ap-south-2</option>
+                      <option value="ap-southeast-1">Asia Pacific (Singapore) — ap-southeast-1</option>
+                      <option value="ap-southeast-2">Asia Pacific (Sydney) — ap-southeast-2</option>
+                      <option value="ap-southeast-3">Asia Pacific (Jakarta) — ap-southeast-3</option>
+                      <option value="ap-southeast-4">Asia Pacific (Melbourne) — ap-southeast-4</option>
+                      <option value="ap-northeast-1">Asia Pacific (Tokyo) — ap-northeast-1</option>
+                      <option value="ap-northeast-2">Asia Pacific (Seoul) — ap-northeast-2</option>
+                      <option value="ap-northeast-3">Asia Pacific (Osaka) — ap-northeast-3</option>
+                      <option value="ca-central-1">Canada (Central) — ca-central-1</option>
+                      <option value="ca-west-1">Canada West (Calgary) — ca-west-1</option>
+                      <option value="eu-central-1">Europe (Frankfurt) — eu-central-1</option>
+                      <option value="eu-central-2">Europe (Zurich) — eu-central-2</option>
+                      <option value="eu-west-1">Europe (Ireland) — eu-west-1</option>
+                      <option value="eu-west-2">Europe (London) — eu-west-2</option>
+                      <option value="eu-west-3">Europe (Paris) — eu-west-3</option>
+                      <option value="eu-south-1">Europe (Milan) — eu-south-1</option>
+                      <option value="eu-south-2">Europe (Spain) — eu-south-2</option>
+                      <option value="eu-north-1">Europe (Stockholm) — eu-north-1</option>
+                      <option value="il-central-1">Israel (Tel Aviv) — il-central-1</option>
+                      <option value="me-south-1">Middle East (Bahrain) — me-south-1</option>
+                      <option value="me-central-1">Middle East (UAE) — me-central-1</option>
+                      <option value="sa-east-1">South America (Sao Paulo) — sa-east-1</option>
+                    </select>
+                  </label>
+                  <label class="field-block">
+                    <span>Bucket</span>
+                    <input id="location-bucket-input" type="text" placeholder="my-bucket" />
+                  </label>
+                  <label class="field-block form-span-2">
+                    <span>Credential</span>
+                    <select id="location-credential-select">
+                      <option value="">Choose a credential</option>
+                    </select>
+                  </label>
+                  <label class="checkbox-label form-span-2">
+                    <input id="location-enabled-input" type="checkbox" checked />
+                    <span>Enabled</span>
+                  </label>
+                  <label class="checkbox-label form-span-2">
+                    <input id="location-polling-input" type="checkbox" checked />
+                    <span>Remote polling enabled</span>
+                  </label>
+                  <label class="field-block">
+                    <span>Poll interval (seconds)</span>
+                    <input id="location-poll-interval-input" type="number" min="15" max="3600" step="15" value="60" />
+                  </label>
+                  <label class="field-block">
+                    <span>Conflict strategy</span>
+                    <select id="location-conflict-strategy-select">
+                      <option value="preserve-both">Preserve both</option>
+                    </select>
+                  </label>
+                  <label class="field-block">
+                    <span>Delete safety hours</span>
+                    <input id="location-delete-safety-input" type="number" min="1" max="168" step="1" value="24" />
+                  </label>
+                </div>
+                <input id="location-editing-id" type="hidden" value="" />
+                <div class="stack-actions primary-action-row">
+                  <button id="location-browse-folder-btn" class="secondary-btn slim-btn" type="button">
+                    <i data-lucide="folder-open"></i>
+                    <span>Choose folder</span>
+                  </button>
+                  <button id="save-location-btn" class="secondary-btn" type="button">
+                    <i data-lucide="plus"></i>
+                    <span>Create sync location</span>
+                  </button>
+                  <button id="cancel-edit-location-btn" class="secondary-btn slim-btn" type="button" hidden>
+                    <i data-lucide="x"></i>
+                    <span>Cancel edit</span>
+                  </button>
+                </div>
+                <div id="locations-result" class="callout">Create sync locations to connect local folders to remote buckets.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+        </div>
+      </section>
+
+      <div id="app-toast" class="app-toast" role="status" aria-live="polite"></div>
+    </main>
+  </body>
+</html>

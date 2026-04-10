@@ -1,0 +1,31 @@
+[package]
+name = "storage-goblin"
+version = "0.1.0"
+description = "Desktop S3 sync scaffold powered by Tauri"
+authors = ["Sergej Popov"]
+edition = "2021"
+
+[lib]
+name = "storage_goblin_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+tauri-command-tests = ["tauri/test"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+aws-config = "1"
+aws-credential-types = "1"
+aws-sdk-s3 = "1"
+aws-types = "1"
+keyring = { version = "3.6", features = ["windows-native"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+time = { version = "0.3", features = ["formatting", "macros"] }
+tokio = { version = "1", features = ["time"] }
+uuid = { version = "1", features = ["v4"] }
