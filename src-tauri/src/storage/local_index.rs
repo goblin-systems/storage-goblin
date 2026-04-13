@@ -218,6 +218,7 @@ pub(crate) fn file_fingerprint(path: &Path) -> Result<String, String> {
     Ok(hex_sha256(&bytes))
 }
 
+#[cfg(test)]
 pub(crate) fn bytes_fingerprint(bytes: &[u8]) -> String {
     hex_sha256(bytes)
 }

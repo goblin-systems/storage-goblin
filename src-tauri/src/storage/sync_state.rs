@@ -876,6 +876,7 @@ pub(crate) fn synthesize_status_from_pairs(pair_statuses: &[PairSyncStatus]) -> 
 // Aggregate sync status across all pairs
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AggregateSyncStatus {
@@ -891,6 +892,7 @@ pub struct AggregateSyncStatus {
     pub pairs: Vec<PairSyncStatus>,
 }
 
+#[allow(dead_code)]
 pub(crate) fn aggregate_pair_statuses(statuses: &[PairSyncStatus]) -> AggregateSyncStatus {
     let enabled_count = statuses.iter().filter(|s| s.enabled).count();
     let configured_count = statuses

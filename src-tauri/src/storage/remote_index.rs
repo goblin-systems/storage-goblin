@@ -87,6 +87,7 @@ pub fn write_remote_index_snapshot_for_pair<R: Runtime>(
     write_remote_index_snapshot_file(&path, snapshot)
 }
 
+#[cfg(test)]
 pub(crate) fn snapshot_matches_target_with_exclusions(
     snapshot: &RemoteIndexSnapshot,
     bucket: &str,
@@ -101,6 +102,7 @@ pub(crate) fn snapshot_matches_target(snapshot: &RemoteIndexSnapshot, bucket: &s
     snapshot.bucket.trim() == bucket.trim()
 }
 
+#[cfg(test)]
 pub(crate) fn normalized_prefixes(prefixes: &[String]) -> Vec<String> {
     let mut prefixes: Vec<String> = prefixes
         .iter()

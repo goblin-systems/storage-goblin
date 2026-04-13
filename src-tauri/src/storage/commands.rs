@@ -4334,6 +4334,7 @@ fn next_polling_deadline_at(
     now + wait
 }
 
+#[cfg(test)]
 fn next_polling_deadline(pair: &SyncPair, status: Option<&PairSyncStatus>) -> tokio::time::Instant {
     next_polling_deadline_at(tokio::time::Instant::now(), pair, status)
 }
