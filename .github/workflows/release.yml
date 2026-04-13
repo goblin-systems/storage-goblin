@@ -1,0 +1,279 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: Version bump type
+        required: true
+        default: minor
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare release version
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.version.outputs.new_version }}
+      new_tag: ${{ steps.version.outputs.new_tag }}
+      release_commit: ${{ steps.commit_release.outputs.release_commit }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify master branch
+        if: ${{ github.ref_name != 'master' }}
+        run: |
+          echo "This workflow must be run from the master branch."
+          exit 1
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run tests
+        run: bun run test
+
+      - name: Build frontend
+        run: bun run build
+
+      - name: Determine next version
+        id: version
+        shell: pwsh
+        env:
+          BUMP_TYPE: ${{ github.event.inputs.bump_type }}
+        run: |
+          git fetch --tags --force
+
+          $latestTag = git tag --list 'v*' --sort=-v:refname | Select-Object -First 1
+          if ([string]::IsNullOrWhiteSpace($latestTag)) {
+            $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+            $baseVersion = $pkg.version
+          }
+          else {
+            $baseVersion = $latestTag.TrimStart('v')
+          }
+
+          if ($baseVersion -notmatch '^(\d+)\.(\d+)\.(\d+)$') {
+            throw "Unable to parse semantic version from '$baseVersion'"
+          }
+
+          $major = [int]$Matches[1]
+          $minor = [int]$Matches[2]
+          $patch = [int]$Matches[3]
+
+          switch ($env:BUMP_TYPE) {
+            'major' {
+              $major += 1
+              $minor = 0
+              $patch = 0
+            }
+            'minor' {
+              $minor += 1
+              $patch = 0
+            }
+            'patch' {
+              $patch += 1
+            }
+            default {
+              throw "Unsupported bump type '$($env:BUMP_TYPE)'"
+            }
+          }
+
+          $newVersion = "$major.$minor.$patch"
+          $newTag = "v$newVersion"
+
+          "new_version=$newVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "new_tag=$newTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          Write-Host "Latest tag: $latestTag"
+          Write-Host "Next version: $newVersion"
+
+      - name: Update version files
+        shell: pwsh
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          $version = $env:NEW_VERSION
+
+          $packagePath = 'package.json'
+          $package = Get-Content $packagePath -Raw | ConvertFrom-Json
+          $package.version = $version
+          $package | ConvertTo-Json -Depth 50 | Set-Content $packagePath -Encoding utf8
+
+          $tauriPath = 'src-tauri/tauri.conf.json'
+          $tauri = Get-Content $tauriPath -Raw | ConvertFrom-Json
+          $tauri.version = $version
+          $tauri | ConvertTo-Json -Depth 50 | Set-Content $tauriPath -Encoding utf8
+
+          $cargoPath = 'src-tauri/Cargo.toml'
+          $cargo = Get-Content $cargoPath -Raw
+          $cargo = [regex]::Replace($cargo, '(?ms)(\[package\][^\[]*?version\s*=\s*")([^"]+)(")', "`${1}$version`${3}")
+          Set-Content $cargoPath -Value $cargo -Encoding utf8
+
+          Write-Host "Version files updated to $version"
+
+      - name: Commit release version
+        id: commit_release
+        shell: pwsh
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          $version = $env:NEW_VERSION.Trim()
+          git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
+
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
+            throw "No version changes were staged for release $version"
+          }
+
+          git commit -m "chore: release v$version"
+
+          $releaseCommit = git rev-parse HEAD
+          "release_commit=$releaseCommit" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          Write-Host "Release commit: $releaseCommit"
+
+      - name: Create and push release commit and tag
+        shell: pwsh
+        env:
+          NEW_TAG: ${{ steps.version.outputs.new_tag }}
+        run: |
+          $tag = $env:NEW_TAG.Trim()
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            throw "NEW_TAG output is empty"
+          }
+
+          git show-ref --tags --verify --quiet "refs/tags/$tag"
+          if ($LASTEXITCODE -eq 0) {
+            throw "Tag $tag already exists"
+          }
+
+          git tag $tag
+          git push origin HEAD:master
+          git push origin $tag
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            bundles: nsis
+          - os: macos-latest
+            bundles: dmg
+          - os: ubuntu-24.04
+            bundles: deb,appimage
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.new_tag }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libpipewire-0.3-dev \
+            libgbm-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libasound2-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libfuse2t64 \
+            patchelf
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build frontend
+        run: bun run build
+
+      - name: Build Tauri app
+        run: bun run tauri build --ci --no-sign --bundles ${{ matrix.bundles }}
+
+      - name: Show generated bundle files
+        shell: pwsh
+        run: |
+          if (Test-Path 'src-tauri/target/release/bundle') {
+            Get-ChildItem -Path 'src-tauri/target/release/bundle' -Recurse | Select-Object FullName
+          }
+          else {
+            Write-Host 'Bundle directory does not exist: src-tauri/target/release/bundle'
+          }
+
+      - name: Upload bundle artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-goblin-bundle-${{ matrix.os }}
+          path: |
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.dmg
+            src-tauri/target/release/bundle/**/*.deb
+            src-tauri/target/release/bundle/**/*.AppImage
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: storage-goblin-bundle-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.new_tag }}
+          name: Storage Goblin ${{ needs.prepare.outputs.new_tag }}
+          generate_release_notes: true
+          files: |
+            release-assets/**/*.exe
+            release-assets/**/*.dmg
+            release-assets/**/*.deb
+            release-assets/**/*.AppImage

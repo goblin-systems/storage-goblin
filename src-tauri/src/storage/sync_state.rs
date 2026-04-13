@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
+use std::time::{Duration, Instant};
 use tauri::{Manager, State};
 
 use super::{
@@ -11,6 +13,7 @@ use super::{
     profile_store::{is_pair_configured, is_profile_configured, StoredProfile, SyncPair},
     remote_index::RemoteIndexSnapshot,
     sync_db::DurablePlannerSummary,
+    watchers::ActivePairWatcher,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,10 +101,22 @@ struct PollingWorkerState {
     stop_signal: Option<Arc<AtomicBool>>,
 }
 
+struct DirtyPairState {
+    last_marked_at: Instant,
+}
+
+#[derive(Default)]
+struct WatcherRuntimeState {
+    active_watchers: BTreeMap<String, ActivePairWatcher>,
+}
+
 #[derive(Default)]
 pub struct SyncState {
     status: Mutex<SyncStatus>,
+    pair_statuses: Mutex<BTreeMap<String, PairSyncStatus>>,
     polling_worker: Mutex<PollingWorkerState>,
+    watcher_runtime: Mutex<WatcherRuntimeState>,
+    dirty_pairs: Mutex<BTreeMap<String, DirtyPairState>>,
     cycle_running: AtomicBool,
 }
 
@@ -115,8 +130,8 @@ pub(crate) fn get_status_lock<'a>(
 }
 
 /// Update the global `SyncStatus` using an `AppHandle` (for use inside spawned tasks).
-pub(crate) fn set_status_from_handle(
-    app: &tauri::AppHandle,
+pub(crate) fn set_status_from_handle<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     status: SyncStatus,
 ) -> Result<(), String> {
     let state = app.state::<SyncState>();
@@ -125,6 +140,51 @@ pub(crate) fn set_status_from_handle(
         .lock()
         .map_err(|_| "sync status lock poisoned".to_string())?;
     *lock = status;
+    Ok(())
+}
+
+pub(crate) fn pair_statuses_snapshot(
+    state: &State<'_, SyncState>,
+) -> Result<BTreeMap<String, PairSyncStatus>, String> {
+    pair_statuses_snapshot_inner(&**state)
+}
+
+fn pair_statuses_snapshot_inner(
+    state: &SyncState,
+) -> Result<BTreeMap<String, PairSyncStatus>, String> {
+    state
+        .pair_statuses
+        .lock()
+        .map(|lock| lock.clone())
+        .map_err(|_| "pair sync status lock poisoned".to_string())
+}
+
+pub(crate) fn set_pair_status_from_handle<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    status: PairSyncStatus,
+) -> Result<(), String> {
+    let state = app.state::<SyncState>();
+    let mut lock = state
+        .pair_statuses
+        .lock()
+        .map_err(|_| "pair sync status lock poisoned".to_string())?;
+    lock.insert(status.pair_id.clone(), status);
+    Ok(())
+}
+
+pub(crate) fn replace_pair_statuses_from_handle<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    statuses: Vec<PairSyncStatus>,
+) -> Result<(), String> {
+    let state = app.state::<SyncState>();
+    let mut lock = state
+        .pair_statuses
+        .lock()
+        .map_err(|_| "pair sync status lock poisoned".to_string())?;
+    *lock = statuses
+        .into_iter()
+        .map(|status| (status.pair_id.clone(), status))
+        .collect();
     Ok(())
 }
 
@@ -169,6 +229,17 @@ fn stop_polling_worker_inner(state: &SyncState) -> Result<bool, String> {
 
     stop_signal.store(true, Ordering::SeqCst);
     worker.active_worker_id = None;
+    state
+        .watcher_runtime
+        .lock()
+        .map_err(|_| "watcher runtime lock poisoned".to_string())?
+        .active_watchers
+        .clear();
+    state
+        .dirty_pairs
+        .lock()
+        .map_err(|_| "dirty pair lock poisoned".to_string())?
+        .clear();
     Ok(true)
 }
 
@@ -193,6 +264,14 @@ fn clear_polling_worker_inner(state: &SyncState, worker_id: u64) -> Result<(), S
     Ok(())
 }
 
+pub(crate) fn polling_worker_active(state: &State<'_, SyncState>) -> Result<bool, String> {
+    state
+        .polling_worker
+        .lock()
+        .map(|worker| worker.active_worker_id.is_some())
+        .map_err(|_| "polling worker lock poisoned".to_string())
+}
+
 pub(crate) fn try_begin_sync_cycle(state: &State<'_, SyncState>) -> bool {
     try_begin_sync_cycle_inner(&**state)
 }
@@ -210,6 +289,183 @@ pub(crate) fn finish_sync_cycle(state: &State<'_, SyncState>) {
 
 fn finish_sync_cycle_inner(state: &SyncState) {
     state.cycle_running.store(false, Ordering::SeqCst);
+}
+
+pub(crate) fn install_pair_watcher(
+    state: &State<'_, SyncState>,
+    pair_id: String,
+    watcher: ActivePairWatcher,
+) -> Result<(), String> {
+    install_pair_watcher_inner(&**state, pair_id, watcher)
+}
+
+fn install_pair_watcher_inner(
+    state: &SyncState,
+    pair_id: String,
+    watcher: ActivePairWatcher,
+) -> Result<(), String> {
+    state
+        .watcher_runtime
+        .lock()
+        .map_err(|_| "watcher runtime lock poisoned".to_string())?
+        .active_watchers
+        .insert(pair_id, watcher);
+    Ok(())
+}
+
+pub(crate) fn remove_pair_watcher(
+    state: &State<'_, SyncState>,
+    pair_id: &str,
+) -> Result<(), String> {
+    remove_pair_watcher_inner(&**state, pair_id)
+}
+
+fn remove_pair_watcher_inner(state: &SyncState, pair_id: &str) -> Result<(), String> {
+    state
+        .watcher_runtime
+        .lock()
+        .map_err(|_| "watcher runtime lock poisoned".to_string())?
+        .active_watchers
+        .remove(pair_id);
+    state
+        .dirty_pairs
+        .lock()
+        .map_err(|_| "dirty pair lock poisoned".to_string())?
+        .remove(pair_id);
+    Ok(())
+}
+
+pub(crate) fn clear_all_pair_watchers(state: &State<'_, SyncState>) -> Result<(), String> {
+    clear_all_pair_watchers_inner(&**state)
+}
+
+fn clear_all_pair_watchers_inner(state: &SyncState) -> Result<(), String> {
+    state
+        .watcher_runtime
+        .lock()
+        .map_err(|_| "watcher runtime lock poisoned".to_string())?
+        .active_watchers
+        .clear();
+    Ok(())
+}
+
+pub(crate) fn active_watcher_pair_paths(
+    state: &State<'_, SyncState>,
+) -> Result<BTreeMap<String, std::path::PathBuf>, String> {
+    active_watcher_pair_paths_inner(&**state)
+}
+
+fn active_watcher_pair_paths_inner(
+    state: &SyncState,
+) -> Result<BTreeMap<String, std::path::PathBuf>, String> {
+    state
+        .watcher_runtime
+        .lock()
+        .map_err(|_| "watcher runtime lock poisoned".to_string())
+        .map(|runtime| {
+            runtime
+                .active_watchers
+                .iter()
+                .map(|(pair_id, watcher)| (pair_id.clone(), watcher.root_path().to_path_buf()))
+                .collect()
+        })
+}
+
+pub(crate) fn pair_has_active_watcher(
+    state: &State<'_, SyncState>,
+    pair_id: &str,
+) -> Result<bool, String> {
+    state
+        .watcher_runtime
+        .lock()
+        .map_err(|_| "watcher runtime lock poisoned".to_string())
+        .map(|runtime| runtime.active_watchers.contains_key(pair_id))
+}
+
+pub(crate) fn mark_pair_dirty(state: &State<'_, SyncState>, pair_id: &str) -> Result<(), String> {
+    mark_pair_dirty_at_inner(&**state, pair_id, Instant::now())
+}
+
+fn mark_pair_dirty_at_inner(state: &SyncState, pair_id: &str, now: Instant) -> Result<(), String> {
+    state
+        .dirty_pairs
+        .lock()
+        .map_err(|_| "dirty pair lock poisoned".to_string())?
+        .insert(
+            pair_id.to_string(),
+            DirtyPairState {
+                last_marked_at: now,
+            },
+        );
+    Ok(())
+}
+
+pub(crate) fn due_dirty_pairs(
+    state: &State<'_, SyncState>,
+    now: Instant,
+    debounce: Duration,
+) -> Result<Vec<String>, String> {
+    due_dirty_pairs_inner(&**state, now, debounce)
+}
+
+fn due_dirty_pairs_inner(
+    state: &SyncState,
+    now: Instant,
+    debounce: Duration,
+) -> Result<Vec<String>, String> {
+    let dirty_pairs = state
+        .dirty_pairs
+        .lock()
+        .map_err(|_| "dirty pair lock poisoned".to_string())?;
+
+    Ok(dirty_pairs
+        .iter()
+        .filter_map(|(pair_id, entry)| {
+            (now.saturating_duration_since(entry.last_marked_at) >= debounce)
+                .then(|| pair_id.clone())
+        })
+        .collect())
+}
+
+pub(crate) fn next_dirty_pair_deadline(
+    state: &State<'_, SyncState>,
+    debounce: Duration,
+) -> Result<Option<Instant>, String> {
+    state
+        .dirty_pairs
+        .lock()
+        .map_err(|_| "dirty pair lock poisoned".to_string())
+        .map(|dirty_pairs| {
+            dirty_pairs
+                .values()
+                .map(|entry| entry.last_marked_at + debounce)
+                .min()
+        })
+}
+
+pub(crate) fn clear_dirty_pair(state: &State<'_, SyncState>, pair_id: &str) -> Result<(), String> {
+    clear_dirty_pair_inner(&**state, pair_id)
+}
+
+fn clear_dirty_pair_inner(state: &SyncState, pair_id: &str) -> Result<(), String> {
+    state
+        .dirty_pairs
+        .lock()
+        .map_err(|_| "dirty pair lock poisoned".to_string())?
+        .remove(pair_id);
+    Ok(())
+}
+
+pub(crate) fn retain_dirty_pairs(
+    state: &State<'_, SyncState>,
+    pair_ids: &BTreeSet<String>,
+) -> Result<(), String> {
+    state
+        .dirty_pairs
+        .lock()
+        .map_err(|_| "dirty pair lock poisoned".to_string())?
+        .retain(|pair_id, _| pair_ids.contains(pair_id));
+    Ok(())
 }
 
 pub(crate) fn profile_to_status(
@@ -676,8 +932,9 @@ pub(crate) fn aggregate_pair_statuses(statuses: &[PairSyncStatus]) -> AggregateS
 #[cfg(test)]
 mod tests {
     use super::{
-        aggregate_pair_statuses, begin_polling_worker_inner, clear_polling_worker_inner,
-        finish_sync_cycle_inner, pair_to_status, profile_to_status, stop_polling_worker_inner,
+        aggregate_pair_statuses, begin_polling_worker_inner, clear_dirty_pair_inner,
+        clear_polling_worker_inner, due_dirty_pairs_inner, finish_sync_cycle_inner,
+        mark_pair_dirty_at_inner, pair_to_status, profile_to_status, stop_polling_worker_inner,
         synthesize_status_from_pairs, try_begin_sync_cycle_inner, PairSyncStatus, SyncState,
         SyncStatusStats,
     };
@@ -689,7 +946,10 @@ mod tests {
         sync_db::DurablePlannerSummary,
     };
     use serde_json::json;
-    use std::sync::atomic::Ordering;
+    use std::{
+        sync::atomic::Ordering,
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn derives_simple_stats_from_comparison_and_plan() {
@@ -702,7 +962,7 @@ mod tests {
             ..StoredProfile::default()
         };
         let local = LocalIndexSnapshot {
-            version: 1,
+            version: 2,
             root_folder: "C:/sync".into(),
             summary: LocalIndexSummary::default(),
             entries: vec![
@@ -711,18 +971,21 @@ mod tests {
                     kind: "file".into(),
                     size: 5,
                     modified_at: None,
+                    fingerprint: Some(crate::storage::local_index::bytes_fingerprint(b"alpha")),
                 },
                 LocalIndexEntry {
                     relative_path: "beta.txt".into(),
                     kind: "file".into(),
                     size: 8,
                     modified_at: None,
+                    fingerprint: Some(crate::storage::local_index::bytes_fingerprint(b"beta")),
                 },
             ],
         };
         let remote = RemoteIndexSnapshot {
-            version: 1,
+            version: 2,
             bucket: "demo".into(),
+            excluded_prefixes: Vec::new(),
             summary: RemoteIndexSummary::default(),
             entries: vec![
                 RemoteObjectEntry {
@@ -840,6 +1103,39 @@ mod tests {
         assert!(try_begin_sync_cycle_inner(&state));
     }
 
+    #[test]
+    fn dirty_pairs_become_due_after_debounce_and_clear_after_processing() {
+        let state = SyncState::default();
+        let marked_at = Instant::now();
+
+        mark_pair_dirty_at_inner(&state, "pair-a", marked_at).expect("pair should mark dirty");
+
+        assert!(due_dirty_pairs_inner(
+            &state,
+            marked_at + Duration::from_millis(249),
+            Duration::from_millis(250)
+        )
+        .expect("due pairs should read")
+        .is_empty());
+        assert_eq!(
+            due_dirty_pairs_inner(
+                &state,
+                marked_at + Duration::from_millis(250),
+                Duration::from_millis(250)
+            )
+            .expect("due pairs should read"),
+            vec!["pair-a".to_string()]
+        );
+
+        mark_pair_dirty_at_inner(&state, "pair-a", marked_at).expect("pair should mark dirty");
+        clear_dirty_pair_inner(&state, "pair-a").expect("dirty pair should clear");
+        assert!(
+            due_dirty_pairs_inner(&state, marked_at + Duration::from_secs(1), Duration::ZERO)
+                .expect("due pairs should read")
+                .is_empty()
+        );
+    }
+
     // --- PairSyncStatus tests ---
 
     #[test]
@@ -925,24 +1221,28 @@ mod tests {
                     kind: "file".into(),
                     size: 10,
                     modified_at: None,
+                    fingerprint: Some(crate::storage::local_index::bytes_fingerprint(b"alpha")),
                 },
                 LocalIndexEntry {
                     relative_path: "beta.txt".into(),
                     kind: "file".into(),
                     size: 20,
                     modified_at: None,
+                    fingerprint: Some(crate::storage::local_index::bytes_fingerprint(b"beta")),
                 },
                 LocalIndexEntry {
                     relative_path: "gamma.txt".into(),
                     kind: "file".into(),
                     size: 70,
                     modified_at: None,
+                    fingerprint: Some(crate::storage::local_index::bytes_fingerprint(b"gamma")),
                 },
             ],
         };
         let remote = RemoteIndexSnapshot {
             version: 1,
             bucket: "demo".into(),
+            excluded_prefixes: Vec::new(),
             summary: RemoteIndexSummary {
                 indexed_at: "2026-04-04T10:05:00Z".into(),
                 object_count: 2,

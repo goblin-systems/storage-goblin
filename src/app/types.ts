@@ -1,4 +1,6 @@
-export type ConflictStrategy = "preserve-both";
+export const CONFLICT_STRATEGIES = ["preserve-both", "prefer-local", "prefer-remote"] as const;
+
+export type ConflictStrategy = typeof CONFLICT_STRATEGIES[number];
 
 export type SyncPhase =
   | "unconfigured"
@@ -55,6 +57,34 @@ export interface CredentialTestResult {
   permissions: PermissionProbeSummary | null;
 }
 
+export interface RemoteBinConfig {
+  enabled: boolean;
+  retentionDays: number;
+}
+
+export type BinEntryKind = "file" | "directory";
+
+export type BinEntrySource = "remote-bin" | "object-versioning";
+
+export interface BinEntryRequest {
+  path: string;
+  kind: BinEntryKind;
+  binKey?: string | null;
+}
+
+export interface BinEntryMutationResult {
+  path: string;
+  kind: BinEntryKind;
+  binKey?: string | null;
+  success: boolean;
+  affectedCount: number;
+  error?: string | null;
+}
+
+export interface BinEntryMutationSummary {
+  results: BinEntryMutationResult[];
+}
+
 export interface StoredStorageProfile {
   localFolder: string;
   region: string;
@@ -62,7 +92,6 @@ export interface StoredStorageProfile {
   remotePollingEnabled: boolean;
   pollIntervalSeconds: number;
   conflictStrategy: ConflictStrategy;
-  deleteSafetyHours: number;
   activityDebugModeEnabled: boolean;
   credentialProfileId: string | null;
   selectedCredential: CredentialSummary | null;
@@ -162,11 +191,12 @@ export interface SyncLocation {
   region: string;
   bucket: string;
   credentialProfileId: string | null;
+  objectVersioningEnabled: boolean;
   enabled: boolean;
   remotePollingEnabled: boolean;
   pollIntervalSeconds: number;
   conflictStrategy: ConflictStrategy;
-  deleteSafetyHours: number;
+  remoteBin: RemoteBinConfig;
 }
 
 export interface SyncLocationDraft {
@@ -176,11 +206,25 @@ export interface SyncLocationDraft {
   region: string;
   bucket: string;
   credentialProfileId: string | null;
+  objectVersioningEnabled: boolean;
   enabled: boolean;
   remotePollingEnabled: boolean;
   pollIntervalSeconds: number;
   conflictStrategy: ConflictStrategy;
-  deleteSafetyHours: number;
+  remoteBin: RemoteBinConfig;
+}
+
+export interface ConflictResolutionDetails {
+  locationId: string;
+  path: string;
+  mode: "image" | "text" | "external";
+  localPath: string | null;
+  remoteTempPath: string | null;
+  localText: string | null;
+  remoteText: string | null;
+  localImageDataUrl: string | null;
+  remoteImageDataUrl: string | null;
+  fallbackReason: string | null;
 }
 
 export interface SyncStatusStats {

@@ -51,7 +51,26 @@ src-tauri/             -- Rust backend (Tauri commands, S3 SDK calls, SQLite)
 
 ## Status
 
-Early stage (v0.1.0). Functional sync pipeline and file browser are in place. Not yet implemented: filesystem watcher (polling only for now), delete safety delay, full crash recovery, and conflict strategies beyond "preserve-both".
+Early stage (v0.1.0). Functional sync pipeline, multi-location sync orchestration, durable sync-plan recovery, local filesystem watcher support, remote bin restore flows, and file browser are in place. Not yet implemented: object versioning.
+
+## Roadmap
+
+### Now
+
+- Object versioning-aware workflows for safer recovery and history.
+- Richer conflict handling beyond size-based file/file decisions.
+- Clearer conflict diagnostics and recovery tooling in the UI.
+
+### Next
+
+- More advanced sync safety and auditability features.
+- Bulk remote bin operations and richer restore flows.
+- Deeper watcher observability and watcher-health surfacing.
+
+### Later
+
+- Content-aware reconciliation and history workflows built on versioning.
+- Broader operational tooling for support, diagnostics, and reporting.
 
 ## License
 

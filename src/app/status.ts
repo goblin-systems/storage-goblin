@@ -1,4 +1,4 @@
-import type { SyncPhase, SyncStatus, SyncOverviewStats } from "./types";
+import type { LocationSyncStatus, SyncPhase, SyncStatus, SyncOverviewStats } from "./types";
 
 export interface StatusPresentation {
   badgeLabel: string;
@@ -30,13 +30,15 @@ function isGenericSyncError(lastError: string | null | undefined): boolean {
   ].some((pattern) => pattern.test(normalized));
 }
 
-export function getSyncOverviewStats(status: SyncStatus): SyncOverviewStats {
+export function getSyncOverviewStats(status: SyncStatus | LocationSyncStatus): SyncOverviewStats {
+  const overview = "overview" in status ? status.overview : undefined;
+  const actionableChangeCount = status.plan.pendingOperationCount ?? status.pendingOperations;
   return {
-    localFiles: status.overview?.localFiles ?? status.comparison.localFileCount ?? status.indexedFileCount,
-    remoteFiles: status.overview?.remoteFiles ?? status.comparison.remoteObjectCount ?? status.remoteObjectCount,
-    inSync: status.overview?.inSync ?? status.comparison.exactMatchCount,
-    notInSync: status.overview?.notInSync
-      ?? status.comparison.localOnlyCount + status.comparison.remoteOnlyCount + status.comparison.sizeMismatchCount,
+    localFiles: overview?.localFiles ?? status.comparison.localFileCount ?? status.indexedFileCount,
+    remoteFiles: overview?.remoteFiles ?? status.comparison.remoteObjectCount ?? status.remoteObjectCount,
+    inSync: overview?.inSync ?? status.comparison.exactMatchCount,
+    notInSync: overview?.notInSync
+      ?? actionableChangeCount,
   };
 }
 
@@ -51,7 +53,7 @@ function titleCasePhase(phase: SyncPhase): string {
   }
 }
 
-export function describeSyncStatus(status: SyncStatus): StatusPresentation {
+export function describeSyncStatus(status: SyncStatus | LocationSyncStatus): StatusPresentation {
   switch (status.phase) {
     case "polling":
       return {

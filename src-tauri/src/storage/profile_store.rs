@@ -11,6 +11,52 @@ use super::{
     LOCAL_INDEX_FILE_NAME, PROFILE_FILE_NAME, REMOTE_INDEX_FILE_NAME,
 };
 
+const DEFAULT_REMOTE_BIN_RETENTION_DAYS: u32 = 7;
+
+const CONFLICT_STRATEGY_PRESERVE_BOTH: &str = "preserve-both";
+const CONFLICT_STRATEGY_PREFER_LOCAL: &str = "prefer-local";
+const CONFLICT_STRATEGY_PREFER_REMOTE: &str = "prefer-remote";
+
+pub fn normalize_conflict_strategy(value: &str) -> String {
+    match value.trim() {
+        CONFLICT_STRATEGY_PRESERVE_BOTH => CONFLICT_STRATEGY_PRESERVE_BOTH.into(),
+        CONFLICT_STRATEGY_PREFER_LOCAL => CONFLICT_STRATEGY_PREFER_LOCAL.into(),
+        CONFLICT_STRATEGY_PREFER_REMOTE => CONFLICT_STRATEGY_PREFER_REMOTE.into(),
+        _ => CONFLICT_STRATEGY_PRESERVE_BOTH.into(),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RemoteBinConfig {
+    pub enabled: bool,
+    pub retention_days: u32,
+}
+
+impl Default for RemoteBinConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            retention_days: DEFAULT_REMOTE_BIN_RETENTION_DAYS,
+        }
+    }
+}
+
+impl RemoteBinConfig {
+    pub fn normalized(mut self) -> Self {
+        self.retention_days = self.retention_days.clamp(1, 3650);
+        self
+    }
+
+    fn from_legacy_delete_safety_hours(delete_safety_hours: u32) -> Self {
+        let retention_days = ((delete_safety_hours.max(1)) as f64 / 24_f64).ceil() as u32;
+        Self {
+            enabled: true,
+            retention_days: retention_days.clamp(1, 3650),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionValidationResult {
@@ -31,7 +77,10 @@ pub struct ConnectionValidationInput {
     pub remote_polling_enabled: bool,
     pub poll_interval_seconds: u32,
     pub conflict_strategy: String,
-    pub delete_safety_hours: u32,
+    #[serde(default)]
+    pub object_versioning_enabled: bool,
+    #[serde(default)]
+    pub remote_bin: RemoteBinConfig,
     pub activity_debug_mode_enabled: bool,
 }
 
@@ -51,7 +100,8 @@ pub struct StoredProfile {
     pub remote_polling_enabled: bool,
     pub poll_interval_seconds: u32,
     pub conflict_strategy: String,
-    pub delete_safety_hours: u32,
+    #[serde(default)]
+    pub remote_bin: RemoteBinConfig,
     pub activity_debug_mode_enabled: bool,
     pub credential_profile_id: Option<String>,
     pub selected_credential: Option<CredentialSummary>,
@@ -73,8 +123,8 @@ impl Default for StoredProfile {
             bucket: String::new(),
             remote_polling_enabled: true,
             poll_interval_seconds: 60,
-            conflict_strategy: "preserve-both".into(),
-            delete_safety_hours: 24,
+            conflict_strategy: CONFLICT_STRATEGY_PRESERVE_BOTH.into(),
+            remote_bin: RemoteBinConfig::default(),
             activity_debug_mode_enabled: false,
             credential_profile_id: None,
             selected_credential: None,
@@ -96,7 +146,10 @@ struct PersistedProfile {
     pub remote_polling_enabled: bool,
     pub poll_interval_seconds: u32,
     pub conflict_strategy: String,
-    pub delete_safety_hours: u32,
+    #[serde(default)]
+    pub remote_bin: Option<RemoteBinConfig>,
+    #[serde(default)]
+    pub delete_safety_hours: Option<u32>,
     pub activity_debug_mode_enabled: bool,
     pub credential_profile_id: Option<String>,
     #[serde(default, alias = "syncLocations")]
@@ -115,8 +168,9 @@ impl Default for PersistedProfile {
             bucket: String::new(),
             remote_polling_enabled: true,
             poll_interval_seconds: 60,
-            conflict_strategy: "preserve-both".into(),
-            delete_safety_hours: 24,
+            conflict_strategy: CONFLICT_STRATEGY_PRESERVE_BOTH.into(),
+            remote_bin: Some(RemoteBinConfig::default()),
+            delete_safety_hours: None,
             activity_debug_mode_enabled: false,
             credential_profile_id: None,
             sync_pairs: Vec::new(),
@@ -140,7 +194,8 @@ pub struct ProfileDraft {
     pub remote_polling_enabled: bool,
     pub poll_interval_seconds: u32,
     pub conflict_strategy: String,
-    pub delete_safety_hours: u32,
+    #[serde(default)]
+    pub remote_bin: RemoteBinConfig,
     pub activity_debug_mode_enabled: bool,
 }
 
@@ -150,8 +205,8 @@ impl StoredProfile {
         self.region = self.region.trim().to_string();
         self.bucket = self.bucket.trim().to_string();
         self.poll_interval_seconds = self.poll_interval_seconds.clamp(15, 3600);
-        self.conflict_strategy = "preserve-both".into();
-        self.delete_safety_hours = self.delete_safety_hours.clamp(1, 168);
+        self.conflict_strategy = normalize_conflict_strategy(&self.conflict_strategy);
+        self.remote_bin = self.remote_bin.normalized();
         self.credential_profile_id = normalize_optional_id(self.credential_profile_id.take());
         if self
             .selected_credential
@@ -216,8 +271,8 @@ impl From<ProfileDraft> for StoredProfile {
             bucket: value.bucket.trim().to_string(),
             remote_polling_enabled: value.remote_polling_enabled,
             poll_interval_seconds: value.poll_interval_seconds.clamp(15, 3600),
-            conflict_strategy: "preserve-both".into(),
-            delete_safety_hours: value.delete_safety_hours.clamp(1, 168),
+            conflict_strategy: normalize_conflict_strategy(&value.conflict_strategy),
+            remote_bin: value.remote_bin.normalized(),
             activity_debug_mode_enabled: value.activity_debug_mode_enabled,
             credential_profile_id: normalize_optional_id(value.credential_profile_id),
             selected_credential: None,
@@ -246,7 +301,15 @@ impl From<PersistedProfile> for StoredProfile {
             remote_polling_enabled: value.remote_polling_enabled,
             poll_interval_seconds: value.poll_interval_seconds,
             conflict_strategy: value.conflict_strategy,
-            delete_safety_hours: value.delete_safety_hours,
+            remote_bin: value
+                .remote_bin
+                .unwrap_or_else(|| {
+                    value
+                        .delete_safety_hours
+                        .map(RemoteBinConfig::from_legacy_delete_safety_hours)
+                        .unwrap_or_default()
+                })
+                .normalized(),
             activity_debug_mode_enabled: value.activity_debug_mode_enabled,
             credential_profile_id: normalize_optional_id(value.credential_profile_id),
             selected_credential: None,
@@ -269,7 +332,8 @@ impl From<&StoredProfile> for PersistedProfile {
             remote_polling_enabled: value.remote_polling_enabled,
             poll_interval_seconds: value.poll_interval_seconds,
             conflict_strategy: value.conflict_strategy.clone(),
-            delete_safety_hours: value.delete_safety_hours,
+            remote_bin: Some(value.remote_bin.clone()),
+            delete_safety_hours: None,
             activity_debug_mode_enabled: value.activity_debug_mode_enabled,
             credential_profile_id: value.credential_profile_id.clone(),
             sync_pairs: value
@@ -351,11 +415,14 @@ pub struct SyncPair {
     pub region: String,
     pub bucket: String,
     pub credential_profile_id: Option<String>,
+    #[serde(default)]
+    pub object_versioning_enabled: bool,
     pub enabled: bool,
     pub remote_polling_enabled: bool,
     pub poll_interval_seconds: u32,
     pub conflict_strategy: String,
-    pub delete_safety_hours: u32,
+    #[serde(default)]
+    pub remote_bin: RemoteBinConfig,
 }
 
 impl Default for SyncPair {
@@ -367,11 +434,12 @@ impl Default for SyncPair {
             region: String::new(),
             bucket: String::new(),
             credential_profile_id: None,
+            object_versioning_enabled: false,
             enabled: true,
             remote_polling_enabled: true,
             poll_interval_seconds: 60,
-            conflict_strategy: "preserve-both".into(),
-            delete_safety_hours: 24,
+            conflict_strategy: CONFLICT_STRATEGY_PRESERVE_BOTH.into(),
+            remote_bin: RemoteBinConfig::default(),
         }
     }
 }
@@ -387,8 +455,11 @@ impl SyncPair {
         self.region = self.region.trim().to_string();
         self.bucket = self.bucket.trim().to_string();
         self.poll_interval_seconds = self.poll_interval_seconds.clamp(15, 3600);
-        self.conflict_strategy = "preserve-both".into();
-        self.delete_safety_hours = self.delete_safety_hours.clamp(1, 168);
+        self.conflict_strategy = normalize_conflict_strategy(&self.conflict_strategy);
+        self.remote_bin = self.remote_bin.normalized();
+        if self.object_versioning_enabled {
+            self.remote_bin.enabled = false;
+        }
         self.credential_profile_id = normalize_optional_id(self.credential_profile_id.take());
         self
     }
@@ -407,11 +478,16 @@ pub struct PersistedSyncPair {
     pub region: String,
     pub bucket: String,
     pub credential_profile_id: Option<String>,
+    #[serde(default)]
+    pub object_versioning_enabled: bool,
     pub enabled: bool,
     pub remote_polling_enabled: bool,
     pub poll_interval_seconds: u32,
     pub conflict_strategy: String,
-    pub delete_safety_hours: u32,
+    #[serde(default)]
+    pub remote_bin: Option<RemoteBinConfig>,
+    #[serde(default)]
+    pub delete_safety_hours: Option<u32>,
 }
 
 impl From<&SyncPair> for PersistedSyncPair {
@@ -423,11 +499,13 @@ impl From<&SyncPair> for PersistedSyncPair {
             region: value.region.clone(),
             bucket: value.bucket.clone(),
             credential_profile_id: value.credential_profile_id.clone(),
+            object_versioning_enabled: value.object_versioning_enabled,
             enabled: value.enabled,
             remote_polling_enabled: value.remote_polling_enabled,
             poll_interval_seconds: value.poll_interval_seconds,
             conflict_strategy: value.conflict_strategy.clone(),
-            delete_safety_hours: value.delete_safety_hours,
+            remote_bin: Some(value.remote_bin.clone()),
+            delete_safety_hours: None,
         }
     }
 }
@@ -441,11 +519,17 @@ impl From<PersistedSyncPair> for SyncPair {
             region: value.region,
             bucket: value.bucket,
             credential_profile_id: value.credential_profile_id,
+            object_versioning_enabled: value.object_versioning_enabled,
             enabled: value.enabled,
             remote_polling_enabled: value.remote_polling_enabled,
             poll_interval_seconds: value.poll_interval_seconds,
             conflict_strategy: value.conflict_strategy,
-            delete_safety_hours: value.delete_safety_hours,
+            remote_bin: value.remote_bin.unwrap_or_else(|| {
+                value
+                    .delete_safety_hours
+                    .map(RemoteBinConfig::from_legacy_delete_safety_hours)
+                    .unwrap_or_default()
+            }),
         }
     }
 }
@@ -459,11 +543,14 @@ pub struct SyncPairDraft {
     pub region: String,
     pub bucket: String,
     pub credential_profile_id: Option<String>,
+    #[serde(default)]
+    pub object_versioning_enabled: bool,
     pub enabled: bool,
     pub remote_polling_enabled: bool,
     pub poll_interval_seconds: u32,
     pub conflict_strategy: String,
-    pub delete_safety_hours: u32,
+    #[serde(default)]
+    pub remote_bin: RemoteBinConfig,
 }
 
 /// Migrate flat profile fields into a `SyncPair` when `sync_pairs` is empty
@@ -487,11 +574,12 @@ fn migrate_flat_fields_to_sync_pairs(profile: &mut StoredProfile) -> bool {
         region: profile.region.clone(),
         bucket: profile.bucket.clone(),
         credential_profile_id: profile.credential_profile_id.clone(),
+        object_versioning_enabled: false,
         enabled: true,
         remote_polling_enabled: profile.remote_polling_enabled,
         poll_interval_seconds: profile.poll_interval_seconds,
         conflict_strategy: profile.conflict_strategy.clone(),
-        delete_safety_hours: profile.delete_safety_hours,
+        remote_bin: profile.remote_bin.clone(),
     }
     .normalized();
     profile.sync_pairs.push(pair);
@@ -502,8 +590,11 @@ fn migrate_flat_fields_to_sync_pairs(profile: &mut StoredProfile) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_pair_configured, migrate_flat_fields_to_sync_pairs, PersistedProfile, PersistedSyncPair,
-        ProfileDraft, SelectedCredentialState, StoredProfile, SyncPair,
+        is_pair_configured, migrate_flat_fields_to_sync_pairs, normalize_conflict_strategy,
+        validate_bucket_pair_invariant, PersistedProfile, PersistedSyncPair, ProfileDraft,
+        RemoteBinConfig, SelectedCredentialState, StoredProfile, SyncPair,
+        CONFLICT_STRATEGY_PREFER_LOCAL, CONFLICT_STRATEGY_PREFER_REMOTE,
+        CONFLICT_STRATEGY_PRESERVE_BOTH,
     };
     use crate::storage::credentials_store::CredentialSummary;
 
@@ -519,19 +610,49 @@ mod tests {
             remote_polling_enabled: false,
             poll_interval_seconds: 1,
             conflict_strategy: "ignored".into(),
-            delete_safety_hours: 999,
+            remote_bin: RemoteBinConfig {
+                enabled: true,
+                retention_days: 9_999,
+            },
             activity_debug_mode_enabled: true,
         });
 
         assert_eq!(stored.local_folder, "C:/sync");
         assert_eq!(stored.bucket, "demo-bucket");
         assert_eq!(stored.poll_interval_seconds, 15);
-        assert_eq!(stored.delete_safety_hours, 168);
+        assert_eq!(
+            stored.remote_bin,
+            RemoteBinConfig {
+                enabled: true,
+                retention_days: 3650
+            }
+        );
         assert!(stored.activity_debug_mode_enabled);
         assert_eq!(stored.credential_profile_id.as_deref(), Some("cred-1"));
         assert!(stored.selected_credential.is_none());
         assert!(!stored.selected_credential_available);
         assert!(!stored.credentials_stored_securely);
+        assert_eq!(stored.conflict_strategy, CONFLICT_STRATEGY_PRESERVE_BOTH);
+    }
+
+    #[test]
+    fn normalize_conflict_strategy_accepts_valid_values_and_falls_back() {
+        assert_eq!(
+            normalize_conflict_strategy("preserve-both"),
+            CONFLICT_STRATEGY_PRESERVE_BOTH
+        );
+        assert_eq!(
+            normalize_conflict_strategy("prefer-local"),
+            CONFLICT_STRATEGY_PREFER_LOCAL
+        );
+        assert_eq!(
+            normalize_conflict_strategy("prefer-remote"),
+            CONFLICT_STRATEGY_PREFER_REMOTE
+        );
+        assert_eq!(
+            normalize_conflict_strategy("ignored"),
+            CONFLICT_STRATEGY_PRESERVE_BOTH
+        );
     }
 
     #[test]
@@ -609,7 +730,7 @@ mod tests {
         assert!(pair.remote_polling_enabled);
         assert_eq!(pair.poll_interval_seconds, 60);
         assert_eq!(pair.conflict_strategy, "preserve-both");
-        assert_eq!(pair.delete_safety_hours, 24);
+        assert_eq!(pair.remote_bin, RemoteBinConfig::default());
     }
 
     #[test]
@@ -621,11 +742,15 @@ mod tests {
             region: " eu-west-1 ".into(),
             bucket: " my-bucket ".into(),
             credential_profile_id: Some("  cred-1  ".into()),
+            object_versioning_enabled: true,
             enabled: true,
             remote_polling_enabled: false,
             poll_interval_seconds: 5, // below minimum 15
             conflict_strategy: "ignored".into(),
-            delete_safety_hours: 500, // above maximum 168
+            remote_bin: RemoteBinConfig {
+                enabled: true,
+                retention_days: 5_000,
+            },
         }
         .normalized();
 
@@ -635,9 +760,16 @@ mod tests {
         assert_eq!(pair.region, "eu-west-1");
         assert_eq!(pair.bucket, "my-bucket");
         assert_eq!(pair.credential_profile_id.as_deref(), Some("cred-1"));
+        assert!(pair.object_versioning_enabled);
         assert_eq!(pair.poll_interval_seconds, 15);
-        assert_eq!(pair.conflict_strategy, "preserve-both");
-        assert_eq!(pair.delete_safety_hours, 168);
+        assert_eq!(pair.conflict_strategy, CONFLICT_STRATEGY_PRESERVE_BOTH);
+        assert_eq!(
+            pair.remote_bin,
+            RemoteBinConfig {
+                enabled: false,
+                retention_days: 3650
+            }
+        );
     }
 
     #[test]
@@ -694,11 +826,15 @@ mod tests {
             region: "us-east-1".into(),
             bucket: "my-bucket".into(),
             credential_profile_id: Some("cred-1".into()),
+            object_versioning_enabled: false,
             enabled: false,
             remote_polling_enabled: false,
             poll_interval_seconds: 120,
             conflict_strategy: "preserve-both".into(),
-            delete_safety_hours: 48,
+            remote_bin: RemoteBinConfig {
+                enabled: false,
+                retention_days: 30,
+            },
         };
 
         let persisted = PersistedSyncPair::from(&original);
@@ -711,6 +847,14 @@ mod tests {
         assert_eq!(restored.bucket, "my-bucket");
         assert_eq!(restored.poll_interval_seconds, 120);
         assert!(!restored.enabled);
+        assert_eq!(restored.conflict_strategy, CONFLICT_STRATEGY_PRESERVE_BOTH);
+        assert_eq!(
+            restored.remote_bin,
+            RemoteBinConfig {
+                enabled: false,
+                retention_days: 30
+            }
+        );
     }
 
     #[test]
@@ -723,7 +867,10 @@ mod tests {
             remote_polling_enabled: false,
             poll_interval_seconds: 120,
             conflict_strategy: "preserve-both".into(),
-            delete_safety_hours: 48,
+            remote_bin: RemoteBinConfig {
+                enabled: true,
+                retention_days: 14,
+            },
             ..StoredProfile::default()
         };
 
@@ -741,7 +888,13 @@ mod tests {
         assert!(pair.enabled);
         assert!(!pair.remote_polling_enabled);
         assert_eq!(pair.poll_interval_seconds, 120);
-        assert_eq!(pair.delete_safety_hours, 48);
+        assert_eq!(
+            pair.remote_bin,
+            RemoteBinConfig {
+                enabled: true,
+                retention_days: 14
+            }
+        );
     }
 
     #[test]
@@ -798,11 +951,12 @@ mod tests {
             region: "us-east-1".into(),
             bucket: "my-bucket".into(),
             credential_profile_id: Some("cred-1".into()),
+            object_versioning_enabled: false,
             enabled: true,
             remote_polling_enabled: true,
             poll_interval_seconds: 60,
             conflict_strategy: "preserve-both".into(),
-            delete_safety_hours: 24,
+            remote_bin: RemoteBinConfig::default(),
         };
 
         let stored = StoredProfile {
@@ -891,7 +1045,7 @@ mod tests {
             "remotePollingEnabled": true,
             "pollIntervalSeconds": 60,
             "conflictStrategy": "preserve-both",
-            "deleteSafetyHours": 24,
+            "remoteBin": { "enabled": true, "retentionDays": 7 },
             "activityDebugModeEnabled": false,
             "syncLocations": [
                 {
@@ -905,7 +1059,7 @@ mod tests {
                     "remotePollingEnabled": true,
                     "pollIntervalSeconds": 60,
                     "conflictStrategy": "preserve-both",
-                    "deleteSafetyHours": 24
+                    "remoteBin": { "enabled": false, "retentionDays": 30 }
                 }
             ]
         }"#;
@@ -916,6 +1070,31 @@ mod tests {
         assert_eq!(profile.sync_pairs[0].id, "loc-1");
         assert_eq!(profile.sync_pairs[0].label, "Test Location");
         assert_eq!(profile.sync_pairs[0].bucket, "my-bucket");
+        assert_eq!(
+            profile.sync_pairs[0].conflict_strategy,
+            CONFLICT_STRATEGY_PRESERVE_BOTH
+        );
+        assert_eq!(profile.remote_bin.retention_days, 7);
+        assert!(!profile.sync_pairs[0].remote_bin.enabled);
+    }
+
+    #[test]
+    fn stored_profile_normalization_keeps_valid_conflict_strategies() {
+        let profile = StoredProfile {
+            conflict_strategy: CONFLICT_STRATEGY_PREFER_REMOTE.into(),
+            sync_pairs: vec![SyncPair {
+                conflict_strategy: CONFLICT_STRATEGY_PREFER_LOCAL.into(),
+                ..SyncPair::default()
+            }],
+            ..StoredProfile::default()
+        }
+        .normalized();
+
+        assert_eq!(profile.conflict_strategy, CONFLICT_STRATEGY_PREFER_REMOTE);
+        assert_eq!(
+            profile.sync_pairs[0].conflict_strategy,
+            CONFLICT_STRATEGY_PREFER_LOCAL
+        );
     }
 
     #[test]
@@ -927,7 +1106,7 @@ mod tests {
             "remotePollingEnabled": true,
             "pollIntervalSeconds": 60,
             "conflictStrategy": "preserve-both",
-            "deleteSafetyHours": 24,
+            "remoteBin": { "enabled": true, "retentionDays": 7 },
             "activityDebugModeEnabled": false,
             "syncPairs": [
                 {
@@ -941,7 +1120,7 @@ mod tests {
                     "remotePollingEnabled": true,
                     "pollIntervalSeconds": 60,
                     "conflictStrategy": "preserve-both",
-                    "deleteSafetyHours": 24
+                    "remoteBin": { "enabled": true, "retentionDays": 7 }
                 }
             ]
         }"#;
@@ -951,6 +1130,117 @@ mod tests {
         assert_eq!(profile.sync_pairs.len(), 1);
         assert_eq!(profile.sync_pairs[0].id, "pair-1");
         assert_eq!(profile.sync_pairs[0].label, "Test Pair");
+    }
+
+    #[test]
+    fn legacy_delete_safety_hours_migrates_to_remote_bin_defaults() {
+        let json = r#"{
+            "localFolder": "C:/sync",
+            "bucket": "demo-bucket",
+            "deleteSafetyHours": 48,
+            "syncPairs": [
+                {
+                    "id": "pair-1",
+                    "label": "Docs",
+                    "localFolder": "C:/docs",
+                    "region": "us-east-1",
+                    "bucket": "demo-bucket",
+                    "credentialProfileId": null,
+                    "enabled": true,
+                    "remotePollingEnabled": true,
+                    "pollIntervalSeconds": 60,
+                    "conflictStrategy": "preserve-both",
+                    "deleteSafetyHours": 24
+                }
+            ]
+        }"#;
+
+        let persisted: PersistedProfile =
+            serde_json::from_str(json).expect("legacy profile should load");
+        let profile = StoredProfile::from(persisted);
+
+        assert_eq!(
+            profile.remote_bin,
+            RemoteBinConfig {
+                enabled: true,
+                retention_days: 2
+            }
+        );
+        assert_eq!(
+            profile.sync_pairs[0].remote_bin,
+            RemoteBinConfig {
+                enabled: true,
+                retention_days: 1
+            }
+        );
+    }
+
+    #[test]
+    fn bucket_pair_invariant_allows_distinct_buckets() {
+        let profile = StoredProfile {
+            sync_pairs: vec![
+                SyncPair {
+                    id: "pair-1".into(),
+                    label: "Docs".into(),
+                    bucket: "bucket-a".into(),
+                    ..SyncPair::default()
+                },
+                SyncPair {
+                    id: "pair-2".into(),
+                    label: "Media".into(),
+                    bucket: "bucket-b".into(),
+                    ..SyncPair::default()
+                },
+            ],
+            ..StoredProfile::default()
+        };
+
+        assert!(validate_bucket_pair_invariant(&profile).is_ok());
+    }
+
+    #[test]
+    fn bucket_pair_invariant_rejects_object_versioning_with_remote_bin() {
+        let profile = StoredProfile {
+            sync_pairs: vec![SyncPair {
+                id: "pair-1".into(),
+                label: "Docs".into(),
+                bucket: "bucket-a".into(),
+                object_versioning_enabled: true,
+                remote_bin: RemoteBinConfig {
+                    enabled: true,
+                    retention_days: 7,
+                },
+                ..SyncPair::default()
+            }],
+            ..StoredProfile::default()
+        };
+
+        let error = validate_bucket_pair_invariant(&profile)
+            .expect_err("object versioning and remote bin must be mutually exclusive");
+        assert!(error.contains("cannot enable object versioning and remote bin"));
+    }
+
+    #[test]
+    fn bucket_pair_invariant_allows_shared_bucket_when_pairs_are_distinct() {
+        let profile = StoredProfile {
+            sync_pairs: vec![
+                SyncPair {
+                    id: "pair-1".into(),
+                    label: "Docs".into(),
+                    bucket: "shared-bucket".into(),
+                    ..SyncPair::default()
+                },
+                SyncPair {
+                    id: "pair-2".into(),
+                    label: "Media".into(),
+                    bucket: "shared-bucket".into(),
+                    ..SyncPair::default()
+                },
+            ],
+            ..StoredProfile::default()
+        };
+
+        assert!(validate_bucket_pair_invariant(&profile).is_ok());
     }
 
     #[test]
@@ -1123,7 +1413,7 @@ mod hard_break_persisted_profile_loading_tests {
                         "remotePollingEnabled": true,
                         "pollIntervalSeconds": 60,
                         "conflictStrategy": "preserve-both",
-                        "deleteSafetyHours": 24
+                        "remoteBin": { "enabled": true, "retentionDays": 7 }
                     }
                 ]
             }"#,
@@ -1153,7 +1443,7 @@ mod hard_break_persisted_profile_loading_tests {
                         "remotePollingEnabled": true,
                         "pollIntervalSeconds": 60,
                         "conflictStrategy": "preserve-both",
-                        "deleteSafetyHours": 24
+                        "remoteBin": { "enabled": true, "retentionDays": 7 }
                     }
                 ]
             }"#,
@@ -1182,7 +1472,7 @@ mod hard_break_persisted_profile_loading_tests {
                         "remotePollingEnabled": true,
                         "pollIntervalSeconds": 60,
                         "conflictStrategy": "preserve-both",
-                        "deleteSafetyHours": 24
+                        "remoteBin": { "enabled": true, "retentionDays": 7 }
                     }
                 ],
                 "activeLocationId": "pair-1"
@@ -1221,6 +1511,19 @@ pub fn is_profile_configured(profile: &StoredProfile) -> bool {
     !profile.local_folder.is_empty() && !profile.bucket.is_empty()
 }
 
+pub fn validate_bucket_pair_invariant(_profile: &StoredProfile) -> Result<(), String> {
+    for pair in &_profile.sync_pairs {
+        if pair.object_versioning_enabled && pair.remote_bin.enabled {
+            return Err(format!(
+                "Sync location '{}' cannot enable object versioning and remote bin at the same time.",
+                pair.label
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 pub fn read_profile_from_disk<R: Runtime>(app: &AppHandle<R>) -> Result<StoredProfile, String> {
     let path = app_storage_path(app, PROFILE_FILE_NAME)?;
     if !path.exists() {
@@ -1254,6 +1557,8 @@ pub fn read_profile_from_disk<R: Runtime>(app: &AppHandle<R>) -> Result<StoredPr
         }
     }
 
+    validate_bucket_pair_invariant(&profile)?;
+
     Ok(profile)
 }
 
@@ -1263,6 +1568,7 @@ pub fn write_profile_to_disk<R: Runtime>(
 ) -> Result<(), String> {
     let path = app_storage_path(app, PROFILE_FILE_NAME)?;
     let normalized = profile.clone().normalized();
+    validate_bucket_pair_invariant(&normalized)?;
     let raw = serde_json::to_string_pretty(&PersistedProfile::from(&normalized))
         .map_err(|error| format!("failed to serialize profile: {error}"))?;
     fs::write(path, raw).map_err(|error| format!("failed to write profile: {error}"))

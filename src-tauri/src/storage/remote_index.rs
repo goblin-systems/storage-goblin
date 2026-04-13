@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 
-use super::{app_storage_path, REMOTE_INDEX_FILE_NAME};
+use super::{app_storage_path, remote_bin::key_matches_excluded_prefix, REMOTE_INDEX_FILE_NAME};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -39,11 +39,15 @@ pub fn is_glacier_storage_class(storage_class: Option<&str>) -> bool {
 pub struct RemoteIndexSnapshot {
     pub version: u32,
     pub bucket: String,
+    #[serde(default)]
+    pub excluded_prefixes: Vec<String>,
     pub summary: RemoteIndexSummary,
     pub entries: Vec<RemoteObjectEntry>,
 }
 
-pub fn read_remote_index_snapshot(app: &AppHandle) -> Result<Option<RemoteIndexSnapshot>, String> {
+pub fn read_remote_index_snapshot<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<RemoteIndexSnapshot>, String> {
     let path = app_storage_path(app, REMOTE_INDEX_FILE_NAME)?;
     if !path.exists() {
         return Ok(None);
@@ -52,16 +56,16 @@ pub fn read_remote_index_snapshot(app: &AppHandle) -> Result<Option<RemoteIndexS
     read_remote_index_snapshot_file(&path).map(Some)
 }
 
-pub fn write_remote_index_snapshot(
-    app: &AppHandle,
+pub fn write_remote_index_snapshot<R: Runtime>(
+    app: &AppHandle<R>,
     snapshot: &RemoteIndexSnapshot,
 ) -> Result<(), String> {
     let path = app_storage_path(app, REMOTE_INDEX_FILE_NAME)?;
     write_remote_index_snapshot_file(&path, snapshot)
 }
 
-pub fn read_remote_index_snapshot_for_pair(
-    app: &AppHandle,
+pub fn read_remote_index_snapshot_for_pair<R: Runtime>(
+    app: &AppHandle<R>,
     pair_id: &str,
 ) -> Result<Option<RemoteIndexSnapshot>, String> {
     let file_name = remote_index_file_name_for_pair(pair_id);
@@ -73,8 +77,8 @@ pub fn read_remote_index_snapshot_for_pair(
     read_remote_index_snapshot_file(&path).map(Some)
 }
 
-pub fn write_remote_index_snapshot_for_pair(
-    app: &AppHandle,
+pub fn write_remote_index_snapshot_for_pair<R: Runtime>(
+    app: &AppHandle<R>,
     pair_id: &str,
     snapshot: &RemoteIndexSnapshot,
 ) -> Result<(), String> {
@@ -83,8 +87,33 @@ pub fn write_remote_index_snapshot_for_pair(
     write_remote_index_snapshot_file(&path, snapshot)
 }
 
+pub(crate) fn snapshot_matches_target_with_exclusions(
+    snapshot: &RemoteIndexSnapshot,
+    bucket: &str,
+    excluded_prefixes: &[String],
+) -> bool {
+    snapshot.bucket.trim() == bucket.trim()
+        && normalized_prefixes(&snapshot.excluded_prefixes)
+            == normalized_prefixes(excluded_prefixes)
+}
+
 pub(crate) fn snapshot_matches_target(snapshot: &RemoteIndexSnapshot, bucket: &str) -> bool {
     snapshot.bucket.trim() == bucket.trim()
+}
+
+pub(crate) fn normalized_prefixes(prefixes: &[String]) -> Vec<String> {
+    let mut prefixes: Vec<String> = prefixes
+        .iter()
+        .map(|prefix| prefix.replace('\\', "/").trim_matches('/').to_string())
+        .filter(|prefix| !prefix.is_empty())
+        .collect();
+    prefixes.sort();
+    prefixes.dedup();
+    prefixes
+}
+
+pub(crate) fn should_exclude_remote_key(key: &str, excluded_prefixes: &[String]) -> bool {
+    key_matches_excluded_prefix(key, excluded_prefixes)
 }
 
 pub(crate) fn relative_path_from_key(key: &str) -> String {
@@ -156,14 +185,16 @@ fn write_remote_index_snapshot_file(
 mod tests {
     use super::{
         directory_relative_paths_from_key, directory_relative_paths_from_relative_path,
-        relative_path_from_key, remote_index_file_name_for_pair, snapshot_matches_target,
-        RemoteIndexSnapshot, RemoteIndexSummary,
+        normalized_prefixes, relative_path_from_key, remote_index_file_name_for_pair,
+        should_exclude_remote_key, snapshot_matches_target_with_exclusions, RemoteIndexSnapshot,
+        RemoteIndexSummary,
     };
 
     fn bucket_root_snapshot() -> RemoteIndexSnapshot {
         RemoteIndexSnapshot {
             version: 1,
             bucket: "demo-bucket".into(),
+            excluded_prefixes: vec![".storage-goblin-bin/pair-1/".into()],
             summary: RemoteIndexSummary {
                 indexed_at: "2026-04-06T00:00:00Z".into(),
                 object_count: 0,
@@ -225,8 +256,48 @@ mod tests {
         let snapshot = bucket_root_snapshot();
 
         assert!(
-            snapshot_matches_target(&snapshot, "demo-bucket"),
+            snapshot_matches_target_with_exclusions(
+                &snapshot,
+                "demo-bucket",
+                &[".storage-goblin-bin/pair-1/".into()]
+            ),
             "bucket-root snapshot identity should not depend on legacy endpoint or prefix"
+        );
+    }
+
+    #[test]
+    fn snapshot_target_matching_includes_excluded_prefixes() {
+        let snapshot = bucket_root_snapshot();
+
+        assert!(!snapshot_matches_target_with_exclusions(
+            &snapshot,
+            "demo-bucket",
+            &[".storage-goblin-bin/pair-2/".into()]
+        ));
+    }
+
+    #[test]
+    fn excludes_remote_bin_keys_from_normal_inventory() {
+        assert!(should_exclude_remote_key(
+            ".storage-goblin-bin/pair-1/abc/docs/note.txt",
+            &[".storage-goblin-bin/pair-1/".into()]
+        ));
+        assert!(!should_exclude_remote_key(
+            "docs/note.txt",
+            &[".storage-goblin-bin/pair-1/".into()]
+        ));
+    }
+
+    #[test]
+    fn normalized_prefixes_sort_and_trim() {
+        assert_eq!(
+            normalized_prefixes(&[
+                " /a/ ".trim().to_string(),
+                "b/".into(),
+                "a".into(),
+                "".into()
+            ]),
+            vec!["a".to_string(), "b".to_string()]
         );
     }
 }

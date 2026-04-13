@@ -37,7 +37,7 @@ import {
   VIRTUAL_THRESHOLD,
   renderFileTreeVirtual,
 } from "./file-tree-virtual";
-import { renderFileTree, type FileEntry } from "./file-tree";
+import { getStatusTooltip, renderFileTree, type FileEntry } from "./file-tree";
 import { buildTree } from "./file-tree";
 
 // ---------------------------------------------------------------------------
@@ -254,6 +254,210 @@ describe("renderFileTreeVirtual", () => {
       expect(Array.isArray(paths)).toBe(true);
     }
   });
+
+  it("adds tooltip attributes to virtual file status indicators", () => {
+    const entries = Array.from({ length: 2500 }, (_, i) =>
+      fileEntry({
+        path: `file-${i}.txt`,
+        status: i === 0
+          ? "synced"
+          : i === 1
+            ? "local-only"
+            : i === 2
+              ? "remote-only"
+              : i === 3
+                ? "review-required"
+                : i === 4
+                  ? "conflict"
+                  : i === 5
+                    ? "glacier"
+                    : "deleted",
+        hasLocalCopy: i === 2 || i >= 3 ? false : true,
+        binKey: i >= 6 ? `bin-${i}` : undefined,
+      }),
+    );
+
+    renderFileTree({ treeEl, emptyStateEl, entries, mode: "bin" });
+
+    const indicator = (path: string) =>
+      containerEl
+        .querySelector(`.vtree-row[data-value="${path}"] .status-indicator`) as HTMLElement;
+
+    expect(indicator("file-0.txt")?.getAttribute("title")).toBe(getStatusTooltip("synced"));
+    expect(indicator("file-1.txt")?.getAttribute("title")).toBe(getStatusTooltip("local-only"));
+    expect(indicator("file-2.txt")?.getAttribute("title")).toBe(getStatusTooltip("remote-only"));
+    expect(indicator("file-3.txt")?.getAttribute("title")).toBe(getStatusTooltip("review-required"));
+    expect(indicator("file-4.txt")?.getAttribute("title")).toBe(getStatusTooltip("conflict"));
+    expect(indicator("file-5.txt")?.getAttribute("title")).toBe(getStatusTooltip("glacier"));
+    expect(indicator("file-6.txt")?.getAttribute("title")).toBe(getStatusTooltip("deleted"));
+    expect(indicator("file-0.txt")?.getAttribute("aria-label")).toBe(getStatusTooltip("synced"));
+    expect(indicator("file-0.txt")?.querySelector(".status-dot")?.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("adds tooltip attributes to virtual directory status indicators", () => {
+    const entries = Array.from({ length: 2500 }, (_, i) =>
+      fileEntry({
+        path: `dir-${Math.floor(i / 100)}/file-${i}.txt`,
+        status: i === 0 ? "remote-only" : "synced",
+        hasLocalCopy: i === 0 ? false : true,
+      }),
+    );
+
+    renderFileTree({ treeEl, emptyStateEl, entries });
+
+    const indicator = containerEl.querySelector<HTMLElement>('.vtree-row[data-value="dir-0"] .status-indicator');
+    expect(indicator).not.toBeNull();
+    expect(indicator?.getAttribute("title")).toBe("Contains unsynced items");
+    expect(indicator?.getAttribute("aria-label")).toBe("Contains unsynced items");
+  });
+
+  it("disables conflict file checkboxes and renders resolve buttons in virtual live tree", () => {
+    const entries = Array.from({ length: 2500 }, (_, i) =>
+      fileEntry({
+        path: `file-${i}.txt`,
+        status: i === 0
+          ? "conflict"
+          : i === 1
+            ? "review-required"
+            : i === 2
+              ? "conflict"
+              : "synced",
+        localKind: i <= 2 ? "file" : undefined,
+        remoteKind: i === 2 ? "directory" : i <= 1 ? "file" : undefined,
+        hasLocalCopy: i === 1 ? false : true,
+      }),
+    );
+
+    renderFileTree({ treeEl, emptyStateEl, entries });
+
+    const conflictRow = containerEl.querySelector<HTMLElement>('.vtree-row[data-value="file-0.txt"]');
+    const conflictCheckbox = conflictRow?.querySelector<HTMLInputElement>(".tree-check");
+    const resolveBtn = conflictRow?.querySelector<HTMLButtonElement>(".tree-resolve-btn");
+    const reviewResolveBtn = containerEl.querySelector('.vtree-row[data-value="file-1.txt"] .tree-resolve-btn');
+    const unsupportedResolveBtn = containerEl.querySelector('.vtree-row[data-value="file-2.txt"] .tree-resolve-btn');
+    const normalResolveBtn = containerEl.querySelector('.vtree-row[data-value="file-3.txt"] .tree-resolve-btn');
+
+    expect(conflictCheckbox?.disabled).toBe(true);
+    expect(resolveBtn?.classList.contains("icon-btn")).toBe(true);
+    expect(resolveBtn?.classList.contains("icon-btn-sm")).toBe(true);
+    expect(resolveBtn?.classList.contains("secondary-btn")).toBe(false);
+    expect(resolveBtn?.getAttribute("title")).toBe("Resolve file conflict");
+    expect(resolveBtn?.getAttribute("aria-label")).toBe("Resolve file conflict");
+    expect(resolveBtn?.querySelector(".tree-action-label")?.textContent).toBe("Resolve");
+    expect(resolveBtn?.querySelector("svg")).not.toBeNull();
+    expect(resolveBtn?.childElementCount).toBe(2);
+    expect(reviewResolveBtn).not.toBeNull();
+    expect(unsupportedResolveBtn).toBeNull();
+    expect(normalResolveBtn).toBeNull();
+  });
+
+  it("renders review-required entries safely in virtual live tree and disables their checkboxes", () => {
+    const entries = Array.from({ length: 2500 }, (_, i) =>
+      fileEntry({
+        path: `file-${i}.txt`,
+        status: i === 0 ? "review-required" : "synced",
+        hasLocalCopy: i === 0 ? false : true,
+      }),
+    );
+
+    expect(() => renderFileTree({ treeEl, emptyStateEl, entries })).not.toThrow();
+
+    const reviewRow = containerEl.querySelector<HTMLElement>('.vtree-row[data-value="file-0.txt"]');
+    const checkbox = reviewRow?.querySelector<HTMLInputElement>(".tree-check");
+    const indicator = reviewRow?.querySelector<HTMLElement>(".status-indicator");
+
+    expect(checkbox?.disabled).toBe(true);
+    expect(checkbox?.checked).toBe(false);
+    expect(indicator?.getAttribute("title")).toBe(getStatusTooltip("review-required"));
+    expect(reviewRow?.querySelector(".tree-resolve-btn")).toBeNull();
+    expect(reviewRow?.querySelector(".tree-storage-class-btn")).toBeNull();
+    expect(reviewRow?.querySelector(".tree-delete-btn")).toBeNull();
+  });
+
+  it("preserves live mutating actions for non-review rows in virtual tree", () => {
+    const entries = Array.from({ length: 2500 }, (_, i) =>
+      fileEntry({
+        path: `file-${i}.txt`,
+        status: "remote-only",
+        hasLocalCopy: false,
+      }),
+    );
+
+    renderFileTree({ treeEl, emptyStateEl, entries });
+
+    const row = containerEl.querySelector<HTMLElement>('.vtree-row[data-value="file-0.txt"]');
+    expect(row?.querySelector('.tree-storage-class-btn')).not.toBeNull();
+    expect(row?.querySelector('.tree-delete-btn')).not.toBeNull();
+  });
+
+  it("disables review-required directory checkboxes in virtual live tree", () => {
+    const entries = [
+      directoryEntry({ path: "review-dir", status: "review-required", hasLocalCopy: false }),
+      ...Array.from({ length: 2499 }, (_, i) => fileEntry({ path: `file-${i}.txt` })),
+    ];
+
+    renderFileTree({ treeEl, emptyStateEl, entries });
+
+    const reviewRow = containerEl.querySelector<HTMLElement>('.vtree-row[data-value="review-dir"]');
+    const checkbox = reviewRow?.querySelector<HTMLInputElement>(".tree-check");
+
+    expect(checkbox?.disabled).toBe(true);
+    expect(checkbox?.checked).toBe(false);
+  });
+
+  it("disables conflict directory checkboxes in virtual live tree", () => {
+    const entries = [
+      directoryEntry({ path: "conflict-dir", status: "conflict", hasLocalCopy: true }),
+      ...Array.from({ length: 2499 }, (_, i) => fileEntry({ path: `file-${i}.txt` })),
+    ];
+
+    renderFileTree({ treeEl, emptyStateEl, entries });
+
+    const conflictRow = containerEl.querySelector<HTMLElement>('.vtree-row[data-value="conflict-dir"]');
+    const conflictCheckbox = conflictRow?.querySelector<HTMLInputElement>(".tree-check");
+
+    expect(conflictCheckbox?.disabled).toBe(true);
+  });
+
+  it("clicking resolve button calls onResolveConflict in virtual tree", () => {
+    const onResolveConflict = vi.fn();
+    const entries = Array.from({ length: 2500 }, (_, i) =>
+      fileEntry({
+        path: `file-${i}.txt`,
+        status: i === 0 ? "conflict" : "synced",
+        localKind: i === 0 ? "file" : undefined,
+        remoteKind: i === 0 ? "file" : undefined,
+        hasLocalCopy: true,
+      }),
+    );
+
+    renderFileTree({ treeEl, emptyStateEl, entries, onResolveConflict });
+
+    containerEl.querySelector<HTMLButtonElement>('.vtree-row[data-value="file-0.txt"] .tree-resolve-btn')?.click();
+
+    expect(onResolveConflict).toHaveBeenCalledOnce();
+    expect(onResolveConflict.mock.calls[0]?.[0]).toMatchObject({ path: "file-0.txt", status: "conflict" });
+  });
+
+  it("clicking resolve button calls onResolveConflict for review-required entries in virtual tree", () => {
+    const onResolveConflict = vi.fn();
+    const entries = Array.from({ length: 2500 }, (_, i) =>
+      fileEntry({
+        path: `file-${i}.txt`,
+        status: i === 0 ? "review-required" : "synced",
+        localKind: i === 0 ? "file" : undefined,
+        remoteKind: i === 0 ? "file" : undefined,
+        hasLocalCopy: i === 0 ? false : true,
+      }),
+    );
+
+    renderFileTree({ treeEl, emptyStateEl, entries, onResolveConflict });
+
+    containerEl.querySelector<HTMLButtonElement>('.vtree-row[data-value="file-0.txt"] .tree-resolve-btn')?.click();
+
+    expect(onResolveConflict).toHaveBeenCalledOnce();
+    expect(onResolveConflict.mock.calls[0]?.[0]).toMatchObject({ path: "file-0.txt", status: "review-required" });
+  });
 });
 
 describe("VIRTUAL_THRESHOLD", () => {
@@ -323,7 +527,7 @@ describe("delete button", () => {
     }
   });
 
-  it("does NOT render for directory rows", () => {
+  it("renders delete buttons for safe directory rows", () => {
     // generateEntries creates paths like dir-X/file-Y.txt; initially all
     // directories are collapsed so only directory rows are visible.
     const entries = generateEntries(2500);
@@ -337,9 +541,23 @@ describe("delete button", () => {
     const rows = vtree!.querySelectorAll(".vtree-row");
     expect(rows.length).toBeGreaterThan(0);
 
-    // None of the directory rows should have a delete button
     const deleteBtns = vtree!.querySelectorAll(".tree-delete-btn");
-    expect(deleteBtns.length).toBe(0);
+    expect(deleteBtns.length).toBeGreaterThan(0);
+    for (const btn of deleteBtns) {
+      expect(btn.getAttribute("data-delete-kind")).toBe("directory");
+    }
+  });
+
+  it("does NOT render directory delete buttons for blocked directory rows", () => {
+    const entries = [
+      directoryEntry({ path: "review-dir", status: "review-required", hasLocalCopy: false }),
+      ...Array.from({ length: 2499 }, (_, i) => fileEntry({ path: `file-${i}.txt` })),
+    ];
+
+    renderFileTree({ treeEl, emptyStateEl, entries });
+
+    const reviewRow = containerEl.querySelector<HTMLElement>('.vtree-row[data-value="review-dir"]');
+    expect(reviewRow?.querySelector(".tree-delete-btn")).toBeNull();
   });
 
   it("clicking delete button calls onDelete with correct path", () => {
@@ -361,6 +579,220 @@ describe("delete button", () => {
     deleteBtn!.click();
 
     expect(onDelete).toHaveBeenCalledTimes(1);
-    expect(onDelete).toHaveBeenCalledWith(expectedPath);
+    expect(onDelete).toHaveBeenCalledWith({ path: expectedPath, kind: "file" });
+  });
+
+  it("clicking directory delete button calls onDelete with correct target", () => {
+    const onDelete = vi.fn();
+    const entries = generateEntries(2500);
+
+    renderFileTree({ treeEl, emptyStateEl, entries, onDelete });
+
+    const deleteBtn = containerEl.querySelector<HTMLButtonElement>('.vtree-row[data-value="dir-0"] .tree-delete-btn');
+    expect(deleteBtn).not.toBeNull();
+
+    deleteBtn!.click();
+
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    expect(onDelete).toHaveBeenCalledWith({ path: "dir-0", kind: "directory" });
   });
 });
+
+describe("restore button", () => {
+  let treeEl: HTMLUListElement;
+  let emptyStateEl: HTMLElement;
+  let containerEl: HTMLDivElement;
+
+  beforeEach(() => {
+    containerEl = document.createElement("div");
+    containerEl.className = "file-tree-section";
+    document.body.appendChild(containerEl);
+
+    treeEl = document.createElement("ul");
+    treeEl.className = "tree tree--dot-left";
+    treeEl.hidden = true;
+    containerEl.appendChild(treeEl);
+
+    emptyStateEl = document.createElement("div");
+    emptyStateEl.className = "empty-state";
+    emptyStateEl.hidden = false;
+    containerEl.appendChild(emptyStateEl);
+
+    createIconMock.mockClear();
+    createIconMock.mockImplementation(() => document.createElementNS("http://www.w3.org/2000/svg", "svg"));
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("renders restore buttons for file rows in virtual bin tree", () => {
+    const entries = Array.from({ length: 2500 }, (_, i) =>
+      fileEntry({ path: `file-${i}.txt`, status: "deleted", hasLocalCopy: false, binKey: `bin-${i}` }),
+    );
+
+    renderFileTree({ treeEl, emptyStateEl, entries, mode: "bin" });
+
+    const vtree = containerEl.querySelector(".vtree");
+    expect(vtree).not.toBeNull();
+    expect(vtree!.querySelectorAll(".tree-restore-btn").length).toBeGreaterThan(0);
+    expect(vtree!.querySelector(".tree-delete-btn")).toBeNull();
+  });
+
+  it("clicking restore button calls onRestore with opaque bin key", () => {
+    const onRestore = vi.fn();
+    const entries = Array.from({ length: 2500 }, (_, i) =>
+      fileEntry({ path: `file-${i}.txt`, status: "deleted", hasLocalCopy: false, binKey: `opaque-${i}` }),
+    );
+
+    renderFileTree({ treeEl, emptyStateEl, entries, mode: "bin", onRestore });
+
+    const restoreBtn = containerEl.querySelector<HTMLButtonElement>(".tree-restore-btn");
+    expect(restoreBtn).not.toBeNull();
+
+    const expectedPath = restoreBtn!.getAttribute("data-restore-path")!;
+    restoreBtn!.click();
+
+    expect(onRestore).toHaveBeenCalledWith(expect.objectContaining({ path: expectedPath }));
+  });
+
+  it("shows restore button loading state while virtual restore is pending", async () => {
+    const restore = createDeferred<void>();
+    const onRestore = vi.fn(() => restore.promise);
+    const entries = Array.from({ length: 2500 }, (_, i) =>
+      fileEntry({ path: `file-${i}.txt`, status: "deleted", hasLocalCopy: false, binKey: `opaque-${i}` }),
+    );
+
+    renderFileTree({ treeEl, emptyStateEl, entries, mode: "bin", onRestore });
+
+    const restoreBtn = containerEl.querySelector<HTMLButtonElement>(".tree-restore-btn");
+    expect(restoreBtn).not.toBeNull();
+
+    restoreBtn!.click();
+
+    expect(onRestore).toHaveBeenCalledOnce();
+    expect(restoreBtn?.classList.contains("is-loading")).toBe(true);
+    expect(restoreBtn?.disabled).toBe(true);
+    expect(restoreBtn?.getAttribute("aria-busy")).toBe("true");
+    expect(restoreBtn?.querySelector<HTMLElement>(".tree-action-spinner")?.hidden).toBe(false);
+
+    restoreBtn!.click();
+    expect(onRestore).toHaveBeenCalledOnce();
+
+    restore.resolve(undefined);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(restoreBtn?.classList.contains("is-loading")).toBe(false);
+    expect(restoreBtn?.disabled).toBe(false);
+    expect(restoreBtn?.getAttribute("aria-busy")).toBe("false");
+    expect(restoreBtn?.querySelector<HTMLElement>(".tree-action-spinner")?.hidden).toBe(true);
+  });
+
+  it("allows checkbox selection in virtual bin tree", () => {
+    const onChange = vi.fn();
+    const entries = Array.from({ length: 2500 }, (_, i) =>
+      fileEntry({ path: `file-${i}.txt`, status: "deleted", hasLocalCopy: false, binKey: `opaque-${i}` }),
+    );
+
+    renderFileTree({ treeEl, emptyStateEl, entries, mode: "bin", onChange, checkedPaths: [] });
+
+    const checkbox = containerEl.querySelector<HTMLInputElement>(".tree-check");
+    expect(checkbox?.disabled).toBe(false);
+
+    checkbox!.checked = true;
+    checkbox!.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(onChange).toHaveBeenCalled();
+  });
+
+  it("supports selecting empty directory rows in virtual bin mode", () => {
+    const onChange = vi.fn();
+    const entries: FileEntry[] = [
+      directoryEntry({ path: "empty-dir", status: "deleted", hasLocalCopy: false }),
+      ...Array.from({ length: 2499 }, (_, i) =>
+        fileEntry({ path: `folder-${i}/file-${i}.txt`, status: "deleted", hasLocalCopy: false, binKey: `opaque-${i}` }),
+      ),
+    ];
+
+    renderFileTree({ treeEl, emptyStateEl, entries, mode: "bin", onChange, checkedPaths: [] });
+
+    const emptyDirCheckbox = containerEl.querySelector<HTMLInputElement>('.vtree-row[data-value="empty-dir"] .tree-check');
+    expect(emptyDirCheckbox?.disabled).toBe(false);
+
+    emptyDirCheckbox!.checked = true;
+    emptyDirCheckbox!.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(onChange).toHaveBeenCalledWith(expect.arrayContaining(["empty-dir"]));
+  });
+});
+
+describe("reveal button", () => {
+  let treeEl: HTMLUListElement;
+  let emptyStateEl: HTMLElement;
+  let containerEl: HTMLDivElement;
+
+  beforeEach(() => {
+    containerEl = document.createElement("div");
+    containerEl.className = "file-tree-section";
+    document.body.appendChild(containerEl);
+
+    treeEl = document.createElement("ul");
+    treeEl.className = "tree tree--dot-left";
+    treeEl.hidden = true;
+    containerEl.appendChild(treeEl);
+
+    emptyStateEl = document.createElement("div");
+    emptyStateEl.className = "empty-state";
+    emptyStateEl.hidden = false;
+    containerEl.appendChild(emptyStateEl);
+
+    createIconMock.mockClear();
+    createIconMock.mockImplementation(() => document.createElementNS("http://www.w3.org/2000/svg", "svg"));
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("renders reveal buttons for file and directory rows in virtual tree", () => {
+    const entries = generateEntries(2500);
+
+    renderFileTree({ treeEl, emptyStateEl, entries });
+
+    const vtree = containerEl.querySelector(".vtree");
+    expect(vtree).not.toBeNull();
+    const revealBtns = vtree!.querySelectorAll<HTMLButtonElement>(".tree-reveal-btn");
+    expect(revealBtns.length).toBeGreaterThan(0);
+    for (const btn of revealBtns) {
+      expect(btn.dataset.revealPath).toBeTruthy();
+    }
+  });
+
+  it("clicking reveal button calls onReveal with correct path", () => {
+    const onReveal = vi.fn();
+    const entries = Array.from({ length: 2500 }, (_, i) =>
+      fileEntry({ path: `file-${i}.txt` }),
+    );
+
+    renderFileTree({ treeEl, emptyStateEl, entries, onReveal });
+
+    const revealBtn = containerEl.querySelector<HTMLButtonElement>(".tree-reveal-btn");
+    expect(revealBtn).not.toBeNull();
+
+    const expectedPath = revealBtn!.dataset.revealPath;
+    revealBtn!.click();
+
+    expect(onReveal).toHaveBeenCalledWith(expectedPath);
+  });
+});
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}

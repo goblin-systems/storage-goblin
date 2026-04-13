@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyStoredProfile,
+  DEFAULT_REMOTE_BIN_RETENTION_DAYS,
   describeProfileTarget,
   hasSelectedCredential,
   normalizeProfileDraft,
@@ -29,7 +30,10 @@ describe("profile helpers", () => {
           remotePollingEnabled: true,
           pollIntervalSeconds: 60,
           conflictStrategy: "preserve-both",
-          deleteSafetyHours: 24,
+          remoteBin: {
+            enabled: true,
+            retentionDays: 7,
+          },
         },
       ],
     } as unknown as Parameters<typeof normalizeStoredProfile>[0]);
@@ -46,19 +50,84 @@ describe("profile helpers", () => {
       bucket: "  demo-bucket  ",
       remotePollingEnabled: false,
       pollIntervalSeconds: 1,
-      deleteSafetyHours: 999,
-    });
+      syncLocations: [
+        {
+          id: "loc-1",
+          label: "Docs",
+          localFolder: "C:/sync/docs",
+          region: "us-east-1",
+          bucket: "demo-bucket",
+          credentialProfileId: null,
+          enabled: true,
+          remotePollingEnabled: true,
+          pollIntervalSeconds: 60,
+          conflictStrategy: "preserve-both",
+          remoteBin: {
+            enabled: false,
+            retentionDays: 9999,
+          },
+        },
+      ],
+    } as Parameters<typeof normalizeStoredProfile>[0]);
 
     expect(profile.localFolder).toBe("C:/sync");
     expect(profile.bucket).toBe("demo-bucket");
     expect(profile.pollIntervalSeconds).toBe(15);
-    expect(profile.deleteSafetyHours).toBe(168);
     expect(profile.remotePollingEnabled).toBe(false);
+    expect(profile).not.toHaveProperty("deleteSafetyHours");
     expect(profile.activityDebugModeEnabled).toBe(false);
     expect(profile.credentialProfileId).toBeNull();
     expect(profile.selectedCredential).toBeNull();
     expect(profile.selectedCredentialAvailable).toBe(false);
     expect(profile.credentialsStoredSecurely).toBe(false);
+    expect(profile.syncLocations[0]?.remoteBin).toEqual({
+      enabled: false,
+      retentionDays: 3650,
+    });
+  });
+
+  it("preserves valid conflict strategies and falls back invalid values", () => {
+    const profile = normalizeStoredProfile({
+      conflictStrategy: "prefer-remote",
+      syncLocations: [
+        {
+          id: "loc-1",
+          label: "Docs",
+          localFolder: "C:/sync/docs",
+          region: "us-east-1",
+          bucket: "demo-bucket",
+          credentialProfileId: null,
+          enabled: true,
+          remotePollingEnabled: true,
+          pollIntervalSeconds: 60,
+          conflictStrategy: "prefer-local",
+          remoteBin: {
+            enabled: true,
+            retentionDays: 7,
+          },
+        },
+        {
+          id: "loc-2",
+          label: "Media",
+          localFolder: "C:/sync/media",
+          region: "us-east-1",
+          bucket: "media-bucket",
+          credentialProfileId: null,
+          enabled: true,
+          remotePollingEnabled: true,
+          pollIntervalSeconds: 60,
+          conflictStrategy: "not-a-strategy",
+          remoteBin: {
+            enabled: true,
+            retentionDays: 7,
+          },
+        },
+      ],
+    } as unknown as Parameters<typeof normalizeStoredProfile>[0]);
+
+    expect(profile.conflictStrategy).toBe("prefer-remote");
+    expect(profile.syncLocations[0]?.conflictStrategy).toBe("prefer-local");
+    expect(profile.syncLocations[1]?.conflictStrategy).toBe("preserve-both");
   });
 
   it("strips credentials from persisted profile", () => {
@@ -86,7 +155,6 @@ describe("profile helpers", () => {
       remotePollingEnabled: true,
       pollIntervalSeconds: 60,
       conflictStrategy: "preserve-both",
-      deleteSafetyHours: 24,
       activityDebugModeEnabled: true,
       credentialProfileId: "cred-1",
       selectedCredential: { id: "cred-1", name: "Primary", ready: true, validationStatus: "untested", lastTestedAt: null, lastTestMessage: null },
@@ -110,7 +178,6 @@ describe("profile helpers", () => {
       remotePollingEnabled: true,
       pollIntervalSeconds: 60,
       conflictStrategy: "preserve-both",
-      deleteSafetyHours: 24,
       activityDebugModeEnabled: false,
       credentialProfileId: "cred-1",
       selectedCredential: { id: "cred-1", name: "Primary", ready: true, validationStatus: "untested", lastTestedAt: null, lastTestMessage: null },
@@ -132,7 +199,6 @@ describe("profile helpers", () => {
       remotePollingEnabled: true,
       pollIntervalSeconds: 60,
       conflictStrategy: "preserve-both",
-      deleteSafetyHours: 24,
       activityDebugModeEnabled: false,
       credentialProfileId: null,
       selectedCredential: null,
@@ -161,11 +227,15 @@ describe("profile helpers", () => {
       region: "us-east-1",
       bucket: "my-bucket",
       credentialProfileId: null,
+      objectVersioningEnabled: false,
       enabled: true,
       remotePollingEnabled: true,
       pollIntervalSeconds: 60,
       conflictStrategy: "preserve-both" as const,
-      deleteSafetyHours: 24,
+      remoteBin: {
+        enabled: true,
+        retentionDays: 7,
+      },
     };
 
     // Old persisted data with syncPairs and no syncLocations
@@ -194,5 +264,114 @@ describe("profile helpers", () => {
     });
 
     expect(withNeither.syncLocations).toEqual([]);
+  });
+
+  it("maps legacy deleteSafetyHours values to sync location remoteBin", () => {
+    const profile = normalizeStoredProfile({
+      syncLocations: [
+        {
+          id: "loc-1",
+          label: "Docs",
+          localFolder: "C:/sync/docs",
+          region: "us-east-1",
+          bucket: "demo-bucket",
+          credentialProfileId: null,
+          enabled: true,
+          remotePollingEnabled: true,
+          pollIntervalSeconds: 60,
+          conflictStrategy: "preserve-both",
+          deleteSafetyHours: 72,
+        },
+      ],
+    } as unknown as Parameters<typeof normalizeStoredProfile>[0]);
+
+    expect(profile.syncLocations[0]?.remoteBin).toEqual({
+      enabled: true,
+      retentionDays: 3,
+    });
+  });
+
+  it("defaults missing sync location remote bin retention to 7 days", () => {
+    const profile = normalizeStoredProfile({
+      syncLocations: [
+        {
+          id: "loc-1",
+          label: "Docs",
+          localFolder: "C:/sync/docs",
+          region: "us-east-1",
+          bucket: "demo-bucket",
+          credentialProfileId: null,
+          enabled: true,
+          remotePollingEnabled: true,
+          pollIntervalSeconds: 60,
+          conflictStrategy: "preserve-both",
+          remoteBin: {
+            enabled: true,
+          },
+        },
+      ],
+    } as unknown as Parameters<typeof normalizeStoredProfile>[0]);
+
+    expect(profile.syncLocations[0]?.remoteBin).toEqual({
+      enabled: true,
+      retentionDays: DEFAULT_REMOTE_BIN_RETENTION_DAYS,
+    });
+  });
+
+  it("defaults sync location object versioning to false", () => {
+    const profile = normalizeStoredProfile({
+      syncLocations: [
+        {
+          id: "loc-1",
+          label: "Docs",
+          localFolder: "C:/sync/docs",
+          region: "us-east-1",
+          bucket: "demo-bucket",
+          credentialProfileId: null,
+          enabled: true,
+          remotePollingEnabled: true,
+          pollIntervalSeconds: 60,
+          conflictStrategy: "preserve-both",
+          remoteBin: {
+            enabled: true,
+            retentionDays: 7,
+          },
+        },
+      ],
+    } as unknown as Parameters<typeof normalizeStoredProfile>[0]);
+
+    expect(profile.syncLocations[0]?.objectVersioningEnabled).toBe(false);
+  });
+
+  it("disables remote bin when object versioning is enabled", () => {
+    const profile = normalizeStoredProfile({
+      syncLocations: [
+        {
+          id: "loc-1",
+          label: "Docs",
+          localFolder: "C:/sync/docs",
+          region: "us-east-1",
+          bucket: "demo-bucket",
+          credentialProfileId: null,
+          objectVersioningEnabled: true,
+          enabled: true,
+          remotePollingEnabled: true,
+          pollIntervalSeconds: 60,
+          conflictStrategy: "preserve-both",
+          remoteBin: {
+            enabled: true,
+            retentionDays: 7,
+          },
+        },
+      ],
+    } as unknown as Parameters<typeof normalizeStoredProfile>[0]);
+
+    expect(profile.syncLocations[0]).toMatchObject({
+      objectVersioningEnabled: true,
+      remoteBin: {
+        enabled: false,
+        retentionDays: 7,
+      },
+    });
   });
 });

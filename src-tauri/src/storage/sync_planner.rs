@@ -3,14 +3,24 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{
     local_index::LocalIndexSnapshot,
     now_iso,
+    profile_store::normalize_conflict_strategy,
     remote_index::{is_glacier_storage_class, RemoteIndexSnapshot},
+    sync_db::SyncAnchor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum IndexedEntryKind {
-    File { size: u64 },
-    Directory,
-    Glacier { size: u64 },
+struct LocalIndexedEntry {
+    kind: String,
+    size: u64,
+    fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteIndexedEntry {
+    kind: String,
+    size: u64,
+    etag: Option<String>,
+    storage_class: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +37,8 @@ pub struct PlannedQueueItem {
     pub operation: String,
     pub local_size: Option<u64>,
     pub remote_size: Option<u64>,
+    pub expected_local_fingerprint: Option<String>,
+    pub expected_remote_etag: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,20 +63,53 @@ pub struct SyncPlan {
     pub queue_items: Vec<PlannedQueueItem>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileSyncDecision {
+    Noop,
+    Upload,
+    Download,
+    ConflictReview,
+    ReviewRequired,
+}
+
+pub(crate) fn file_entry_status(
+    anchor: Option<&SyncAnchor>,
+    current_local_fingerprint: Option<&str>,
+    current_remote_etag: Option<&str>,
+) -> &'static str {
+    match decide_file_sync(
+        anchor,
+        current_local_fingerprint,
+        current_remote_etag,
+        "preserve-both",
+    ) {
+        FileSyncDecision::Noop => "synced",
+        FileSyncDecision::Upload => "local-only",
+        FileSyncDecision::Download => "remote-only",
+        FileSyncDecision::ConflictReview => "conflict",
+        FileSyncDecision::ReviewRequired => "review-required",
+    }
+}
+
 pub fn build_sync_plan(
     local_snapshot: &LocalIndexSnapshot,
     remote_snapshot: &RemoteIndexSnapshot,
+    anchors: &BTreeMap<String, SyncAnchor>,
+    conflict_strategy: &str,
     credentials_available: bool,
 ) -> SyncPlan {
+    let normalized_conflict_strategy = normalize_conflict_strategy(conflict_strategy);
     let local_entries = local_entry_map(local_snapshot);
     let remote_entries = remote_entry_map(remote_snapshot);
     let local_file_count = local_entries
         .values()
-        .filter(|entry| matches!(entry, IndexedEntryKind::File { .. }))
+        .filter(|entry| entry.kind == "file")
         .count() as u64;
     let remote_object_count = remote_entries
         .values()
-        .filter(|entry| matches!(entry, IndexedEntryKind::File { .. }))
+        .filter(|entry| {
+            entry.kind == "file" && !is_glacier_storage_class(entry.storage_class.as_deref())
+        })
         .count() as u64;
 
     let mut paths = BTreeSet::new();
@@ -81,23 +126,27 @@ pub fn build_sync_plan(
     let mut noop_count = 0_u64;
 
     for path in paths {
-        match (local_entries.get(&path), remote_entries.get(&path)) {
-            (Some(IndexedEntryKind::File { size: local_size }), None) => {
-                upload_count += 1;
-                observed_entries.push(ObservedEntry {
-                    path: path.clone(),
-                    local_size: Some(*local_size),
-                    remote_size: None,
-                    resolution: "upload".into(),
-                });
-                queue_items.push(PlannedQueueItem {
-                    path,
-                    operation: "upload".into(),
-                    local_size: Some(*local_size),
-                    remote_size: None,
-                });
-            }
-            (Some(IndexedEntryKind::Directory), None) => {
+        let local = local_entries.get(&path);
+        let remote = remote_entries.get(&path);
+        let anchor = anchors.get(&path);
+
+        if remote.is_some_and(|entry| is_glacier_storage_class(entry.storage_class.as_deref())) {
+            noop_count += 1;
+            observed_entries.push(ObservedEntry {
+                path,
+                local_size: local
+                    .map(|entry| entry.size)
+                    .filter(|_| local.is_some_and(|entry| entry.kind == "file")),
+                remote_size: remote
+                    .map(|entry| entry.size)
+                    .filter(|_| remote.is_some_and(|entry| entry.kind == "file")),
+                resolution: "noop".into(),
+            });
+            continue;
+        }
+
+        match (local, remote) {
+            (Some(local), None) if local.kind == "directory" => {
                 create_directory_count += 1;
                 observed_entries.push(ObservedEntry {
                     path: path.clone(),
@@ -110,37 +159,13 @@ pub fn build_sync_plan(
                     operation: "create_directory".into(),
                     local_size: None,
                     remote_size: None,
+                    expected_local_fingerprint: None,
+                    expected_remote_etag: None,
                 });
             }
-            (None, Some(IndexedEntryKind::File { size: remote_size })) => {
-                download_count += 1;
-                observed_entries.push(ObservedEntry {
-                    path: path.clone(),
-                    local_size: None,
-                    remote_size: Some(*remote_size),
-                    resolution: "download".into(),
-                });
-                queue_items.push(PlannedQueueItem {
-                    path,
-                    operation: "download".into(),
-                    local_size: None,
-                    remote_size: Some(*remote_size),
-                });
-            }
-            (_, Some(IndexedEntryKind::Glacier { size: remote_size })) => {
-                noop_count += 1;
-                let local_size = match local_entries.get(&path) {
-                    Some(IndexedEntryKind::File { size }) => Some(*size),
-                    _ => None,
-                };
-                observed_entries.push(ObservedEntry {
-                    path,
-                    local_size,
-                    remote_size: Some(*remote_size),
-                    resolution: "noop".into(),
-                });
-            }
-            (Some(IndexedEntryKind::Directory), Some(IndexedEntryKind::Directory)) => {
+            (Some(local), Some(remote))
+                if local.kind == "directory" && remote.kind == "directory" =>
+            {
                 noop_count += 1;
                 observed_entries.push(ObservedEntry {
                     path,
@@ -149,7 +174,7 @@ pub fn build_sync_plan(
                     resolution: "noop".into(),
                 });
             }
-            (None, Some(IndexedEntryKind::Directory)) => {
+            (None, Some(remote)) if remote.kind == "directory" => {
                 noop_count += 1;
                 observed_entries.push(ObservedEntry {
                     path,
@@ -158,52 +183,99 @@ pub fn build_sync_plan(
                     resolution: "noop".into(),
                 });
             }
-            (
-                Some(IndexedEntryKind::File { size: local_size }),
-                Some(IndexedEntryKind::File { size: remote_size }),
-            ) if local_size == remote_size => {
-                noop_count += 1;
-                observed_entries.push(ObservedEntry {
-                    path,
-                    local_size: Some(*local_size),
-                    remote_size: Some(*remote_size),
-                    resolution: "noop".into(),
-                });
-            }
-            (Some(local_kind), Some(remote_kind)) => {
+            (Some(local), Some(remote)) if local.kind != remote.kind => {
                 conflict_count += 1;
-                let (local_size, remote_size) = match (local_kind, remote_kind) {
-                    (
-                        IndexedEntryKind::File { size: local_size },
-                        IndexedEntryKind::File { size: remote_size },
-                    ) => (Some(*local_size), Some(*remote_size)),
-                    (IndexedEntryKind::File { size: local_size }, IndexedEntryKind::Directory) => {
-                        (Some(*local_size), None)
-                    }
-                    (IndexedEntryKind::Directory, IndexedEntryKind::File { size: remote_size }) => {
-                        (None, Some(*remote_size))
-                    }
-                    (IndexedEntryKind::Directory, IndexedEntryKind::Directory) => (None, None),
-                    // Glacier on remote side is handled by an earlier match arm;
-                    // Glacier on local side cannot occur. Satisfy exhaustiveness.
-                    _ => (None, None),
-                };
                 observed_entries.push(ObservedEntry {
                     path: path.clone(),
-                    local_size,
-                    remote_size,
+                    local_size: file_size(local),
+                    remote_size: file_size(remote),
                     resolution: "conflict_review".into(),
                 });
                 queue_items.push(PlannedQueueItem {
                     path,
                     operation: "conflict_review".into(),
-                    local_size,
-                    remote_size,
+                    local_size: file_size(local),
+                    remote_size: file_size(remote),
+                    expected_local_fingerprint: None,
+                    expected_remote_etag: None,
                 });
             }
+            (Some(local), None) if local.kind == "file" => {
+                let decision = decide_file_sync(
+                    anchor,
+                    local.fingerprint.as_deref(),
+                    None,
+                    normalized_conflict_strategy.as_str(),
+                );
+                push_file_decision(
+                    &mut observed_entries,
+                    &mut queue_items,
+                    &mut upload_count,
+                    &mut download_count,
+                    &mut conflict_count,
+                    &mut noop_count,
+                    &path,
+                    Some(local.size),
+                    None,
+                    local.fingerprint.clone(),
+                    None,
+                    decision,
+                );
+            }
+            (None, Some(remote)) if remote.kind == "file" => {
+                let decision = decide_file_sync(
+                    anchor,
+                    None,
+                    remote.etag.as_deref(),
+                    normalized_conflict_strategy.as_str(),
+                );
+                push_file_decision(
+                    &mut observed_entries,
+                    &mut queue_items,
+                    &mut upload_count,
+                    &mut download_count,
+                    &mut conflict_count,
+                    &mut noop_count,
+                    &path,
+                    None,
+                    Some(remote.size),
+                    None,
+                    remote.etag.clone(),
+                    decision,
+                );
+            }
+            (Some(local), Some(remote)) if local.kind == "file" && remote.kind == "file" => {
+                let decision = decide_file_sync(
+                    anchor,
+                    local.fingerprint.as_deref(),
+                    remote.etag.as_deref(),
+                    normalized_conflict_strategy.as_str(),
+                );
+                push_file_decision(
+                    &mut observed_entries,
+                    &mut queue_items,
+                    &mut upload_count,
+                    &mut download_count,
+                    &mut conflict_count,
+                    &mut noop_count,
+                    &path,
+                    Some(local.size),
+                    Some(remote.size),
+                    local.fingerprint.clone(),
+                    remote.etag.clone(),
+                    decision,
+                );
+            }
             (None, None) => {}
-            // Glacier on the local side cannot occur — only remote entries produce this variant.
-            (Some(IndexedEntryKind::Glacier { .. }), _) => {}
+            _ => {
+                noop_count += 1;
+                observed_entries.push(ObservedEntry {
+                    path,
+                    local_size: local.and_then(file_size),
+                    remote_size: remote.and_then(file_size),
+                    resolution: "noop".into(),
+                });
+            }
         }
     }
 
@@ -226,272 +298,401 @@ pub fn build_sync_plan(
     }
 }
 
-fn local_entry_map(snapshot: &LocalIndexSnapshot) -> BTreeMap<String, IndexedEntryKind> {
+fn push_file_decision(
+    observed_entries: &mut Vec<ObservedEntry>,
+    queue_items: &mut Vec<PlannedQueueItem>,
+    upload_count: &mut u64,
+    download_count: &mut u64,
+    conflict_count: &mut u64,
+    noop_count: &mut u64,
+    path: &str,
+    local_size: Option<u64>,
+    remote_size: Option<u64>,
+    expected_local_fingerprint: Option<String>,
+    expected_remote_etag: Option<String>,
+    decision: FileSyncDecision,
+) {
+    let (resolution, operation) = match decision {
+        FileSyncDecision::Noop => {
+            *noop_count += 1;
+            ("noop", None)
+        }
+        FileSyncDecision::Upload => {
+            *upload_count += 1;
+            ("upload", Some("upload"))
+        }
+        FileSyncDecision::Download => {
+            *download_count += 1;
+            ("download", Some("download"))
+        }
+        FileSyncDecision::ConflictReview => {
+            *conflict_count += 1;
+            ("conflict_review", Some("conflict_review"))
+        }
+        FileSyncDecision::ReviewRequired => {
+            *conflict_count += 1;
+            ("review_required", Some("review_required"))
+        }
+    };
+
+    observed_entries.push(ObservedEntry {
+        path: path.into(),
+        local_size,
+        remote_size,
+        resolution: resolution.into(),
+    });
+
+    if let Some(operation) = operation {
+        queue_items.push(PlannedQueueItem {
+            path: path.into(),
+            operation: operation.into(),
+            local_size,
+            remote_size,
+            expected_local_fingerprint,
+            expected_remote_etag,
+        });
+    }
+}
+
+fn decide_file_sync(
+    anchor: Option<&SyncAnchor>,
+    current_local_fingerprint: Option<&str>,
+    current_remote_etag: Option<&str>,
+    conflict_strategy: &str,
+) -> FileSyncDecision {
+    let Some(anchor) = anchor.filter(|anchor| anchor.kind == "file") else {
+        return if current_local_fingerprint.is_some() && current_remote_etag.is_some() {
+            FileSyncDecision::ReviewRequired
+        } else if current_local_fingerprint.is_some() {
+            FileSyncDecision::Upload
+        } else if current_remote_etag.is_some() {
+            FileSyncDecision::Download
+        } else {
+            FileSyncDecision::Noop
+        };
+    };
+
+    let local_changed = anchor.local_fingerprint.as_deref() != current_local_fingerprint;
+    let remote_changed = anchor.remote_etag.as_deref() != current_remote_etag;
+
+    match (
+        current_local_fingerprint,
+        current_remote_etag,
+        local_changed,
+        remote_changed,
+    ) {
+        (Some(_), Some(_), false, false) => FileSyncDecision::Noop,
+        (Some(_), Some(_), true, false) => FileSyncDecision::Upload,
+        (Some(_), Some(_), false, true) => FileSyncDecision::Download,
+        (Some(_), Some(_), true, true) => match conflict_strategy {
+            "prefer-local" => FileSyncDecision::Upload,
+            "prefer-remote" => FileSyncDecision::Download,
+            _ => FileSyncDecision::ConflictReview,
+        },
+        (Some(_), None, true, false) if anchor.remote_etag.is_none() => FileSyncDecision::Upload,
+        (None, Some(_), false, true) if anchor.local_fingerprint.is_none() => {
+            FileSyncDecision::Download
+        }
+        (Some(_), None, false, false) if anchor.remote_etag.is_none() => FileSyncDecision::Noop,
+        (None, Some(_), false, false) if anchor.local_fingerprint.is_none() => {
+            FileSyncDecision::Noop
+        }
+        _ => FileSyncDecision::ReviewRequired,
+    }
+}
+
+fn file_size<T>(entry: &T) -> Option<u64>
+where
+    T: FileSized,
+{
+    entry.file_size()
+}
+
+trait FileSized {
+    fn file_size(&self) -> Option<u64>;
+}
+
+impl FileSized for LocalIndexedEntry {
+    fn file_size(&self) -> Option<u64> {
+        (self.kind == "file").then_some(self.size)
+    }
+}
+
+impl FileSized for RemoteIndexedEntry {
+    fn file_size(&self) -> Option<u64> {
+        (self.kind == "file").then_some(self.size)
+    }
+}
+
+fn local_entry_map(snapshot: &LocalIndexSnapshot) -> BTreeMap<String, LocalIndexedEntry> {
     snapshot
         .entries
         .iter()
-        .filter_map(|entry| match entry.kind.as_str() {
-            "file" => Some((
+        .map(|entry| {
+            (
                 entry.relative_path.clone(),
-                IndexedEntryKind::File { size: entry.size },
-            )),
-            "directory" => Some((entry.relative_path.clone(), IndexedEntryKind::Directory)),
-            _ => None,
+                LocalIndexedEntry {
+                    kind: entry.kind.clone(),
+                    size: entry.size,
+                    fingerprint: entry.fingerprint.clone(),
+                },
+            )
         })
         .collect()
 }
 
-fn remote_entry_map(snapshot: &RemoteIndexSnapshot) -> BTreeMap<String, IndexedEntryKind> {
+fn remote_entry_map(snapshot: &RemoteIndexSnapshot) -> BTreeMap<String, RemoteIndexedEntry> {
     snapshot
         .entries
         .iter()
-        .filter_map(|entry| match entry.kind.as_str() {
-            "file" => {
-                let kind = if is_glacier_storage_class(entry.storage_class.as_deref()) {
-                    IndexedEntryKind::Glacier { size: entry.size }
-                } else {
-                    IndexedEntryKind::File { size: entry.size }
-                };
-                Some((entry.relative_path.clone(), kind))
-            }
-            "directory" => Some((entry.relative_path.clone(), IndexedEntryKind::Directory)),
-            _ => None,
+        .map(|entry| {
+            (
+                entry.relative_path.clone(),
+                RemoteIndexedEntry {
+                    kind: entry.kind.clone(),
+                    size: entry.size,
+                    etag: entry.etag.clone(),
+                    storage_class: entry.storage_class.clone(),
+                },
+            )
         })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::build_sync_plan;
     use crate::storage::{
-        local_index::{LocalIndexEntry, LocalIndexSnapshot, LocalIndexSummary},
+        local_index::{bytes_fingerprint, LocalIndexEntry, LocalIndexSnapshot, LocalIndexSummary},
         remote_index::{RemoteIndexSnapshot, RemoteIndexSummary, RemoteObjectEntry},
+        sync_db::SyncAnchor,
     };
 
-    #[test]
-    fn builds_upload_download_conflict_and_noop_actions() {
-        let local = LocalIndexSnapshot {
-            version: 1,
+    fn local_file(path: &str, size: u64, content: &str) -> LocalIndexEntry {
+        LocalIndexEntry {
+            relative_path: path.into(),
+            kind: "file".into(),
+            size,
+            modified_at: None,
+            fingerprint: Some(bytes_fingerprint(content.as_bytes())),
+        }
+    }
+
+    fn local_dir(path: &str) -> LocalIndexEntry {
+        LocalIndexEntry {
+            relative_path: path.into(),
+            kind: "directory".into(),
+            size: 0,
+            modified_at: None,
+            fingerprint: None,
+        }
+    }
+
+    fn remote_file(path: &str, size: u64, etag: &str) -> RemoteObjectEntry {
+        RemoteObjectEntry {
+            key: path.into(),
+            relative_path: path.into(),
+            kind: "file".into(),
+            size,
+            last_modified_at: None,
+            etag: Some(etag.into()),
+            storage_class: None,
+        }
+    }
+
+    fn remote_dir(path: &str) -> RemoteObjectEntry {
+        RemoteObjectEntry {
+            key: format!("{path}/"),
+            relative_path: path.into(),
+            kind: "directory".into(),
+            size: 0,
+            last_modified_at: None,
+            etag: None,
+            storage_class: None,
+        }
+    }
+
+    fn local_snapshot(entries: Vec<LocalIndexEntry>) -> LocalIndexSnapshot {
+        LocalIndexSnapshot {
+            version: 2,
             root_folder: "C:/sync".into(),
             summary: LocalIndexSummary::default(),
-            entries: vec![
-                LocalIndexEntry {
-                    relative_path: "nested".into(),
-                    kind: "directory".into(),
-                    size: 0,
-                    modified_at: None,
-                },
-                LocalIndexEntry {
-                    relative_path: "alpha.txt".into(),
-                    kind: "file".into(),
-                    size: 5,
-                    modified_at: None,
-                },
-                LocalIndexEntry {
-                    relative_path: "beta.txt".into(),
-                    kind: "file".into(),
-                    size: 10,
-                    modified_at: None,
-                },
-                LocalIndexEntry {
-                    relative_path: "same.txt".into(),
-                    kind: "file".into(),
-                    size: 12,
-                    modified_at: None,
-                },
-            ],
-        };
-        let remote = RemoteIndexSnapshot {
+            entries,
+        }
+    }
+
+    fn remote_snapshot(entries: Vec<RemoteObjectEntry>) -> RemoteIndexSnapshot {
+        RemoteIndexSnapshot {
             version: 1,
             bucket: "demo".into(),
+            excluded_prefixes: Vec::new(),
             summary: RemoteIndexSummary::default(),
-            entries: vec![
-                RemoteObjectEntry {
-                    key: "beta.txt".into(),
-                    relative_path: "beta.txt".into(),
-                    kind: "file".into(),
-                    size: 11,
-                    last_modified_at: None,
-                    etag: None,
-                    storage_class: None,
-                },
-                RemoteObjectEntry {
-                    key: "gamma.txt".into(),
-                    relative_path: "gamma.txt".into(),
-                    kind: "file".into(),
-                    size: 7,
-                    last_modified_at: None,
-                    etag: None,
-                    storage_class: None,
-                },
-                RemoteObjectEntry {
-                    key: "same.txt".into(),
-                    relative_path: "same.txt".into(),
-                    kind: "file".into(),
-                    size: 12,
-                    last_modified_at: None,
-                    etag: None,
-                    storage_class: None,
-                },
-            ],
-        };
+            entries,
+        }
+    }
 
-        let plan = build_sync_plan(&local, &remote, true);
+    fn file_anchor(path: &str, local_content: &str, remote_etag: Option<&str>) -> SyncAnchor {
+        SyncAnchor {
+            path: path.into(),
+            kind: "file".into(),
+            local_fingerprint: Some(bytes_fingerprint(local_content.as_bytes())),
+            remote_etag: remote_etag.map(str::to_string),
+            synced_at: "2026-04-12T00:00:00Z".into(),
+        }
+    }
 
-        assert_eq!(plan.summary.local_file_count, 3);
-        assert_eq!(plan.summary.remote_object_count, 3);
-        assert_eq!(plan.summary.upload_count, 1);
-        assert_eq!(plan.summary.create_directory_count, 1);
-        assert_eq!(plan.summary.download_count, 1);
-        assert_eq!(plan.summary.conflict_count, 1);
-        assert_eq!(plan.summary.noop_count, 1);
-        assert_eq!(plan.summary.pending_operation_count, 4);
-        assert_eq!(
-            plan.queue_items
-                .iter()
-                .map(|item| (item.path.as_str(), item.operation.as_str()))
-                .collect::<Vec<_>>(),
-            vec![
-                ("alpha.txt", "upload"),
-                ("beta.txt", "conflict_review"),
-                ("gamma.txt", "download"),
-                ("nested", "create_directory"),
-            ]
+    #[test]
+    fn anchored_local_only_edit_plans_upload() {
+        let local = local_snapshot(vec![local_file("note.txt", 5, "bravo")]);
+        let remote = remote_snapshot(vec![remote_file("note.txt", 5, "etag-base")]);
+        let mut anchors = BTreeMap::new();
+        anchors.insert(
+            "note.txt".into(),
+            file_anchor("note.txt", "alpha", Some("etag-base")),
         );
+
+        let plan = build_sync_plan(&local, &remote, &anchors, "preserve-both", true);
+
+        assert_eq!(plan.summary.upload_count, 1);
+        assert_eq!(plan.summary.conflict_count, 0);
+        assert_eq!(plan.queue_items[0].operation, "upload");
     }
 
     #[test]
-    fn does_not_download_remote_only_directories() {
-        let local = LocalIndexSnapshot {
-            version: 1,
-            root_folder: "C:/sync".into(),
-            summary: LocalIndexSummary::default(),
-            entries: vec![],
-        };
-        let remote = RemoteIndexSnapshot {
-            version: 1,
-            bucket: "demo".into(),
-            summary: RemoteIndexSummary::default(),
-            entries: vec![RemoteObjectEntry {
-                key: "nested/".into(),
-                relative_path: "nested".into(),
-                kind: "directory".into(),
-                size: 0,
-                last_modified_at: None,
-                etag: None,
-                storage_class: None,
-            }],
-        };
+    fn anchored_remote_only_edit_plans_download() {
+        let local = local_snapshot(vec![local_file("note.txt", 5, "alpha")]);
+        let remote = remote_snapshot(vec![remote_file("note.txt", 5, "etag-new")]);
+        let mut anchors = BTreeMap::new();
+        anchors.insert(
+            "note.txt".into(),
+            file_anchor("note.txt", "alpha", Some("etag-base")),
+        );
 
-        let plan = build_sync_plan(&local, &remote, true);
+        let plan = build_sync_plan(&local, &remote, &anchors, "preserve-both", true);
 
-        assert_eq!(plan.summary.local_file_count, 0);
-        assert_eq!(plan.summary.remote_object_count, 0);
-        assert_eq!(plan.summary.download_count, 0);
-        assert_eq!(plan.summary.pending_operation_count, 0);
-        assert_eq!(plan.observed_entries.len(), 1);
-        assert_eq!(plan.observed_entries[0].resolution, "noop");
+        assert_eq!(plan.summary.download_count, 1);
+        assert_eq!(plan.summary.conflict_count, 0);
+        assert_eq!(plan.queue_items[0].operation, "download");
     }
 
     #[test]
-    fn glacier_remote_only_file_is_noop() {
-        let local = LocalIndexSnapshot {
-            version: 1,
-            root_folder: "C:/sync".into(),
-            summary: LocalIndexSummary::default(),
-            entries: vec![],
-        };
-        let remote = RemoteIndexSnapshot {
-            version: 1,
-            bucket: "demo".into(),
-            summary: RemoteIndexSummary::default(),
-            entries: vec![RemoteObjectEntry {
-                key: "frozen.txt".into(),
-                relative_path: "frozen.txt".into(),
-                kind: "file".into(),
-                size: 50,
-                last_modified_at: None,
-                etag: None,
-                storage_class: Some("GLACIER_IR".into()),
-            }],
-        };
+    fn anchored_dual_drift_plans_conflict() {
+        let local = local_snapshot(vec![local_file("note.txt", 5, "bravo")]);
+        let remote = remote_snapshot(vec![remote_file("note.txt", 5, "etag-new")]);
+        let mut anchors = BTreeMap::new();
+        anchors.insert(
+            "note.txt".into(),
+            file_anchor("note.txt", "alpha", Some("etag-base")),
+        );
 
-        let plan = build_sync_plan(&local, &remote, true);
+        let plan = build_sync_plan(&local, &remote, &anchors, "preserve-both", true);
 
-        assert_eq!(plan.summary.download_count, 0);
-        assert_eq!(plan.summary.upload_count, 0);
-        assert_eq!(plan.summary.noop_count, 1);
-        assert_eq!(plan.summary.remote_object_count, 0);
-        assert!(plan.queue_items.is_empty());
-        assert_eq!(plan.observed_entries.len(), 1);
-        assert_eq!(plan.observed_entries[0].resolution, "noop");
+        assert_eq!(plan.summary.conflict_count, 1);
+        assert_eq!(plan.queue_items[0].operation, "conflict_review");
     }
 
     #[test]
-    fn glacier_file_with_local_copy_is_noop() {
-        let local = LocalIndexSnapshot {
-            version: 1,
-            root_folder: "C:/sync".into(),
-            summary: LocalIndexSummary::default(),
-            entries: vec![LocalIndexEntry {
-                relative_path: "archive.dat".into(),
-                kind: "file".into(),
-                size: 100,
-                modified_at: None,
-            }],
-        };
-        let remote = RemoteIndexSnapshot {
-            version: 1,
-            bucket: "demo".into(),
-            summary: RemoteIndexSummary::default(),
-            entries: vec![RemoteObjectEntry {
-                key: "archive.dat".into(),
-                relative_path: "archive.dat".into(),
-                kind: "file".into(),
-                size: 100,
-                last_modified_at: None,
-                etag: None,
-                storage_class: Some("GLACIER".into()),
-            }],
-        };
+    fn anchored_same_size_changed_content_is_not_noop_when_local_changed() {
+        let local = local_snapshot(vec![local_file("note.txt", 5, "bravo")]);
+        let remote = remote_snapshot(vec![remote_file("note.txt", 5, "etag-base")]);
+        let mut anchors = BTreeMap::new();
+        anchors.insert(
+            "note.txt".into(),
+            file_anchor("note.txt", "alpha", Some("etag-base")),
+        );
 
-        let plan = build_sync_plan(&local, &remote, true);
+        let plan = build_sync_plan(&local, &remote, &anchors, "preserve-both", true);
 
-        assert_eq!(plan.summary.upload_count, 0);
-        assert_eq!(plan.summary.download_count, 0);
-        assert_eq!(plan.summary.noop_count, 1);
-        assert!(plan.queue_items.is_empty());
-        assert_eq!(plan.observed_entries[0].resolution, "noop");
-        assert_eq!(plan.observed_entries[0].local_size, Some(100));
-        assert_eq!(plan.observed_entries[0].remote_size, Some(100));
+        assert_eq!(plan.queue_items[0].operation, "upload");
     }
 
     #[test]
-    fn deep_archive_file_is_also_noop() {
-        let local = LocalIndexSnapshot {
-            version: 1,
-            root_folder: "C:/sync".into(),
-            summary: LocalIndexSummary::default(),
-            entries: vec![],
-        };
-        let remote = RemoteIndexSnapshot {
-            version: 1,
-            bucket: "demo".into(),
-            summary: RemoteIndexSummary::default(),
-            entries: vec![RemoteObjectEntry {
-                key: "deep.bin".into(),
-                relative_path: "deep.bin".into(),
-                kind: "file".into(),
-                size: 200,
-                last_modified_at: None,
-                etag: None,
-                storage_class: Some("DEEP_ARCHIVE".into()),
-            }],
-        };
+    fn unanchored_same_path_file_file_is_review_required() {
+        let local = local_snapshot(vec![local_file("note.txt", 5, "alpha")]);
+        let remote = remote_snapshot(vec![remote_file("note.txt", 5, "etag-base")]);
 
-        let plan = build_sync_plan(&local, &remote, true);
+        let plan = build_sync_plan(&local, &remote, &BTreeMap::new(), "preserve-both", true);
 
-        assert_eq!(plan.summary.download_count, 0);
-        assert_eq!(plan.summary.noop_count, 1);
+        assert_eq!(plan.summary.conflict_count, 1);
+        assert_eq!(plan.queue_items[0].operation, "review_required");
+    }
+
+    #[test]
+    fn unanchored_local_only_file_uploads() {
+        let local = local_snapshot(vec![local_file("alpha.txt", 5, "alpha")]);
+        let remote = remote_snapshot(vec![]);
+
+        let plan = build_sync_plan(&local, &remote, &BTreeMap::new(), "preserve-both", true);
+
+        assert_eq!(plan.summary.upload_count, 1);
+        assert_eq!(plan.queue_items[0].operation, "upload");
+    }
+
+    #[test]
+    fn unanchored_remote_only_file_downloads() {
+        let local = local_snapshot(vec![]);
+        let remote = remote_snapshot(vec![remote_file("beta.txt", 7, "etag-1")]);
+
+        let plan = build_sync_plan(&local, &remote, &BTreeMap::new(), "preserve-both", true);
+
+        assert_eq!(plan.summary.download_count, 1);
+        assert_eq!(plan.queue_items[0].operation, "download");
+    }
+
+    #[test]
+    fn anchored_missing_remote_with_remote_base_is_review_required() {
+        let local = local_snapshot(vec![local_file("note.txt", 5, "alpha")]);
+        let remote = remote_snapshot(vec![]);
+        let mut anchors = BTreeMap::new();
+        anchors.insert(
+            "note.txt".into(),
+            file_anchor("note.txt", "alpha", Some("etag-base")),
+        );
+
+        let plan = build_sync_plan(&local, &remote, &anchors, "preserve-both", true);
+
+        assert_eq!(plan.summary.conflict_count, 1);
+        assert_eq!(plan.queue_items[0].operation, "review_required");
+    }
+
+    #[test]
+    fn directory_rules_remain_stable() {
+        let local = local_snapshot(vec![local_dir("docs")]);
+        let remote = remote_snapshot(vec![]);
+
+        let plan = build_sync_plan(&local, &remote, &BTreeMap::new(), "preserve-both", true);
+
+        assert_eq!(plan.summary.create_directory_count, 1);
+        assert_eq!(plan.queue_items[0].operation, "create_directory");
+    }
+
+    #[test]
+    fn file_directory_mismatch_is_conflict_review() {
+        let local = local_snapshot(vec![local_file("mixed", 4, "test")]);
+        let remote = remote_snapshot(vec![remote_dir("mixed")]);
+
+        let plan = build_sync_plan(&local, &remote, &BTreeMap::new(), "preserve-both", true);
+
+        assert_eq!(plan.summary.conflict_count, 1);
+        assert_eq!(plan.queue_items[0].operation, "conflict_review");
+    }
+
+    #[test]
+    fn conflict_strategy_applies_only_to_anchored_dual_drift() {
+        let local = local_snapshot(vec![local_file("note.txt", 5, "bravo")]);
+        let remote = remote_snapshot(vec![remote_file("note.txt", 5, "etag-new")]);
+        let mut anchors = BTreeMap::new();
+        anchors.insert(
+            "note.txt".into(),
+            file_anchor("note.txt", "alpha", Some("etag-base")),
+        );
+
+        let prefer_local = build_sync_plan(&local, &remote, &anchors, "prefer-local", true);
+        let prefer_remote = build_sync_plan(&local, &remote, &anchors, "prefer-remote", true);
+
+        assert_eq!(prefer_local.queue_items[0].operation, "upload");
+        assert_eq!(prefer_remote.queue_items[0].operation, "download");
     }
 }

@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 
 use super::{app_storage_path, now_iso, system_time_to_iso, LOCAL_INDEX_FILE_NAME};
 
@@ -23,6 +24,8 @@ pub struct LocalIndexEntry {
     pub kind: String,
     pub size: u64,
     pub modified_at: Option<String>,
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,7 +37,9 @@ pub struct LocalIndexSnapshot {
     pub entries: Vec<LocalIndexEntry>,
 }
 
-pub fn read_local_index_snapshot(app: &AppHandle) -> Result<Option<LocalIndexSnapshot>, String> {
+pub fn read_local_index_snapshot<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<LocalIndexSnapshot>, String> {
     let path = app_storage_path(app, LOCAL_INDEX_FILE_NAME)?;
     if !path.exists() {
         return Ok(None);
@@ -43,16 +48,16 @@ pub fn read_local_index_snapshot(app: &AppHandle) -> Result<Option<LocalIndexSna
     read_local_index_snapshot_file(&path).map(Some)
 }
 
-pub fn write_local_index_snapshot(
-    app: &AppHandle,
+pub fn write_local_index_snapshot<R: Runtime>(
+    app: &AppHandle<R>,
     snapshot: &LocalIndexSnapshot,
 ) -> Result<(), String> {
     let path = app_storage_path(app, LOCAL_INDEX_FILE_NAME)?;
     write_local_index_snapshot_file(&path, snapshot)
 }
 
-pub fn read_local_index_snapshot_for_pair(
-    app: &AppHandle,
+pub fn read_local_index_snapshot_for_pair<R: Runtime>(
+    app: &AppHandle<R>,
     pair_id: &str,
 ) -> Result<Option<LocalIndexSnapshot>, String> {
     let file_name = local_index_file_name_for_pair(pair_id);
@@ -64,8 +69,8 @@ pub fn read_local_index_snapshot_for_pair(
     read_local_index_snapshot_file(&path).map(Some)
 }
 
-pub fn write_local_index_snapshot_for_pair(
-    app: &AppHandle,
+pub fn write_local_index_snapshot_for_pair<R: Runtime>(
+    app: &AppHandle<R>,
     pair_id: &str,
     snapshot: &LocalIndexSnapshot,
 ) -> Result<(), String> {
@@ -88,7 +93,7 @@ pub fn scan_local_folder(root: &Path) -> Result<LocalIndexSnapshot, String> {
     scan_directory_recursive(root, root, &mut entries, &mut summary)?;
 
     Ok(LocalIndexSnapshot {
-        version: 1,
+        version: 2,
         root_folder: root.to_string_lossy().into_owned(),
         summary,
         entries,
@@ -170,6 +175,7 @@ fn scan_directory_recursive(
                 kind: "directory".into(),
                 size: 0,
                 modified_at: metadata.modified().ok().and_then(system_time_to_iso),
+                fingerprint: None,
             });
 
             scan_directory_recursive(root, &path, entries, summary)?;
@@ -184,6 +190,7 @@ fn scan_directory_recursive(
                 kind: "file".into(),
                 size: metadata.len(),
                 modified_at: metadata.modified().ok().and_then(system_time_to_iso),
+                fingerprint: Some(file_fingerprint(&path)?),
             });
         }
     }
@@ -199,6 +206,30 @@ fn relative_path(root: &Path, path: &Path) -> Result<String, String> {
         )
     })?;
     Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
+pub(crate) fn file_fingerprint(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|error| {
+        format!(
+            "failed to read local file '{}' for fingerprinting: {error}",
+            path.display()
+        )
+    })?;
+    Ok(hex_sha256(&bytes))
+}
+
+pub(crate) fn bytes_fingerprint(bytes: &[u8]) -> String {
+    hex_sha256(bytes)
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
 }
 
 fn read_local_index_snapshot_file(path: &Path) -> Result<LocalIndexSnapshot, String> {
@@ -260,7 +291,7 @@ mod tests {
         assert!(snapshot
             .entries
             .iter()
-            .any(|entry| entry.relative_path == "nested/beta.txt"));
+            .any(|entry| entry.relative_path == "nested/beta.txt" && entry.fingerprint.is_some()));
 
         fs::remove_dir_all(root).expect("should clean up scan test directory");
     }
@@ -288,6 +319,7 @@ mod tests {
 
         assert_eq!(restored.summary.file_count, 1);
         assert_eq!(restored.entries.len(), 1);
+        assert!(restored.entries[0].fingerprint.is_some());
 
         fs::remove_file(snapshot_path).expect("should clean up snapshot json");
         fs::remove_dir_all(root).expect("should clean up roundtrip directory");
@@ -305,5 +337,23 @@ mod tests {
     fn pair_file_name_differs_from_global() {
         let pair_name = local_index_file_name_for_pair("default");
         assert_ne!(pair_name, super::super::LOCAL_INDEX_FILE_NAME);
+    }
+
+    #[test]
+    fn fingerprint_changes_for_same_size_content() {
+        let root = temp_path("fingerprint-same-size");
+        fs::create_dir_all(&root).expect("should create test root");
+        let file_path = root.join("note.txt");
+
+        fs::write(&file_path, b"alpha").expect("should write first content");
+        let first = scan_local_folder(&root).expect("first scan should succeed");
+
+        fs::write(&file_path, b"bravo").expect("should write second content");
+        let second = scan_local_folder(&root).expect("second scan should succeed");
+
+        assert_eq!(first.entries[0].size, second.entries[0].size);
+        assert_ne!(first.entries[0].fingerprint, second.entries[0].fingerprint);
+
+        fs::remove_dir_all(root).expect("should clean up fingerprint test directory");
     }
 }

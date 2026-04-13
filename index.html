@@ -62,7 +62,7 @@
 
       <section class="settings-section workspace-card dashboard-shell">
         <div class="screen-stack">
-        <section id="screen-home" class="screen-panel is-active">
+        <section id="screen-home" class="screen-panel is-active home-screen">
           <div class="settings-section home-toolbar">
             <div class="section-heading-row">
               <select id="active-location-select">
@@ -71,31 +71,43 @@
               <span id="status-phase-inline" class="badge default">Unconfigured</span>
             </div>
             <p id="status-summary" class="hint">Choose a sync location to view its files.</p>
-            <div class="stat-grid overview-grid">
-              <div class="stat-card stat-card-emphasis">
-                <span>Local</span>
-                <strong id="status-overview-local">0</strong>
-              </div>
-              <div class="stat-card stat-card-emphasis">
-                <span>Remote</span>
-                <strong id="status-overview-remote">0</strong>
-              </div>
-              <div class="stat-card stat-card-emphasis">
-                <span>In sync</span>
-                <strong id="status-overview-in-sync">0</strong>
-              </div>
-              <div class="stat-card stat-card-emphasis">
-                <span>Conflicts</span>
-                <strong id="status-overview-not-in-sync">0</strong>
-              </div>
-            </div>
           </div>
 
-          <div class="settings-section file-tree-section">
+          <div id="file-tree-section" class="settings-section file-tree-section">
+            <div id="bin-toolbar" class="bin-toolbar" hidden>
+              <span id="bin-selection-summary" class="hint">Select bin entries to restore or purge.</span>
+              <div class="bin-toolbar-actions">
+                <button id="restore-selected-btn" class="secondary-btn slim-btn" type="button" disabled>Restore selected</button>
+                <button id="purge-selected-btn" class="secondary-btn slim-btn danger" type="button" disabled>Purge selected</button>
+              </div>
+            </div>
+            <div id="file-tree-loading-indicator" class="file-tree-loading-indicator" hidden aria-live="polite">
+              <span class="file-tree-loading-spinner" aria-hidden="true"></span>
+              <span>Loading files…</span>
+            </div>
             <div id="file-tree-empty-state" class="empty-state">
               <div class="empty-state-card">Select a sync location to browse files.</div>
             </div>
             <ul id="file-tree" class="tree tree--dot-left" hidden></ul>
+          </div>
+
+          <div class="home-status-bar" aria-label="Selected location status">
+            <div class="home-status-metric">
+              <span id="status-overview-local-label">Local</span>
+              <strong id="status-overview-local">0</strong>
+            </div>
+            <div class="home-status-metric">
+              <span id="status-overview-remote-label">Remote</span>
+              <strong id="status-overview-remote">0</strong>
+            </div>
+            <div class="home-status-metric">
+              <span id="status-overview-in-sync-label">In sync</span>
+              <strong id="status-overview-in-sync">0</strong>
+            </div>
+            <div class="home-status-metric">
+              <span id="status-overview-not-in-sync-label">Changes</span>
+              <strong id="status-overview-not-in-sync">0</strong>
+            </div>
           </div>
         </section>
 
@@ -223,21 +235,19 @@
 
               <div class="settings-section storage-modal-section">
                 <div class="section-heading-row">
-                  <h2>Conflict + delete defaults</h2>
+                  <h2>Conflict defaults</h2>
                 </div>
                 <div class="form-grid">
                   <label class="field-block">
                     <span>Conflict strategy</span>
                     <select id="conflict-strategy-select">
                       <option value="preserve-both">Preserve both</option>
+                      <option value="prefer-local">Prefer local</option>
+                      <option value="prefer-remote">Prefer remote</option>
                     </select>
                   </label>
-                  <label class="field-block">
-                    <span>Delete safety hours</span>
-                    <input id="delete-safety-input" type="number" min="1" max="168" step="1" value="24" />
-                  </label>
                 </div>
-                <p class="hint">Connect and sync may upload when the backend says it is safe. This UI still does not claim automatic downloads, deletes, or conflict resolution.</p>
+                <p class="hint">Delete behavior now follows each sync location's remote bin settings. File/file mismatches can prefer local or remote; file/directory mismatches still require conflict review.</p>
                 <div class="stack-actions primary-action-row">
                   <button id="save-settings-btn" class="secondary-btn" type="button">
                     <i data-lucide="save"></i>
@@ -331,6 +341,10 @@
                     </select>
                   </label>
                   <label class="checkbox-label form-span-2">
+                    <input id="location-object-versioning-enabled-input" type="checkbox" />
+                    <span>Object versioning enabled</span>
+                  </label>
+                  <label class="checkbox-label form-span-2">
                     <input id="location-enabled-input" type="checkbox" checked />
                     <span>Enabled</span>
                   </label>
@@ -346,13 +360,21 @@
                     <span>Conflict strategy</span>
                     <select id="location-conflict-strategy-select">
                       <option value="preserve-both">Preserve both</option>
+                      <option value="prefer-local">Prefer local</option>
+                      <option value="prefer-remote">Prefer remote</option>
                     </select>
                   </label>
-                  <label class="field-block">
-                    <span>Delete safety hours</span>
-                    <input id="location-delete-safety-input" type="number" min="1" max="168" step="1" value="24" />
+                  <label class="checkbox-label form-span-2">
+                    <input id="location-remote-bin-enabled-input" type="checkbox" checked />
+                    <span>Remote bin enabled</span>
+                  </label>
+                  <label class="field-block form-span-2">
+                    <span>Remote bin retention (days)</span>
+                    <input id="location-remote-bin-retention-input" type="number" min="1" max="3650" step="1" value="7" />
+                    <small class="hint">Default is 7 days for new sync locations.</small>
                   </label>
                 </div>
+                <p id="location-remote-bin-hint" class="hint">Deleting a file removes the local copy immediately and moves the remote object into the remote bin for this sync location.</p>
                 <input id="location-editing-id" type="hidden" value="" />
                 <div class="stack-actions primary-action-row">
                   <button id="location-browse-folder-btn" class="secondary-btn slim-btn" type="button">

@@ -34,8 +34,17 @@ pub fn run() {
             storage::commands::update_sync_pair,
             storage::commands::remove_sync_pair,
             storage::commands::list_file_entries,
+            storage::commands::list_bin_entries,
+            storage::commands::restore_bin_entry,
+            storage::commands::restore_bin_entries,
+            storage::commands::purge_bin_entries,
+            storage::commands::reveal_tree_entry,
+            storage::commands::prepare_conflict_comparison,
+            storage::commands::open_path,
+            storage::commands::resolve_conflict,
             storage::commands::toggle_local_copy,
             storage::commands::delete_file,
+            storage::commands::delete_folder,
             storage::commands::change_storage_class,
         ])
         .run(tauri::generate_context!())

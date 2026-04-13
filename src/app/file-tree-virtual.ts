@@ -6,9 +6,17 @@ import type {
 } from "./file-tree";
 import {
   buildTree,
+  canMutateLiveFileEntry,
+  canMutateLiveDirectoryNode,
   deriveDirectoryStatus,
+  deriveDirectoryStatusTooltip,
+  getBinLifecycleParts,
+  getStatusTooltip,
+  isEntryCheckboxDisabled,
+  isResolvableConflictFileEntry,
   isDirectoryNode,
   isFileNode,
+  runRestoreAction,
   STATUS_CLASS_MAP,
   type TreeNode,
 } from "./file-tree";
@@ -47,8 +55,24 @@ interface VirtualTreeState {
   rowHeight: number;
   renderedRange: { start: number; end: number };
   onChange?: (checkedPaths: string[]) => void;
-  onDelete?: (path: string) => void;
+  onReveal?: (path: string) => void;
+  onDelete?: (target: { path: string; kind: "file" | "directory" }) => void;
+  onRestore?: (entry: FileEntry) => void;
   onStorageClass?: (path: string, currentStorageClass: string | null) => void;
+  onResolveConflict?: (entry: FileEntry) => void;
+  mode: "live" | "bin";
+}
+
+function getInitialCheckedPaths(entries: FileEntry[], mode: "live" | "bin", provided?: string[]): Set<string> {
+  if (mode === "bin") {
+    return new Set(provided ?? []);
+  }
+
+  return new Set(
+    entries
+      .filter((entry) => entry.kind === "file" && entry.hasLocalCopy)
+      .map((entry) => entry.path),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -169,7 +193,7 @@ function recomputeDirCheckStates(state: VirtualTreeState): void {
     const childStates = node.children.map(computeForNode);
 
     if (childStates.length === 0) {
-      const result = node.entry?.hasLocalCopy ?? false;
+      const result = state.checkedPaths.has(node.path) || (node.entry?.hasLocalCopy ?? false);
       state.dirCheckState.set(node.path, result);
       return result;
     }
@@ -205,6 +229,18 @@ function collectLeafPaths(node: TreeNode): string[] {
   const result: string[] = [];
   for (const child of node.children) {
     result.push(...collectLeafPaths(child));
+  }
+  return result;
+}
+
+function collectSelectablePaths(node: TreeNode): string[] {
+  if (isFileNode(node)) {
+    return [node.path];
+  }
+
+  const result = [node.path];
+  for (const child of node.children) {
+    result.push(...collectSelectablePaths(child));
   }
   return result;
 }
@@ -266,7 +302,7 @@ function getCheckedPathsForCallback(state: VirtualTreeState): string[] {
 // Row element creation
 // ---------------------------------------------------------------------------
 
-function createRowElement(row: FlatRow): HTMLElement {
+function createRowElement(row: FlatRow, mode: "live" | "bin"): HTMLElement {
   // .vtree-row container
   const vtreeRow = document.createElement("div");
   vtreeRow.className = "vtree-row";
@@ -282,8 +318,15 @@ function createRowElement(row: FlatRow): HTMLElement {
   // Status indicator
   const statusIndicator = document.createElement("span");
   statusIndicator.className = `status-indicator ${row.statusClass}`;
+  const statusTooltip = row.isDirectory
+    ? deriveDirectoryStatusTooltip(row.node)
+    : getStatusTooltip(row.node.entry!.status);
+  statusIndicator.setAttribute("title", statusTooltip);
+  statusIndicator.setAttribute("aria-label", statusTooltip);
+  statusIndicator.setAttribute("role", "img");
   const statusDot = document.createElement("span");
   statusDot.className = "status-dot";
+  statusDot.setAttribute("aria-hidden", "true");
   statusIndicator.appendChild(statusDot);
   treeRow.appendChild(statusIndicator);
 
@@ -301,8 +344,11 @@ function createRowElement(row: FlatRow): HTMLElement {
     checkbox.checked = false;
     checkbox.indeterminate = false;
   }
-  // Disable checkbox for glacier entries
-  if (!row.isDirectory && row.node.entry?.status === "glacier") {
+  // Disable checkbox for non-destructive review/conflict states and bin mode
+  if (row.isDirectory && (row.node.entry?.status === "conflict" || row.node.entry?.status === "review-required")) {
+    checkbox.disabled = true;
+  }
+  if (!row.isDirectory && row.node.entry && isEntryCheckboxDisabled(row.node.entry, mode)) {
     checkbox.disabled = true;
   }
   treeRow.appendChild(checkbox);
@@ -327,26 +373,125 @@ function createRowElement(row: FlatRow): HTMLElement {
 
   treeRow.appendChild(button);
 
-  // Storage class button for file rows only
-  if (!row.isDirectory) {
-    const storageClassBtn = document.createElement("button");
-    storageClassBtn.className = "icon-btn icon-btn-sm tree-storage-class-btn";
-    storageClassBtn.type = "button";
-    storageClassBtn.setAttribute("data-storage-class-path", row.node.path);
-    const snowflakeIcon = createIcon("snowflake");
-    if (snowflakeIcon) storageClassBtn.appendChild(snowflakeIcon);
-    treeRow.appendChild(storageClassBtn);
+  const revealBtn = document.createElement("button");
+  revealBtn.className = "icon-btn icon-btn-sm tree-reveal-btn";
+  revealBtn.type = "button";
+  revealBtn.setAttribute("data-reveal-path", row.node.path);
+  revealBtn.setAttribute("title", "Reveal in file manager");
+  revealBtn.setAttribute("aria-label", "Reveal in file manager");
+  const revealIcon = createIcon("folder-open");
+  if (revealIcon) revealBtn.appendChild(revealIcon);
+  treeRow.appendChild(revealBtn);
+
+  if (mode === "bin" && row.node.entry) {
+    const lifecycle = document.createElement("span");
+    lifecycle.className = "tree-bin-lifecycle";
+    lifecycle.textContent = getBinLifecycleParts(row.node.entry).join(" • ");
+    if (lifecycle.textContent) {
+      lifecycle.setAttribute("title", lifecycle.textContent);
+      treeRow.appendChild(lifecycle);
+    }
   }
 
-  // Delete button for file rows only
-  if (!row.isDirectory) {
+  // Storage class button for file rows only in live mode
+  if (!row.isDirectory && mode === "live") {
+    if (row.node.entry && isResolvableConflictFileEntry(row.node.entry)) {
+      const resolveBtn = document.createElement("button");
+      resolveBtn.className = "icon-btn icon-btn-sm tree-resolve-btn";
+      resolveBtn.type = "button";
+      resolveBtn.setAttribute("data-resolve-path", row.node.path);
+      resolveBtn.setAttribute("title", "Resolve file conflict");
+      resolveBtn.setAttribute("aria-label", "Resolve file conflict");
+      const resolveIcon = createIcon("triangle-alert");
+      if (resolveIcon) resolveBtn.appendChild(resolveIcon);
+      const resolveLabel = document.createElement("span");
+      resolveLabel.className = "tree-action-label";
+      resolveLabel.textContent = "Resolve";
+      resolveBtn.appendChild(resolveLabel);
+      treeRow.appendChild(resolveBtn);
+    }
+
+    if (row.node.entry && canMutateLiveFileEntry(row.node.entry)) {
+      const storageClassBtn = document.createElement("button");
+      storageClassBtn.className = "icon-btn icon-btn-sm tree-storage-class-btn";
+      storageClassBtn.type = "button";
+      storageClassBtn.setAttribute("data-storage-class-path", row.node.path);
+      const snowflakeIcon = createIcon("snowflake");
+      if (snowflakeIcon) storageClassBtn.appendChild(snowflakeIcon);
+      treeRow.appendChild(storageClassBtn);
+    }
+  }
+
+  // Delete button for file rows only in live mode
+  if (!row.isDirectory && mode === "live" && row.node.entry && canMutateLiveFileEntry(row.node.entry)) {
     const deleteBtn = document.createElement("button");
     deleteBtn.className = "icon-btn icon-btn-sm tree-delete-btn";
     deleteBtn.type = "button";
     deleteBtn.setAttribute("data-delete-path", row.node.path);
+    deleteBtn.setAttribute("data-delete-kind", "file");
     const deleteIcon = createIcon("trash-2");
     if (deleteIcon) deleteBtn.appendChild(deleteIcon);
     treeRow.appendChild(deleteBtn);
+  }
+
+  if (row.isDirectory && mode === "live" && canMutateLiveDirectoryNode(row.node)) {
+    const deleteBtn = document.createElement("button");
+    deleteBtn.className = "icon-btn icon-btn-sm tree-delete-btn";
+    deleteBtn.type = "button";
+    deleteBtn.setAttribute("data-delete-path", row.node.path);
+    deleteBtn.setAttribute("data-delete-kind", "directory");
+    const deleteIcon = createIcon("trash-2");
+    if (deleteIcon) deleteBtn.appendChild(deleteIcon);
+    treeRow.appendChild(deleteBtn);
+  }
+
+  if (!row.isDirectory && mode === "bin") {
+    const restoreBtn = document.createElement("button");
+    restoreBtn.className = "secondary-btn slim-btn tree-restore-btn";
+    restoreBtn.type = "button";
+    restoreBtn.setAttribute("data-restore-path", row.node.path);
+    restoreBtn.setAttribute("data-restore-bin-key", row.node.entry?.binKey ?? "");
+    restoreBtn.setAttribute("data-restore-entry", JSON.stringify(row.node.entry));
+    restoreBtn.setAttribute("aria-busy", "false");
+
+    const restoreSpinner = document.createElement("span");
+    restoreSpinner.className = "tree-action-spinner";
+    restoreSpinner.setAttribute("aria-hidden", "true");
+    restoreSpinner.hidden = true;
+
+    const restoreLabel = document.createElement("span");
+    restoreLabel.className = "tree-action-label";
+    restoreLabel.textContent = "Restore";
+
+    restoreBtn.append(restoreSpinner, restoreLabel);
+    treeRow.appendChild(restoreBtn);
+  }
+
+  if (row.isDirectory && mode === "bin") {
+    const restoreBtn = document.createElement("button");
+    restoreBtn.className = "secondary-btn slim-btn tree-restore-btn";
+    restoreBtn.type = "button";
+    restoreBtn.setAttribute("data-restore-path", row.node.path);
+    restoreBtn.setAttribute("data-restore-bin-key", row.node.entry?.binKey ?? "");
+    restoreBtn.setAttribute("data-restore-entry", JSON.stringify(row.node.entry ?? {
+      path: row.node.path,
+      kind: "directory",
+      status: "deleted",
+      hasLocalCopy: false,
+    }));
+    restoreBtn.setAttribute("aria-busy", "false");
+
+    const restoreSpinner = document.createElement("span");
+    restoreSpinner.className = "tree-action-spinner";
+    restoreSpinner.setAttribute("aria-hidden", "true");
+    restoreSpinner.hidden = true;
+
+    const restoreLabel = document.createElement("span");
+    restoreLabel.className = "tree-action-label";
+    restoreLabel.textContent = "Restore";
+
+    restoreBtn.append(restoreSpinner, restoreLabel);
+    treeRow.appendChild(restoreBtn);
   }
 
   return vtreeRow;
@@ -359,7 +504,19 @@ function createRowElement(row: FlatRow): HTMLElement {
 export function renderFileTreeVirtual(
   options: FileTreeOptions,
 ): FileTreeHandle {
-  const { treeEl, emptyStateEl, entries, onChange, onDelete, onStorageClass } = options;
+  const {
+    treeEl,
+    emptyStateEl,
+    entries,
+    onChange,
+    checkedPaths: providedCheckedPaths,
+    onReveal,
+    onDelete,
+    onRestore,
+    onStorageClass,
+    onResolveConflict,
+    mode = "live",
+  } = options;
 
   emptyStateEl.hidden = true;
   treeEl.hidden = true;
@@ -370,10 +527,7 @@ export function renderFileTreeVirtual(
   const nodesByPath = indexNodes(roots);
 
   // Initialize checked state from entries
-  const checkedPaths = new Set<string>();
-  for (const entry of entries) {
-    if (entry.kind === "file" && entry.hasLocalCopy) checkedPaths.add(entry.path);
-  }
+  const checkedPaths = getInitialCheckedPaths(entries, mode, providedCheckedPaths);
 
   // Create virtual container
   const container = treeEl.parentElement!;
@@ -404,8 +558,12 @@ export function renderFileTreeVirtual(
     rowHeight: ROW_HEIGHT_FALLBACK,
     renderedRange: { start: 0, end: 0 },
     onChange,
+    onReveal,
     onDelete,
+    onRestore,
     onStorageClass,
+    onResolveConflict,
+    mode,
   };
 
   // Compute initial directory check states
@@ -452,7 +610,7 @@ export function renderFileTreeVirtual(
 
     for (let i = range.start; i < range.end; i++) {
       const row = state.flatRows[i];
-      const el = createRowElement(row);
+      const el = createRowElement(row, state.mode);
       el.style.position = "absolute";
       el.style.top = `${i * state.rowHeight}px`;
       el.style.left = "0";
@@ -518,13 +676,48 @@ export function renderFileTreeVirtual(
       return;
     }
 
+    const revealBtn = target.closest(".tree-reveal-btn");
+    if (revealBtn) {
+      e.stopPropagation();
+      const revealPath = (revealBtn as HTMLElement).getAttribute("data-reveal-path");
+      if (revealPath && state.onReveal) {
+        state.onReveal(revealPath);
+      }
+      return;
+    }
+
     // Handle delete button clicks
     const deleteBtn = target.closest(".tree-delete-btn");
     if (deleteBtn) {
       e.stopPropagation();
       const deletePath = (deleteBtn as HTMLElement).getAttribute("data-delete-path");
-      if (deletePath && state.onDelete) {
-        state.onDelete(deletePath);
+      const deleteKind = (deleteBtn as HTMLElement).getAttribute("data-delete-kind");
+      if (deletePath && (deleteKind === "file" || deleteKind === "directory") && state.onDelete) {
+        state.onDelete({ path: deletePath, kind: deleteKind });
+      }
+      return;
+    }
+
+    const restoreBtn = target.closest(".tree-restore-btn");
+    if (restoreBtn) {
+      e.stopPropagation();
+      const restorePath = (restoreBtn as HTMLElement).getAttribute("data-restore-path");
+      const restoreEntry = (restoreBtn as HTMLElement).getAttribute("data-restore-entry");
+      if (restorePath && restoreEntry && state.onRestore) {
+        runRestoreAction(restoreBtn as HTMLButtonElement, () => state.onRestore?.(JSON.parse(restoreEntry) as FileEntry));
+      }
+      return;
+    }
+
+    const resolveBtn = target.closest(".tree-resolve-btn");
+    if (resolveBtn) {
+      e.stopPropagation();
+      const resolvePath = (resolveBtn as HTMLElement).getAttribute("data-resolve-path");
+      if (resolvePath && state.onResolveConflict) {
+        const node = state.nodesByPath.get(resolvePath);
+        if (node?.entry) {
+          state.onResolveConflict(node.entry as FileEntry);
+        }
       }
       return;
     }
@@ -571,9 +764,10 @@ export function renderFileTreeVirtual(
     const isChecked = checkbox.checked;
 
     if (isDir) {
-      // Set/unset all descendant leaves
-      const leafPaths = collectLeafPaths(node);
-      for (const leafPath of leafPaths) {
+      const selectablePaths = state.mode === "bin"
+        ? collectSelectablePaths(node)
+        : collectLeafPaths(node);
+      for (const leafPath of selectablePaths) {
         if (isChecked) {
           state.checkedPaths.add(leafPath);
         } else {

@@ -3,12 +3,15 @@ import { loadStoredProfileFromBrowserStorage, saveStoredProfileToBrowserStorage 
 import type { FileEntry } from "./file-tree";
 import type {
   ActivityDebugLogState,
+  BinEntryMutationSummary,
+  BinEntryRequest,
   CredentialDraft,
   CredentialSummary,
   CredentialTestRequest,
   CredentialTestResult,
   ConnectionValidationResult,
   DeleteCredentialResult,
+  ConflictResolutionDetails,
   InventoryComparisonSummary,
   NativeActivityEvent,
   StoredStorageProfile,
@@ -47,11 +50,12 @@ function serializeSyncLocationDraft(draft: SyncLocationDraft): Omit<SyncLocation
     region: draft.region,
     bucket: draft.bucket,
     credentialProfileId: draft.credentialProfileId,
+    objectVersioningEnabled: draft.objectVersioningEnabled,
     enabled: draft.enabled,
     remotePollingEnabled: draft.remotePollingEnabled,
     pollIntervalSeconds: draft.pollIntervalSeconds,
     conflictStrategy: draft.conflictStrategy,
-    deleteSafetyHours: draft.deleteSafetyHours,
+    remoteBin: draft.remoteBin,
   };
 }
 
@@ -82,18 +86,19 @@ function createEmptyComparison(): InventoryComparisonSummary {
   };
 }
 
-function createOverview(comparison: InventoryComparisonSummary) {
+function createOverview(comparison: InventoryComparisonSummary, pendingOperationCount: number) {
   return {
     localFiles: comparison.localFileCount,
     remoteFiles: comparison.remoteObjectCount,
     inSync: comparison.exactMatchCount,
-    notInSync: comparison.localOnlyCount + comparison.remoteOnlyCount + comparison.sizeMismatchCount,
+    notInSync: pendingOperationCount,
   };
 }
 
 function createBrowserStatus(profile: StoredStorageProfile = DEFAULT_STORED_PROFILE): SyncStatus {
   const comparison = createEmptyComparison();
   const configured = Boolean(profile.localFolder && profile.bucket);
+  const pendingOperationCount = 0;
   return {
     phase: configured ? "idle" : "unconfigured",
     lastSyncAt: null,
@@ -112,7 +117,7 @@ function createBrowserStatus(profile: StoredStorageProfile = DEFAULT_STORED_PROF
     remoteObjectCount: 0,
     remoteTotalBytes: 0,
     comparison,
-    overview: createOverview(comparison),
+    overview: createOverview(comparison, pendingOperationCount),
       plan: {
       lastPlannedAt: null,
       observedPathCount: 0,
@@ -120,7 +125,7 @@ function createBrowserStatus(profile: StoredStorageProfile = DEFAULT_STORED_PROF
       downloadCount: 0,
       conflictCount: 0,
       noopCount: 0,
-      pendingOperationCount: 0,
+      pendingOperationCount,
         credentialsAvailable: profile.selectedCredentialAvailable,
       },
     };
@@ -200,12 +205,21 @@ export interface StorageGoblinClient {
   openActivityDebugLogFolder(): Promise<void>;
   listSyncLocations(): Promise<SyncLocation[]>;
   listFileEntries(locationId: string): Promise<FileEntry[]>;
+  listBinEntries(locationId: string): Promise<FileEntry[]>;
+  revealTreeEntry(locationId: string, path: string): Promise<void>;
   toggleLocalCopy(locationId: string, paths: string[], keep: boolean): Promise<void>;
   deleteFile(locationId: string, path: string): Promise<void>;
+  deleteFolder(locationId: string, path: string): Promise<void>;
+  restoreBinEntry(locationId: string, binKey: string): Promise<void>;
+  restoreBinEntries(locationId: string, entries: BinEntryRequest[]): Promise<BinEntryMutationSummary>;
+  purgeBinEntries(locationId: string, entries: BinEntryRequest[]): Promise<BinEntryMutationSummary>;
   addSyncLocation(draft: SyncLocationDraft): Promise<StoredStorageProfile>;
   updateSyncLocation(draft: SyncLocationDraft): Promise<StoredStorageProfile>;
   removeSyncLocation(locationId: string): Promise<StoredStorageProfile>;
   changeStorageClass(locationId: string, path: string, storageClass: string): Promise<void>;
+  prepareConflictComparison(locationId: string, path: string): Promise<ConflictResolutionDetails>;
+  openPath(path: string): Promise<void>;
+  resolveConflict(locationId: string, path: string, resolution: "keep-local" | "keep-remote"): Promise<void>;
 }
 
 export function createStorageGoblinClient(): StorageGoblinClient {
@@ -436,6 +450,16 @@ export function createStorageGoblinClient(): StorageGoblinClient {
       if (!native) return [];
       return invokeCommand<FileEntry[]>("list_file_entries", { locationId });
     },
+    async listBinEntries(locationId) {
+      if (!native) return [];
+      return invokeCommand<FileEntry[]>("list_bin_entries", { locationId });
+    },
+    async revealTreeEntry(locationId, path) {
+      if (!native) {
+        throw new Error("Reveal in file manager is only available in the desktop app.");
+      }
+      await invokeCommand<void>("reveal_tree_entry", { locationId, path });
+    },
     async toggleLocalCopy(locationId, paths, keep) {
       if (!native) return;
       await invokeCommand<void>("toggle_local_copy", { locationId, paths, keep });
@@ -443,6 +467,22 @@ export function createStorageGoblinClient(): StorageGoblinClient {
     async deleteFile(locationId, path) {
       if (!native) return;
       await invokeCommand<void>("delete_file", { locationId, path });
+    },
+    async deleteFolder(locationId, path) {
+      if (!native) return;
+      await invokeCommand<void>("delete_folder", { locationId, path });
+    },
+    async restoreBinEntry(locationId, binKey) {
+      if (!native) return;
+      await invokeCommand<void>("restore_bin_entry", { locationId, binKey });
+    },
+    async restoreBinEntries(locationId, entries) {
+      if (!native) return { results: [] };
+      return invokeCommand<BinEntryMutationSummary>("restore_bin_entries", { locationId, entries });
+    },
+    async purgeBinEntries(locationId, entries) {
+      if (!native) return { results: [] };
+      return invokeCommand<BinEntryMutationSummary>("purge_bin_entries", { locationId, entries });
     },
     async addSyncLocation(draft) {
       if (!native) return loadStoredProfileFromBrowserStorage();
@@ -459,6 +499,24 @@ export function createStorageGoblinClient(): StorageGoblinClient {
     async changeStorageClass(locationId, path, storageClass) {
       if (!native) return;
       await invokeCommand<void>("change_storage_class", { locationId, path, storageClass });
+    },
+    async prepareConflictComparison(locationId, path) {
+      if (!native) {
+        throw new Error("Conflict compare is only available in the desktop app.");
+      }
+      return invokeCommand<ConflictResolutionDetails>("prepare_conflict_comparison", { locationId, path });
+    },
+    async openPath(path) {
+      if (!native) {
+        throw new Error("Opening local files is only available in the desktop app.");
+      }
+      await invokeCommand<void>("open_path", { path });
+    },
+    async resolveConflict(locationId, path, resolution) {
+      if (!native) {
+        throw new Error("Conflict resolution is only available in the desktop app.");
+      }
+      await invokeCommand<void>("resolve_conflict", { locationId, path, resolution });
     },
   };
 }

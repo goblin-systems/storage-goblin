@@ -9,11 +9,13 @@ pub mod credentials_store;
 pub mod inventory_compare;
 pub mod local_index;
 pub mod profile_store;
+pub mod remote_bin;
 pub mod remote_index;
 pub mod s3_adapter;
 pub mod sync_db;
 pub mod sync_planner;
 pub mod sync_state;
+pub mod watchers;
 
 pub use sync_state::SyncState;
 
@@ -34,7 +36,10 @@ pub(crate) fn system_time_to_iso(value: SystemTime) -> Option<String> {
     value.format(&Rfc3339).ok()
 }
 
-pub(crate) fn app_storage_path<R: Runtime>(app: &AppHandle<R>, file_name: &str) -> Result<PathBuf, String> {
+pub(crate) fn app_storage_path<R: Runtime>(
+    app: &AppHandle<R>,
+    file_name: &str,
+) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_config_dir()

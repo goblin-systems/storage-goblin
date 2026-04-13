@@ -28,7 +28,6 @@ function legacyNativeProfile(): Partial<StoredStorageProfile> & { syncPairs: Non
     remotePollingEnabled: true,
     pollIntervalSeconds: 60,
     conflictStrategy: "preserve-both",
-    deleteSafetyHours: 24,
     activityDebugModeEnabled: false,
     credentialProfileId: null,
     selectedCredential: null,
@@ -42,11 +41,15 @@ function legacyNativeProfile(): Partial<StoredStorageProfile> & { syncPairs: Non
         region: "us-east-1",
         bucket: "demo-bucket",
         credentialProfileId: null,
+        objectVersioningEnabled: false,
         enabled: true,
         remotePollingEnabled: true,
         pollIntervalSeconds: 60,
         conflictStrategy: "preserve-both",
-        deleteSafetyHours: 24,
+        remoteBin: {
+          enabled: true,
+          retentionDays: 7,
+        },
       },
     ],
   };
@@ -117,7 +120,6 @@ describe("storage goblin client", () => {
       bucket: "demo-bucket",
       remotePollingEnabled: false,
       pollIntervalSeconds: 90,
-      deleteSafetyHours: 72,
       activityDebugModeEnabled: true,
       credentialProfileId: "cred-1",
       selectedCredential: { id: "cred-1", name: "Primary", ready: true, validationStatus: "untested", lastTestedAt: null, lastTestMessage: null },
@@ -130,7 +132,6 @@ describe("storage goblin client", () => {
       bucket: "demo-bucket",
       remotePollingEnabled: false,
       pollIntervalSeconds: 90,
-      deleteSafetyHours: 72,
       activityDebugModeEnabled: true,
       credentialProfileId: "cred-1",
       selectedCredential: { id: "cred-1", name: "Primary", ready: true, validationStatus: "untested", lastTestedAt: null, lastTestMessage: null },
@@ -203,22 +204,82 @@ describe("storage goblin client", () => {
       region: "us-east-1",
       bucket: "demo",
       credentialProfileId: "cred-1",
+      objectVersioningEnabled: false,
       enabled: true,
       remotePollingEnabled: true,
       pollIntervalSeconds: 60,
       conflictStrategy: "preserve-both",
-      deleteSafetyHours: 24,
+      remoteBin: {
+        enabled: true,
+        retentionDays: 7,
+      },
     };
 
     await client.listSyncLocations();
     await client.addSyncLocation(draft);
     await client.updateSyncLocation(draft);
     await client.removeSyncLocation("loc-1");
+    await client.listBinEntries("loc-1");
+    await client.revealTreeEntry("loc-1", "docs/readme.txt");
+    await client.deleteFolder("loc-1", "docs");
+    await client.restoreBinEntry("loc-1", "opaque-bin-key");
+    await client.restoreBinEntries("loc-1", [{ path: "docs", kind: "directory", binKey: null }]);
+    await client.purgeBinEntries("loc-1", [{ path: "docs", kind: "directory", binKey: null }]);
+    await client.prepareConflictComparison("loc-1", "docs/readme.txt");
+    await client.openPath("C:/sync/docs/readme.txt");
+    await client.resolveConflict("loc-1", "docs/readme.txt", "keep-local");
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, "list_sync_locations", undefined);
     expect(invokeMock).toHaveBeenNthCalledWith(2, "add_sync_location", { draft });
     expect(invokeMock).toHaveBeenNthCalledWith(3, "update_sync_location", { draft });
     expect(invokeMock).toHaveBeenNthCalledWith(4, "remove_sync_location", { locationId: "loc-1" });
+    expect(invokeMock).toHaveBeenNthCalledWith(5, "list_bin_entries", { locationId: "loc-1" });
+    expect(invokeMock).toHaveBeenNthCalledWith(6, "reveal_tree_entry", { locationId: "loc-1", path: "docs/readme.txt" });
+    expect(invokeMock).toHaveBeenNthCalledWith(7, "delete_folder", { locationId: "loc-1", path: "docs" });
+    expect(invokeMock).toHaveBeenNthCalledWith(8, "restore_bin_entry", { locationId: "loc-1", binKey: "opaque-bin-key" });
+    expect(invokeMock).toHaveBeenNthCalledWith(9, "restore_bin_entries", { locationId: "loc-1", entries: [{ path: "docs", kind: "directory", binKey: null }] });
+    expect(invokeMock).toHaveBeenNthCalledWith(10, "purge_bin_entries", { locationId: "loc-1", entries: [{ path: "docs", kind: "directory", binKey: null }] });
+    expect(invokeMock).toHaveBeenNthCalledWith(11, "prepare_conflict_comparison", { locationId: "loc-1", path: "docs/readme.txt" });
+    expect(invokeMock).toHaveBeenNthCalledWith(12, "open_path", { path: "C:/sync/docs/readme.txt" });
+    expect(invokeMock).toHaveBeenNthCalledWith(13, "resolve_conflict", { locationId: "loc-1", path: "docs/readme.txt", resolution: "keep-local" });
+  });
+
+  it("types native conflict compare payloads with inline compare fields", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    invokeMock.mockResolvedValueOnce({
+      locationId: "loc-1",
+      path: "docs/readme.txt",
+      mode: "text",
+      localPath: "C:/sync/docs/readme.txt",
+      remoteTempPath: "C:/temp/docs-readme.txt",
+      localText: "local",
+      remoteText: "remote",
+      localImageDataUrl: null,
+      remoteImageDataUrl: null,
+      fallbackReason: null,
+    });
+
+    const client = createStorageGoblinClient();
+    await expect(client.prepareConflictComparison("loc-1", "docs/readme.txt")).resolves.toEqual({
+      locationId: "loc-1",
+      path: "docs/readme.txt",
+      mode: "text",
+      localPath: "C:/sync/docs/readme.txt",
+      remoteTempPath: "C:/temp/docs-readme.txt",
+      localText: "local",
+      remoteText: "remote",
+      localImageDataUrl: null,
+      remoteImageDataUrl: null,
+      fallbackReason: null,
+    });
+  });
+
+  it("rejects browser reveal requests with a clear desktop-only error", async () => {
+    const client = createStorageGoblinClient();
+
+    await expect(client.revealTreeEntry("loc-1", "docs/readme.txt")).rejects.toThrow(
+      "Reveal in file manager is only available in the desktop app.",
+    );
   });
 
   it("strips prefix and endpointUrl from native add and update sync location payloads", async () => {
@@ -234,11 +295,15 @@ describe("storage goblin client", () => {
       bucket: "demo",
       prefix: "docs",
       credentialProfileId: "cred-1",
+      objectVersioningEnabled: true,
       enabled: true,
       remotePollingEnabled: true,
       pollIntervalSeconds: 60,
       conflictStrategy: "preserve-both",
-      deleteSafetyHours: 24,
+      remoteBin: {
+        enabled: true,
+        retentionDays: 7,
+      },
     } as unknown as SyncLocationDraft;
 
     await client.addSyncLocation(draft);
@@ -249,8 +314,12 @@ describe("storage goblin client", () => {
 
     expect(addDraft).not.toHaveProperty("endpointUrl");
     expect(addDraft).not.toHaveProperty("prefix");
+    expect(addDraft).not.toHaveProperty("deleteSafetyHours");
+    expect(addDraft).toMatchObject({ objectVersioningEnabled: true, remoteBin: { enabled: true, retentionDays: 7 } });
     expect(updateDraft).not.toHaveProperty("endpointUrl");
     expect(updateDraft).not.toHaveProperty("prefix");
+    expect(updateDraft).not.toHaveProperty("deleteSafetyHours");
+    expect(updateDraft).toMatchObject({ objectVersioningEnabled: true, remoteBin: { enabled: true, retentionDays: 7 } });
   });
 
   it("does not persist unsupported endpoint or prefix fields in browser storage", async () => {
@@ -269,11 +338,15 @@ describe("storage goblin client", () => {
           region: "us-east-1",
           bucket: "demo-bucket",
           credentialProfileId: null,
+          objectVersioningEnabled: false,
           enabled: true,
           remotePollingEnabled: true,
           pollIntervalSeconds: 60,
           conflictStrategy: "preserve-both",
-          deleteSafetyHours: 24,
+          remoteBin: {
+            enabled: true,
+            retentionDays: 7,
+          },
         },
       ],
     } as unknown as StoredStorageProfile);
@@ -284,6 +357,8 @@ describe("storage goblin client", () => {
     expect(stored).not.toHaveProperty("prefix");
     expect(stored.syncLocations[0]).not.toHaveProperty("endpointUrl");
     expect(stored.syncLocations[0]).not.toHaveProperty("prefix");
+    expect(stored.syncLocations[0]).not.toHaveProperty("deleteSafetyHours");
+    expect(stored.syncLocations[0]).toMatchObject({ remoteBin: { enabled: true, retentionDays: 7 } });
   });
 
   it("normalizes legacy native profile responses that use syncPairs", async () => {
@@ -298,11 +373,15 @@ describe("storage goblin client", () => {
       region: "us-east-1",
       bucket: "demo-bucket",
       credentialProfileId: null,
+      objectVersioningEnabled: false,
       enabled: true,
       remotePollingEnabled: true,
       pollIntervalSeconds: 60,
       conflictStrategy: "preserve-both",
-      deleteSafetyHours: 24,
+      remoteBin: {
+        enabled: true,
+        retentionDays: 7,
+      },
     };
 
     invokeMock.mockResolvedValue({ ...legacyProfile });

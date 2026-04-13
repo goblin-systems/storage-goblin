@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn compares_local_files_and_remote_objects_conservatively() {
         let local = LocalIndexSnapshot {
-            version: 1,
+            version: 2,
             root_folder: "C:/sync".into(),
             summary: LocalIndexSummary {
                 indexed_at: "2026-01-01T00:00:00Z".into(),
@@ -129,12 +129,14 @@ mod tests {
                     kind: "file".into(),
                     size: 5,
                     modified_at: None,
+                    fingerprint: Some(crate::storage::local_index::bytes_fingerprint(b"alpha")),
                 },
                 LocalIndexEntry {
                     relative_path: "beta.txt".into(),
                     kind: "file".into(),
                     size: 10,
                     modified_at: None,
+                    fingerprint: Some(crate::storage::local_index::bytes_fingerprint(b"beta")),
                 },
             ],
         };
@@ -142,6 +144,7 @@ mod tests {
         let remote = RemoteIndexSnapshot {
             version: 1,
             bucket: "demo".into(),
+            excluded_prefixes: Vec::new(),
             summary: RemoteIndexSummary {
                 indexed_at: "2026-01-01T00:00:00Z".into(),
                 object_count: 2,
@@ -182,7 +185,7 @@ mod tests {
     #[test]
     fn reports_size_mismatches_for_same_path() {
         let local = LocalIndexSnapshot {
-            version: 1,
+            version: 2,
             root_folder: "C:/sync".into(),
             summary: LocalIndexSummary::default(),
             entries: vec![LocalIndexEntry {
@@ -190,11 +193,13 @@ mod tests {
                 kind: "file".into(),
                 size: 5,
                 modified_at: None,
+                fingerprint: Some(crate::storage::local_index::bytes_fingerprint(b"alpha")),
             }],
         };
         let remote = RemoteIndexSnapshot {
             version: 1,
             bucket: "demo".into(),
+            excluded_prefixes: Vec::new(),
             summary: RemoteIndexSummary::default(),
             entries: vec![RemoteObjectEntry {
                 key: "alpha.txt".into(),
@@ -215,7 +220,7 @@ mod tests {
     #[test]
     fn compares_directories_without_treating_them_as_downloads() {
         let local = LocalIndexSnapshot {
-            version: 1,
+            version: 2,
             root_folder: "C:/sync".into(),
             summary: LocalIndexSummary::default(),
             entries: vec![LocalIndexEntry {
@@ -223,11 +228,13 @@ mod tests {
                 kind: "directory".into(),
                 size: 0,
                 modified_at: None,
+                fingerprint: None,
             }],
         };
         let remote = RemoteIndexSnapshot {
             version: 1,
             bucket: "demo".into(),
+            excluded_prefixes: Vec::new(),
             summary: RemoteIndexSummary::default(),
             entries: vec![RemoteObjectEntry {
                 key: "nested/".into(),
@@ -252,7 +259,7 @@ mod tests {
     #[test]
     fn keeps_legacy_counters_file_only_when_directories_are_present() {
         let local = LocalIndexSnapshot {
-            version: 1,
+            version: 2,
             root_folder: "C:/sync".into(),
             summary: LocalIndexSummary::default(),
             entries: vec![
@@ -261,18 +268,21 @@ mod tests {
                     kind: "directory".into(),
                     size: 0,
                     modified_at: None,
+                    fingerprint: None,
                 },
                 LocalIndexEntry {
                     relative_path: "nested/alpha.txt".into(),
                     kind: "file".into(),
                     size: 5,
                     modified_at: None,
+                    fingerprint: Some(crate::storage::local_index::bytes_fingerprint(b"alpha")),
                 },
             ],
         };
         let remote = RemoteIndexSnapshot {
             version: 1,
             bucket: "demo".into(),
+            excluded_prefixes: Vec::new(),
             summary: RemoteIndexSummary::default(),
             entries: vec![
                 RemoteObjectEntry {
@@ -306,7 +316,7 @@ mod tests {
     #[test]
     fn glacier_files_excluded_from_comparison() {
         let local = LocalIndexSnapshot {
-            version: 1,
+            version: 2,
             root_folder: "C:/sync".into(),
             summary: LocalIndexSummary::default(),
             entries: vec![],
@@ -314,6 +324,7 @@ mod tests {
         let remote = RemoteIndexSnapshot {
             version: 1,
             bucket: "demo".into(),
+            excluded_prefixes: Vec::new(),
             summary: RemoteIndexSummary::default(),
             entries: vec![
                 RemoteObjectEntry {
@@ -344,5 +355,40 @@ mod tests {
         assert_eq!(summary.exact_match_count, 0);
         assert_eq!(summary.local_only_count, 0);
         assert_eq!(summary.size_mismatch_count, 0);
+    }
+
+    #[test]
+    fn excluded_remote_bin_entries_do_not_affect_comparison_when_snapshot_is_filtered() {
+        let local = LocalIndexSnapshot {
+            version: 2,
+            root_folder: "C:/sync".into(),
+            summary: LocalIndexSummary::default(),
+            entries: vec![LocalIndexEntry {
+                relative_path: "docs/note.txt".into(),
+                kind: "file".into(),
+                size: 5,
+                modified_at: None,
+                fingerprint: Some(crate::storage::local_index::bytes_fingerprint(b"note")),
+            }],
+        };
+        let remote = RemoteIndexSnapshot {
+            version: 1,
+            bucket: "demo".into(),
+            excluded_prefixes: vec![".storage-goblin-bin/pair-1/".into()],
+            summary: RemoteIndexSummary::default(),
+            entries: vec![RemoteObjectEntry {
+                key: "docs/note.txt".into(),
+                relative_path: "docs/note.txt".into(),
+                kind: "file".into(),
+                size: 5,
+                last_modified_at: None,
+                etag: None,
+                storage_class: None,
+            }],
+        };
+
+        let summary = compare_snapshots(Some(&local), Some(&remote));
+        assert_eq!(summary.exact_match_count, 1);
+        assert_eq!(summary.remote_object_count, 1);
     }
 }

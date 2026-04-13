@@ -1,4 +1,14 @@
-import type { CredentialSummary, StoredStorageProfile, StorageProfileDraft, SyncLocation } from "./types";
+import { CONFLICT_STRATEGIES, type ConflictStrategy, type CredentialSummary, type StoredStorageProfile, type StorageProfileDraft, type SyncLocation } from "./types";
+
+type LegacyRemoteBinCarrier = {
+  remoteBin?: {
+    enabled?: boolean;
+    retentionDays?: number;
+  };
+  deleteSafetyHours?: number;
+};
+
+export const DEFAULT_REMOTE_BIN_RETENTION_DAYS = 7;
 
 export const DEFAULT_STORED_PROFILE: StoredStorageProfile = {
   localFolder: "",
@@ -7,7 +17,6 @@ export const DEFAULT_STORED_PROFILE: StoredStorageProfile = {
   remotePollingEnabled: true,
   pollIntervalSeconds: 60,
   conflictStrategy: "preserve-both",
-  deleteSafetyHours: 24,
   activityDebugModeEnabled: false,
   credentialProfileId: null,
   selectedCredential: null,
@@ -20,6 +29,12 @@ export const DEFAULT_STORED_PROFILE: StoredStorageProfile = {
 export const DEFAULT_PROFILE_DRAFT: StorageProfileDraft = {
   ...DEFAULT_STORED_PROFILE,
 };
+
+function normalizeConflictStrategy(value: string | undefined): ConflictStrategy {
+  return CONFLICT_STRATEGIES.includes(value as ConflictStrategy)
+    ? value as ConflictStrategy
+    : "preserve-both";
+}
 
 function normalizeText(value: string | undefined): string {
   return (value ?? "").trim();
@@ -48,6 +63,15 @@ function normalizeSyncLocation(input: Partial<SyncLocation> | null | undefined):
   const id = normalizeText(input?.id);
   if (!id) return null;
 
+   const legacyInput = input as (Partial<SyncLocation> & LegacyRemoteBinCarrier) | null | undefined;
+
+  const retentionDays = clampInt(
+    legacyInput?.remoteBin?.retentionDays ?? (typeof legacyInput?.deleteSafetyHours === "number" ? Math.ceil(legacyInput.deleteSafetyHours / 24) : undefined),
+    1,
+    3650,
+    DEFAULT_REMOTE_BIN_RETENTION_DAYS,
+  );
+
   return {
     id,
     label: normalizeText(input?.label),
@@ -55,11 +79,15 @@ function normalizeSyncLocation(input: Partial<SyncLocation> | null | undefined):
     region: normalizeText(input?.region),
     bucket: normalizeText(input?.bucket),
     credentialProfileId: normalizeText(input?.credentialProfileId ?? undefined) || null,
+    objectVersioningEnabled: Boolean(input?.objectVersioningEnabled),
     enabled: input?.enabled ?? true,
     remotePollingEnabled: input?.remotePollingEnabled ?? true,
     pollIntervalSeconds: clampInt(input?.pollIntervalSeconds, 15, 3600, DEFAULT_STORED_PROFILE.pollIntervalSeconds),
-    conflictStrategy: "preserve-both",
-    deleteSafetyHours: clampInt(input?.deleteSafetyHours, 1, 168, DEFAULT_STORED_PROFILE.deleteSafetyHours),
+    conflictStrategy: normalizeConflictStrategy(input?.conflictStrategy),
+    remoteBin: {
+      enabled: Boolean(input?.objectVersioningEnabled) ? false : (legacyInput?.remoteBin?.enabled ?? true),
+      retentionDays,
+    },
   };
 }
 
@@ -88,8 +116,7 @@ export function normalizeStoredProfile(input?: Partial<StoredStorageProfile> | n
     bucket: normalizeText(input?.bucket),
     remotePollingEnabled: input?.remotePollingEnabled ?? true,
     pollIntervalSeconds: clampInt(input?.pollIntervalSeconds, 15, 3600, DEFAULT_STORED_PROFILE.pollIntervalSeconds),
-    conflictStrategy: "preserve-both",
-    deleteSafetyHours: clampInt(input?.deleteSafetyHours, 1, 168, DEFAULT_STORED_PROFILE.deleteSafetyHours),
+    conflictStrategy: normalizeConflictStrategy(input?.conflictStrategy),
     activityDebugModeEnabled: input?.activityDebugModeEnabled ?? false,
     credentialProfileId: credentialProfileId || null,
     selectedCredential,

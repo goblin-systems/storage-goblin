@@ -138,6 +138,53 @@ describe("status presentation", () => {
     });
   });
 
+  it("derives Changes from actionable pending work instead of raw mismatches", () => {
+    const stats = getSyncOverviewStats({
+      phase: "idle",
+      lastSyncAt: null,
+      lastRescanAt: null,
+      lastRemoteRefreshAt: null,
+      lastError: null,
+      currentFolder: "C:/sync",
+      currentBucket: "demo",
+      currentPrefix: null,
+      remotePollingEnabled: true,
+      pollIntervalSeconds: 60,
+      pendingOperations: 0,
+      indexedFileCount: 12,
+      indexedDirectoryCount: 3,
+      indexedTotalBytes: 1024,
+      remoteObjectCount: 8,
+      remoteTotalBytes: 2048,
+      comparison: {
+        comparedAt: "2026-04-03T00:00:00.000Z",
+        localFileCount: 12,
+        remoteObjectCount: 8,
+        exactMatchCount: 7,
+        localOnlyCount: 0,
+        remoteOnlyCount: 0,
+        sizeMismatchCount: 1,
+      },
+      plan: {
+        lastPlannedAt: "2026-04-03T00:00:00.000Z",
+        observedPathCount: 8,
+        uploadCount: 0,
+        downloadCount: 0,
+        conflictCount: 0,
+        noopCount: 8,
+        pendingOperationCount: 0,
+        credentialsAvailable: true,
+      },
+    });
+
+    expect(stats).toEqual({
+      localFiles: 12,
+      remoteFiles: 8,
+      inSync: 7,
+      notInSync: 0,
+    });
+  });
+
   it("surfaces native error messages", () => {
     const view = describeSyncStatus({
       phase: "error",

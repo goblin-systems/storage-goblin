@@ -7,7 +7,7 @@ use std::{
 };
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use time::macros::format_description;
 
 use super::{now_iso, profile_store::read_profile_from_disk};
@@ -122,8 +122,8 @@ pub fn open_activity_debug_log_folder(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn emit_activity(
-    app: &AppHandle,
+pub(crate) fn emit_activity<R: Runtime>(
+    app: &AppHandle<R>,
     state: &ActivityDebugState,
     level: ActivityLevel,
     message: impl Into<String>,
@@ -155,13 +155,13 @@ fn build_activity_event(
     }
 }
 
-fn is_debug_mode_enabled(app: &AppHandle) -> bool {
+fn is_debug_mode_enabled<R: Runtime>(app: &AppHandle<R>) -> bool {
     read_profile_from_disk(app)
         .map(|profile| profile.activity_debug_mode_enabled)
         .unwrap_or(false)
 }
 
-fn resolve_log_file_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn resolve_log_file_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_local_data_dir()
@@ -171,8 +171,8 @@ fn resolve_log_file_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join(DEBUG_LOG_FILE_NAME))
 }
 
-fn write_debug_log_entry(
-    app: &AppHandle,
+fn write_debug_log_entry<R: Runtime>(
+    app: &AppHandle<R>,
     state: &ActivityDebugState,
     level: ActivityLevel,
     message: &str,

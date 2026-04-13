@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.storage-goblin",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1432",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "bun run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -30,7 +30,7 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
     "targets": "all"
   },
   "plugins": {
