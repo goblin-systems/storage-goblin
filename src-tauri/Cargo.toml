@@ -1,6 +1,6 @@
 [package]
 name = "storage-goblin"
-version = "0.1.0"
+version = "0.2.0"
 description = "Desktop S3 sync scaffold powered by Tauri"
 authors = ["Sergej Popov"]
 edition = "2021"
@@ -33,3 +33,4 @@ tauri-plugin-dialog = "2.7"
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 tokio = { version = "1", features = ["time"] }
 uuid = { version = "1", features = ["v4"] }
+
