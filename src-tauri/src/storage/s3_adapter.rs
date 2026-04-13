@@ -4,6 +4,7 @@ use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::types::{
     BucketLifecycleConfiguration, BucketLocationConstraint, BucketVersioningStatus,
     CreateBucketConfiguration, MetadataDirective, StorageClass, TransitionDefaultMinimumObjectSize,
+    VersioningConfiguration,
 };
 use aws_sdk_s3::{primitives::ByteStream, Client};
 use aws_types::region::Region;
@@ -88,6 +89,7 @@ pub struct ObjectVersionSummary {
     pub size: u64,
     pub last_modified_at: Option<String>,
     pub storage_class: Option<String>,
+    pub etag: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -542,6 +544,27 @@ pub async fn bucket_versioning_enabled(client: &Client, bucket: &str) -> Result<
     ))
 }
 
+pub async fn set_bucket_versioning(
+    client: &Client,
+    bucket: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let status = if enabled {
+        BucketVersioningStatus::Enabled
+    } else {
+        BucketVersioningStatus::Suspended
+    };
+    let config = VersioningConfiguration::builder().status(status).build();
+    client
+        .put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(config)
+        .send()
+        .await
+        .map_err(|error| format!("failed to set versioning for bucket '{bucket}': {error}"))?;
+    Ok(())
+}
+
 pub async fn list_object_versions_page(
     client: &Client,
     bucket: &str,
@@ -589,6 +612,7 @@ pub async fn list_object_versions_page_with_prefix(
                 storage_class: version
                     .storage_class()
                     .map(|value| value.as_str().to_string()),
+                etag: version.e_tag().map(|value| value.trim_matches('"').to_string()),
             })
         })
         .collect();
@@ -942,6 +966,81 @@ pub async fn probe_bucket_permissions(
         bucket: bucket.to_string(),
         probes,
     }
+}
+
+pub async fn download_file_version(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    version_id: &str,
+    path: &Path,
+) -> Result<(), String> {
+    let response = client
+        .get_object()
+        .bucket(bucket)
+        .key(key)
+        .version_id(version_id)
+        .send()
+        .await
+        .map_err(|error| {
+            format!(
+                "failed to download version '{version_id}' of '{key}' from bucket '{bucket}': {error}"
+            )
+        })?;
+
+    let bytes = response
+        .body
+        .collect()
+        .await
+        .map_err(|error| {
+            format!("failed to read download body for version '{version_id}' of '{key}': {error}")
+        })?
+        .into_bytes();
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create parent directory for '{}': {error}",
+                path.display()
+            )
+        })?;
+    }
+
+    std::fs::write(path, &bytes).map_err(|error| {
+        format!(
+            "failed to write downloaded version file '{}': {error}",
+            path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+pub async fn copy_object_version(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    version_id: &str,
+) -> Result<(), String> {
+    // Append ?versionId=... to the copy source so S3 copies the specific version
+    let base_copy_source = copy_source(bucket, key);
+    let versioned_copy_source = format!("{base_copy_source}?versionId={version_id}");
+
+    client
+        .copy_object()
+        .bucket(bucket)
+        .key(key)
+        .copy_source(&versioned_copy_source)
+        .metadata_directive(MetadataDirective::Copy)
+        .send()
+        .await
+        .map_err(|error| {
+            format!(
+                "failed to restore version '{version_id}' of '{key}' in bucket '{bucket}': {error}"
+            )
+        })?;
+
+    Ok(())
 }
 
 pub async fn copy_object_with_storage_class(

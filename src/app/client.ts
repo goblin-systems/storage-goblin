@@ -12,7 +12,9 @@ import type {
   ConnectionValidationResult,
   DeleteCredentialResult,
   ConflictResolutionDetails,
+  FileVersionEntry,
   InventoryComparisonSummary,
+  VersionComparisonDetails,
   NativeActivityEvent,
   StoredStorageProfile,
   StorageProfileDraft,
@@ -20,6 +22,7 @@ import type {
   SyncLocationDraft,
   SyncPhase,
   SyncStatus,
+  VersionCountEntry,
 } from "./types";
 
 declare global {
@@ -215,8 +218,14 @@ export interface StorageGoblinClient {
   purgeBinEntries(locationId: string, entries: BinEntryRequest[]): Promise<BinEntryMutationSummary>;
   addSyncLocation(draft: SyncLocationDraft): Promise<StoredStorageProfile>;
   updateSyncLocation(draft: SyncLocationDraft): Promise<StoredStorageProfile>;
+  setSyncLocationVersioning(locationId: string, enabled: boolean): Promise<StoredStorageProfile>;
   removeSyncLocation(locationId: string): Promise<StoredStorageProfile>;
   changeStorageClass(locationId: string, path: string, storageClass: string): Promise<void>;
+  listFileVersions(locationId: string, path: string): Promise<FileVersionEntry[]>;
+  listVersionCounts(locationId: string): Promise<VersionCountEntry[]>;
+  restoreFileVersion(locationId: string, path: string, versionId: string): Promise<void>;
+  prepareVersionComparison(locationId: string, path: string, versionIdA: string, versionIdB: string): Promise<VersionComparisonDetails>;
+  deleteFileVersion(locationId: string, path: string, versionId: string): Promise<void>;
   prepareConflictComparison(locationId: string, path: string): Promise<ConflictResolutionDetails>;
   openPath(path: string): Promise<void>;
   resolveConflict(locationId: string, path: string, resolution: "keep-local" | "keep-remote"): Promise<void>;
@@ -492,6 +501,10 @@ export function createStorageGoblinClient(): StorageGoblinClient {
       if (!native) return loadStoredProfileFromBrowserStorage();
       return invokeProfileCommand("update_sync_location", { draft: serializeSyncLocationDraft(draft) });
     },
+    async setSyncLocationVersioning(locationId, enabled) {
+      if (!native) return loadStoredProfileFromBrowserStorage();
+      return invokeProfileCommand("set_sync_location_versioning", { locationId, enabled });
+    },
     async removeSyncLocation(locationId) {
       if (!native) return loadStoredProfileFromBrowserStorage();
       return invokeProfileCommand("remove_sync_location", { locationId });
@@ -499,6 +512,26 @@ export function createStorageGoblinClient(): StorageGoblinClient {
     async changeStorageClass(locationId, path, storageClass) {
       if (!native) return;
       await invokeCommand<void>("change_storage_class", { locationId, path, storageClass });
+    },
+    async listFileVersions(locationId, path) {
+      if (!native) return [];
+      return invokeCommand<FileVersionEntry[]>("list_file_versions", { locationId, path });
+    },
+    async listVersionCounts(locationId) {
+      if (!native) return [];
+      return invokeCommand<VersionCountEntry[]>("list_version_counts", { locationId });
+    },
+    async restoreFileVersion(locationId, path, versionId) {
+      if (!native) return;
+      await invokeCommand<void>("restore_file_version", { locationId, path, versionId });
+    },
+    async prepareVersionComparison(locationId, path, versionIdA, versionIdB) {
+      if (!native) throw new Error("Version comparison is only available in the desktop app.");
+      return invokeCommand<VersionComparisonDetails>("prepare_version_comparison", { locationId, path, versionIdA, versionIdB });
+    },
+    async deleteFileVersion(locationId, path, versionId) {
+      if (!native) return;
+      await invokeCommand<void>("delete_file_version", { locationId, path, versionId });
     },
     async prepareConflictComparison(locationId, path) {
       if (!native) {

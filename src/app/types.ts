@@ -66,6 +66,34 @@ export type BinEntryKind = "file" | "directory";
 
 export type BinEntrySource = "remote-bin" | "object-versioning";
 
+export interface VersionComparisonDetails {
+  path: string;
+  mode: "text" | "image" | "external";
+  versionAId: string;
+  versionBId: string;
+  versionATempPath: string | null;
+  versionBTempPath: string | null;
+  versionAText: string | null;
+  versionBText: string | null;
+  versionAImageDataUrl: string | null;
+  versionBImageDataUrl: string | null;
+  fallbackReason: string | null;
+}
+
+export interface FileVersionEntry {
+  versionId: string;
+  isLatest: boolean;
+  size: number;
+  lastModifiedAt: string | null;
+  storageClass: string | null;
+  etag: string | null;
+}
+
+export interface VersionCountEntry {
+  path: string;
+  count: number;
+}
+
 export interface BinEntryRequest {
   path: string;
   kind: BinEntryKind;

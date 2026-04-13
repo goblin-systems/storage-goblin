@@ -1,7 +1,10 @@
 import {
   applyIcons,
   bindNavigation,
+  closeDrawer,
   closeModal,
+  confirmModal,
+  openDrawer,
   openModal,
   setupWindowControls,
   showToast,
@@ -30,15 +33,18 @@ import type {
   CredentialDraft,
   CredentialSummary,
   CredentialTestContext,
+  FileVersionEntry,
   LocationSyncStatus,
   PermissionProbeSummary,
   StorageProfileDraft,
   SyncLocation,
   SyncLocationDraft,
   SyncStatus,
+  VersionComparisonDetails,
+  VersionCountEntry,
 } from "./types";
 
-type DialogId = "credentials" | "locations" | "activity" | "settings";
+type DialogId = "credentials" | "locations" | "activity" | "polling" | "debug" | "conflict" | "about";
 
 type SyncStatusWithLocations = SyncStatus & {
   locations?: LocationSyncStatus[];
@@ -1018,6 +1024,8 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   const fileTreeSnapshots = new Map<string, FileTreeSnapshot>();
   let selectedBinPaths = new Set<string>();
   let fileTreeRequestSequence = 0;
+  /** Version counts per file path for the active versioned location. */
+  let activeVersionCounts: Map<string, number> | undefined;
   const asyncConfirm = createAsyncConfirmController();
   const conflictResolutionModal = createConflictResolutionModalController(toast);
   let fileTreeLoadingTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1173,6 +1181,8 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       onRestore: mode === "bin" ? handleBinRestore : undefined,
       onStorageClass: mode === "live" ? handleStorageClassChange : undefined,
       onResolveConflict: mode === "live" ? handleResolveConflict : undefined,
+      versionCounts: mode === "live" ? activeVersionCounts : undefined,
+      onViewVersions: mode === "live" ? handleViewVersions : undefined,
     });
     renderBinToolbar();
   }
@@ -1409,7 +1419,10 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     credentials: dom.credentialsScreen,
     locations: dom.locationsScreen,
     activity: dom.activityScreen,
-    settings: dom.settingsScreen,
+    polling: dom.pollingScreen,
+    debug: dom.debugScreen,
+    conflict: dom.conflictScreen,
+    about: dom.aboutScreen,
   };
 
   function closeAllDialogs() {
@@ -1749,8 +1762,36 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     });
   }
 
+  function isObjectVersioningEnabled(): boolean {
+    return dom.locationObjectVersioningEnabledInput.value === "true";
+  }
+
+  function setObjectVersioningEnabled(enabled: boolean) {
+    dom.locationObjectVersioningEnabledInput.value = enabled ? "true" : "false";
+    dom.locationVersioningCheckbox.checked = enabled;
+    renderObjectVersioningBtn();
+  }
+
+  function showVersioningCheckbox() {
+    dom.locationVersioningCheckboxWrap.hidden = false;
+    dom.locationVersioningBtnWrap.hidden = true;
+  }
+
+  function showVersioningButton() {
+    dom.locationVersioningCheckboxWrap.hidden = true;
+    dom.locationVersioningBtnWrap.hidden = false;
+  }
+
+  function renderObjectVersioningBtn() {
+    const enabled = isObjectVersioningEnabled();
+    dom.locationVersioningBtnIcon.setAttribute("data-lucide", enabled ? "shield-off" : "shield-check");
+    dom.locationVersioningBtnLabel.textContent = enabled ? "Disable object versioning" : "Enable object versioning";
+    dom.locationObjectVersioningBtn.classList.toggle("danger", enabled);
+    applyIcons();
+  }
+
   function renderLocationRemoteBinState() {
-    const objectVersioningEnabled = dom.locationObjectVersioningEnabledInput.checked;
+    const objectVersioningEnabled = isObjectVersioningEnabled();
     const enabled = objectVersioningEnabled ? false : dom.locationRemoteBinEnabledInput.checked;
     const retentionDays = parseRemoteBinRetentionDays(dom.locationRemoteBinRetentionInput.value);
     if (objectVersioningEnabled) {
@@ -1850,9 +1891,9 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       : "";
   }
 
-  async function handleSaveSettings() {
+  async function handleSaveSettings(btn: HTMLButtonElement, resultEl: HTMLElement) {
     readSettingsFromDom();
-    setButtonBusy(dom.saveSettingsBtn, true);
+    setButtonBusy(btn, true);
 
     try {
       const stored = await persistence.saveSettings(toStoredProfile(state.profile));
@@ -1866,14 +1907,14 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       await refreshDebugLogState();
 
       const message = client.supportsNativeProfilePersistence
-        ? "Settings saved. Activity debug and polling preferences are updated."
+        ? "Settings saved. Preferences are updated."
         : "Settings saved locally in the browser preview.";
 
-      dom.settingsResult.textContent = message;
+      resultEl.textContent = message;
       toast(message, "success");
       addActivity("success", message);
     } finally {
-      setButtonBusy(dom.saveSettingsBtn, false);
+      setButtonBusy(btn, false);
     }
   }
 
@@ -1957,7 +1998,8 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     dom.locationRegionSelect.value = "";
     dom.locationBucketInput.value = "";
     dom.locationCredentialSelect.value = "";
-    dom.locationObjectVersioningEnabledInput.checked = false;
+    setObjectVersioningEnabled(false);
+    showVersioningCheckbox();
     dom.locationEnabledInput.checked = true;
     dom.locationPollingInput.checked = true;
     dom.locationPollIntervalInput.value = "60";
@@ -1982,7 +2024,8 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     dom.locationRegionSelect.value = location.region;
     dom.locationBucketInput.value = location.bucket;
     dom.locationCredentialSelect.value = location.credentialProfileId ?? "";
-    dom.locationObjectVersioningEnabledInput.checked = location.objectVersioningEnabled;
+    setObjectVersioningEnabled(location.objectVersioningEnabled);
+    showVersioningButton();
     dom.locationEnabledInput.checked = location.enabled;
     dom.locationPollingInput.checked = location.remotePollingEnabled;
     dom.locationPollIntervalInput.value = String(location.pollIntervalSeconds);
@@ -2008,13 +2051,13 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       region: dom.locationRegionSelect.value,
       bucket: dom.locationBucketInput.value.trim(),
       credentialProfileId: dom.locationCredentialSelect.value || null,
-      objectVersioningEnabled: dom.locationObjectVersioningEnabledInput.checked,
+      objectVersioningEnabled: isObjectVersioningEnabled(),
       enabled: dom.locationEnabledInput.checked,
       remotePollingEnabled: dom.locationPollingInput.checked,
       pollIntervalSeconds: Number(dom.locationPollIntervalInput.value) || 60,
       conflictStrategy: dom.locationConflictStrategySelect.value as SyncLocationDraft["conflictStrategy"],
       remoteBin: {
-        enabled: dom.locationObjectVersioningEnabledInput.checked ? false : dom.locationRemoteBinEnabledInput.checked,
+        enabled: isObjectVersioningEnabled() ? false : dom.locationRemoteBinEnabledInput.checked,
         retentionDays: parseRemoteBinRetentionDays(dom.locationRemoteBinRetentionInput.value),
       },
     };
@@ -2150,6 +2193,48 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       addActivity("error", surfacedMessage);
     } finally {
       setButtonBusy(dom.saveLocationBtn, false);
+    }
+  }
+
+  async function handleVersioningToggle() {
+    const editingId = dom.locationEditingId.value.trim();
+    const newEnabled = !isObjectVersioningEnabled();
+
+    if (!editingId) {
+      setObjectVersioningEnabled(newEnabled);
+      renderLocationRemoteBinState();
+      return;
+    }
+
+    dom.locationObjectVersioningBtn.disabled = true;
+    dom.locationVersioningBtnSpinner.hidden = false;
+    dom.locationVersioningBtnIcon.hidden = true;
+    dom.locationVersioningBtnLabel.textContent = newEnabled ? "Enabling…" : "Disabling…";
+
+    try {
+      const updatedProfile = await client.setSyncLocationVersioning(editingId, newEnabled);
+      state.syncLocations = updatedProfile.syncLocations ?? state.syncLocations;
+      renderLocationsList();
+      renderLocationDropdown();
+      setObjectVersioningEnabled(newEnabled);
+      renderLocationRemoteBinState();
+      const message = newEnabled
+        ? "Object versioning enabled on bucket."
+        : "Object versioning suspended on bucket.";
+      dom.locationsResult.textContent = message;
+      toast(message, "success");
+      addActivity("success", message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const surfacedMessage = `Versioning update failed: ${message}`;
+      dom.locationsResult.textContent = surfacedMessage;
+      toast(surfacedMessage, "error");
+      addActivity("error", surfacedMessage);
+    } finally {
+      dom.locationObjectVersioningBtn.disabled = false;
+      dom.locationVersioningBtnSpinner.hidden = true;
+      dom.locationVersioningBtnIcon.hidden = false;
+      renderObjectVersioningBtn();
     }
   }
 
@@ -2622,6 +2707,548 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Version history drawer
+  // ---------------------------------------------------------------------------
+
+  function formatVersionSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function formatVersionDate(isoString: string | null): string {
+    if (!isoString) return "Unknown date";
+    const date = new Date(isoString);
+    if (Number.isNaN(date.getTime())) return isoString;
+    return new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(date);
+  }
+
+  function formatVersionEtag(value: string | null | undefined): string {
+    return value?.trim() ? value : "Unavailable";
+  }
+
+  function escapeHtml(text: string): string {
+    return text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  type VersionComparisonModalOptions = {
+    entryPath: string;
+    versionA: FileVersionEntry;
+    versionB: FileVersionEntry;
+    onCompare: () => Promise<VersionComparisonDetails>;
+  };
+
+  type VersionCompareState =
+    | { status: "idle"; mode: null; details: null; message: string }
+    | { status: "loading"; mode: null; details: null; message: string }
+    | { status: "ready"; mode: "text" | "image" | "external"; details: VersionComparisonDetails; message: string }
+    | { status: "error"; mode: null; details: null; message: string };
+
+  function createVersionComparisonModalController(
+    toastMessage: (message: string, variant?: "success" | "error" | "info") => void,
+  ) {
+    const backdrop = document.createElement("section");
+    backdrop.className = "modal-backdrop storage-modal storage-conflict-resolution-modal";
+    backdrop.hidden = true;
+
+    const dialog = document.createElement("div");
+    dialog.className = "modal-card storage-modal-card storage-modal-card-wide storage-conflict-modal-card";
+
+    const titleId = `storage-version-compare-title-${Math.random().toString(36).slice(2)}`;
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-labelledby", titleId);
+
+    const header = document.createElement("div");
+    header.className = "modal-header";
+
+    const title = document.createElement("h3");
+    title.id = titleId;
+
+    const closeButton = document.createElement("button");
+    closeButton.className = "icon-btn modal-close-btn";
+    closeButton.type = "button";
+    closeButton.setAttribute("aria-label", "Close version comparison dialog");
+    closeButton.innerHTML = '<i data-lucide="x"></i>';
+
+    header.append(title, closeButton);
+
+    const body = document.createElement("div");
+    body.className = "storage-conflict-modal-body";
+
+    const intro = document.createElement("p");
+    intro.className = "modal-body-text";
+
+    const pathCallout = document.createElement("div");
+    pathCallout.className = "callout storage-conflict-path-callout";
+
+    const compareHint = document.createElement("p");
+    compareHint.className = "hint storage-conflict-compare-hint";
+
+    const compareState = document.createElement("div");
+    compareState.className = "callout storage-conflict-compare-state";
+    compareState.setAttribute("aria-live", "polite");
+
+    const compareSurface = document.createElement("section");
+    compareSurface.className = "storage-conflict-compare-surface";
+    compareSurface.hidden = true;
+
+    const compareColumns = document.createElement("div");
+    compareColumns.className = "storage-conflict-compare-columns";
+
+    const versionAPanel = document.createElement("section");
+    versionAPanel.className = "settings-section mini-panel storage-conflict-compare-panel";
+    const versionATitle = document.createElement("h4");
+    versionATitle.textContent = "Version A";
+    const versionAContent = document.createElement("div");
+    versionAContent.className = "storage-conflict-compare-content";
+    versionAPanel.append(versionATitle, versionAContent);
+
+    const versionBPanel = document.createElement("section");
+    versionBPanel.className = "settings-section mini-panel storage-conflict-compare-panel";
+    const versionBTitle = document.createElement("h4");
+    versionBTitle.textContent = "Version B";
+    const versionBContent = document.createElement("div");
+    versionBContent.className = "storage-conflict-compare-content";
+    versionBPanel.append(versionBTitle, versionBContent);
+
+    compareColumns.append(versionAPanel, versionBPanel);
+    compareSurface.append(compareColumns);
+
+    const metadataGrid = document.createElement("div");
+    metadataGrid.className = "compact-list-grid details-grid storage-conflict-grid";
+
+    const metaAPanel = document.createElement("section");
+    metaAPanel.className = "settings-section mini-panel storage-conflict-panel";
+    const metaATitle = document.createElement("h4");
+    metaATitle.textContent = "Version A";
+    const metaAList = document.createElement("ul");
+    metaAList.className = "compact-list status-list";
+    metaAPanel.append(metaATitle, metaAList);
+
+    const metaBPanel = document.createElement("section");
+    metaBPanel.className = "settings-section mini-panel storage-conflict-panel";
+    const metaBTitle = document.createElement("h4");
+    metaBTitle.textContent = "Version B";
+    const metaBList = document.createElement("ul");
+    metaBList.className = "compact-list status-list";
+    metaBPanel.append(metaBTitle, metaBList);
+
+    metadataGrid.append(metaAPanel, metaBPanel);
+    body.append(intro, pathCallout, compareHint, compareState, compareSurface, metadataGrid);
+
+    const footer = document.createElement("div");
+    footer.className = "modal-footer storage-conflict-footer";
+
+    const cancelButton = document.createElement("button");
+    cancelButton.className = "secondary-btn";
+    cancelButton.type = "button";
+    cancelButton.textContent = "Cancel";
+
+    const compareButton = document.createElement("button");
+    compareButton.className = "secondary-btn";
+    compareButton.type = "button";
+
+    const compareButtonContent = document.createElement("span");
+    compareButtonContent.className = "storage-conflict-action-content";
+
+    const spinner = document.createElement("span");
+    spinner.className = "storage-conflict-action-spinner";
+    spinner.setAttribute("aria-hidden", "true");
+    spinner.hidden = true;
+
+    const compareLabel = document.createElement("span");
+    compareLabel.className = "storage-conflict-action-label";
+    compareLabel.textContent = "Compare";
+
+    compareButtonContent.append(spinner, compareLabel);
+    compareButton.append(compareButtonContent);
+
+    footer.append(cancelButton, compareButton);
+    dialog.append(header, body, footer);
+    backdrop.append(dialog);
+    document.body.append(backdrop);
+    applyIcons();
+
+    let visible = false;
+    let isComparing = false;
+    let currentOptions: VersionComparisonModalOptions | null = null;
+    let inlineCompareState: VersionCompareState = { status: "idle", mode: null, details: null, message: "Click Compare to load inline previews or open external diff tools." };
+
+    const renderMetaList = (
+      list: HTMLUListElement,
+      values: Array<[string, string]>,
+    ) => {
+      list.innerHTML = "";
+      for (const [label, value] of values) {
+        const item = document.createElement("li");
+        const labelEl = document.createElement("span");
+        labelEl.textContent = label;
+        const valueEl = document.createElement("strong");
+        valueEl.textContent = value;
+        item.append(labelEl, valueEl);
+        list.append(item);
+      }
+    };
+
+    const setComparePanelText = (container: HTMLDivElement, text: string) => {
+      container.innerHTML = "";
+      const pre = document.createElement("pre");
+      pre.className = "storage-conflict-text-pane";
+      pre.textContent = text;
+      container.append(pre);
+    };
+
+    const setComparePanelImage = (container: HTMLDivElement, src: string, alt: string) => {
+      container.innerHTML = "";
+      const frame = document.createElement("div");
+      frame.className = "storage-conflict-image-frame";
+      const image = document.createElement("img");
+      image.className = "storage-conflict-image-preview";
+      image.src = src;
+      image.alt = alt;
+      frame.append(image);
+      container.append(frame);
+    };
+
+    const renderInlineCompareState = () => {
+      compareState.textContent = inlineCompareState.message;
+      compareState.classList.toggle("danger", inlineCompareState.status === "error");
+      compareSurface.hidden = inlineCompareState.status !== "ready" || inlineCompareState.mode === "external";
+
+      if (inlineCompareState.status !== "ready" || !inlineCompareState.details) {
+        versionAContent.innerHTML = "";
+        versionBContent.innerHTML = "";
+        return;
+      }
+
+      if (inlineCompareState.mode === "image") {
+        setComparePanelImage(
+          versionAContent,
+          inlineCompareState.details.versionAImageDataUrl ?? "",
+          `Version A preview`,
+        );
+        setComparePanelImage(
+          versionBContent,
+          inlineCompareState.details.versionBImageDataUrl ?? "",
+          `Version B preview`,
+        );
+        return;
+      }
+
+      if (inlineCompareState.mode === "text") {
+        setComparePanelText(versionAContent, inlineCompareState.details.versionAText ?? "");
+        setComparePanelText(versionBContent, inlineCompareState.details.versionBText ?? "");
+        return;
+      }
+
+      versionAContent.innerHTML = "";
+      versionBContent.innerHTML = "";
+    };
+
+    const syncBusyState = () => {
+      cancelButton.disabled = isComparing;
+      closeButton.disabled = isComparing;
+      compareButton.disabled = isComparing;
+      compareButton.classList.toggle("is-loading", isComparing);
+      compareButton.setAttribute("aria-busy", isComparing ? "true" : "false");
+      spinner.hidden = !isComparing;
+    };
+
+    const close = () => {
+      if (!visible || isComparing) return;
+      visible = false;
+      currentOptions = null;
+      inlineCompareState = { status: "idle", mode: null, details: null, message: "Click Compare to load inline previews or open external diff tools." };
+      renderInlineCompareState();
+      closeModal({ backdrop });
+    };
+
+    const runCompare = async () => {
+      if (!currentOptions || isComparing) return;
+      isComparing = true;
+      syncBusyState();
+      try {
+        inlineCompareState = {
+          status: "loading",
+          mode: null,
+          details: null,
+          message: getInlineCompareLoadingMessage(),
+        };
+        renderInlineCompareState();
+
+        const details = await currentOptions.onCompare();
+        inlineCompareState = {
+          status: "ready",
+          mode: details.mode,
+          details,
+          message: details.mode === "image"
+            ? "Showing inline image previews."
+            : details.mode === "text"
+              ? "Showing inline text comparison."
+              : details.fallbackReason ?? "Opened for external comparison.",
+        };
+        if (details.mode === "external") {
+            if (details.versionATempPath) client.openPath(details.versionATempPath).catch(console.error);
+            if (details.versionBTempPath) client.openPath(details.versionBTempPath).catch(console.error);
+        }
+        renderInlineCompareState();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        inlineCompareState = {
+          status: "error",
+          mode: null,
+          details: null,
+          message: getInlineCompareErrorMessage(message),
+        };
+        renderInlineCompareState();
+        toastMessage(message, "error");
+      } finally {
+        isComparing = false;
+        syncBusyState();
+      }
+    };
+
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) {
+        close();
+      }
+    });
+    closeButton.addEventListener("click", close);
+    cancelButton.addEventListener("click", close);
+    compareButton.addEventListener("click", () => void runCompare());
+
+    return {
+      open(options: VersionComparisonModalOptions) {
+        currentOptions = options;
+        isComparing = false;
+        title.textContent = `Compare Versions`;
+        intro.textContent = "Review the differences between the two selected versions.";
+        pathCallout.textContent = options.entryPath;
+
+        renderMetaList(metaAList, [
+          ["Date", formatVersionDate(options.versionA.lastModifiedAt)],
+          ["Size", formatVersionSize(options.versionA.size)],
+          ["ETag", formatVersionEtag(options.versionA.etag)],
+        ]);
+
+        renderMetaList(metaBList, [
+          ["Date", formatVersionDate(options.versionB.lastModifiedAt)],
+          ["Size", formatVersionSize(options.versionB.size)],
+          ["ETag", formatVersionEtag(options.versionB.etag)],
+        ]);
+
+        compareHint.textContent = "Compare loads inline image/text previews when available and otherwise opens the downloaded remote temp copies externally.";
+        inlineCompareState = { status: "idle", mode: null, details: null, message: "Click Compare to load inline previews or open external diff tools." };
+        renderInlineCompareState();
+
+        syncBusyState();
+        visible = true;
+        openModal({ backdrop });
+        compareButton.focus();
+      },
+      close() {
+        close();
+      },
+      destroy() {
+        backdrop.remove();
+      },
+    };
+  }
+
+  const versionComparisonModal = createVersionComparisonModalController(toast);
+
+  function renderVersionsList(versions: FileVersionEntry[], locationId: string, filePath: string) {
+    dom.fileVersionsDrawerList.innerHTML = "";
+    dom.fileVersionsDrawerEmpty.hidden = versions.length > 0;
+    
+    dom.fileVersionsDrawerCompareToolbar.hidden = false;
+
+    const selectedVersions = new Set<string>();
+
+    const updateCompareToolbar = () => {
+      dom.fileVersionsDrawerCompareBtn.disabled = selectedVersions.size !== 2;
+    };
+
+    updateCompareToolbar();
+
+    dom.fileVersionsDrawerCompareBtn.onclick = async () => {
+      const sortedSelected = Array.from(selectedVersions).sort((a, b) => {
+        const indexA = versions.findIndex(v => v.versionId === a);
+        const indexB = versions.findIndex(v => v.versionId === b);
+        return indexA - indexB;
+      });
+      const [versionAId, versionBId] = sortedSelected;
+      const versionA = versions.find(v => v.versionId === versionAId)!;
+      const versionB = versions.find(v => v.versionId === versionBId)!;
+
+      versionComparisonModal.open({
+        entryPath: filePath,
+        versionA,
+        versionB,
+        onCompare: () => client.prepareVersionComparison(locationId, filePath, versionAId, versionBId),
+      });
+    };
+
+    for (const version of versions) {
+      const li = document.createElement("li");
+      li.className = "list-item";
+
+      const checkboxWrap = document.createElement("label");
+      checkboxWrap.className = "checkbox-label";
+      checkboxWrap.style.marginRight = "1rem";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) {
+          selectedVersions.add(version.versionId);
+        } else {
+          selectedVersions.delete(version.versionId);
+        }
+        updateCompareToolbar();
+      });
+      checkboxWrap.appendChild(checkbox);
+      li.appendChild(checkboxWrap);
+
+      const textDiv = document.createElement("div");
+      textDiv.className = "list-item-text";
+
+      const primaryLine = document.createElement("span");
+      primaryLine.textContent = formatVersionDate(version.lastModifiedAt);
+      textDiv.appendChild(primaryLine);
+
+      const secondaryLine = document.createElement("span");
+      secondaryLine.className = "list-item-secondary";
+      const sizePart = formatVersionSize(version.size);
+      const classPart = version.storageClass ? ` · ${version.storageClass}` : "";
+      secondaryLine.textContent = sizePart + classPart;
+      textDiv.appendChild(secondaryLine);
+
+      li.appendChild(textDiv);
+
+      const actionDiv = document.createElement("div");
+      actionDiv.className = "list-item-action";
+
+      if (version.isLatest) {
+        const badge = document.createElement("span");
+        badge.className = "badge success";
+        badge.textContent = "Latest";
+        actionDiv.appendChild(badge);
+      } else {
+        const restoreBtn = document.createElement("button");
+        restoreBtn.className = "secondary-btn slim-btn";
+        restoreBtn.type = "button";
+        restoreBtn.textContent = "Restore";
+        restoreBtn.addEventListener("click", async () => {
+          const ok = await confirmModal({
+            title: "Restore this version?",
+            message: `This will make the version from ${formatVersionDate(version.lastModifiedAt)} the new latest version of "${filePath}". The current version will be kept as a previous version.`,
+            acceptLabel: "Restore",
+            rejectLabel: "Cancel",
+          });
+          if (!ok) return;
+
+          restoreBtn.disabled = true;
+          restoreBtn.textContent = "Restoring…";
+          try {
+            await client.restoreFileVersion(locationId, filePath, version.versionId);
+            toast("Version restored successfully.", "success");
+            addActivity("success", `Restored version of "${filePath}"`, `Version from ${formatVersionDate(version.lastModifiedAt)}`);
+            closeDrawer({ drawer: dom.fileVersionsDrawer });
+            await refreshLocationViews(locationId, { clearCache: true });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            toast(`Failed to restore version: ${message}`, "error");
+            addActivity("error", `Failed to restore version of "${filePath}"`, message);
+            restoreBtn.disabled = false;
+            restoreBtn.textContent = "Restore";
+          }
+        });
+        actionDiv.appendChild(restoreBtn);
+      }
+
+      const deleteBtn = document.createElement("button");
+      deleteBtn.className = "icon-btn icon-btn-sm danger-text";
+      deleteBtn.type = "button";
+      deleteBtn.title = "Delete version";
+      deleteBtn.innerHTML = '<i data-lucide="trash-2"></i>';
+      deleteBtn.addEventListener("click", async () => {
+        const ok = await confirmModal({
+          title: "Delete this version?",
+          message: `Are you sure you want to permanently delete the version from ${formatVersionDate(version.lastModifiedAt)}? This cannot be undone.`,
+          acceptLabel: "Delete",
+          rejectLabel: "Cancel",
+        });
+        if (!ok) return;
+        
+        deleteBtn.disabled = true;
+        try {
+          await client.deleteFileVersion(locationId, filePath, version.versionId);
+          toast("Version deleted successfully.", "success");
+          addActivity("success", `Deleted version of "${filePath}"`, `Version from ${formatVersionDate(version.lastModifiedAt)}`);
+          
+          dom.fileVersionsDrawerLoading.hidden = false;
+          dom.fileVersionsDrawerEmpty.hidden = true;
+          dom.fileVersionsDrawerList.innerHTML = "";
+          const updatedVersions = await client.listFileVersions(locationId, filePath);
+          dom.fileVersionsDrawerLoading.hidden = true;
+          renderVersionsList(updatedVersions, locationId, filePath);
+          
+          await refreshLocationViews(locationId, { clearCache: true });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          toast(`Failed to delete version: ${message}`, "error");
+          addActivity("error", `Failed to delete version of "${filePath}"`, message);
+          deleteBtn.disabled = false;
+        }
+      });
+      actionDiv.appendChild(deleteBtn);
+
+      li.appendChild(actionDiv);
+      dom.fileVersionsDrawerList.appendChild(li);
+    }
+    applyIcons();
+  }
+
+  async function handleViewVersions(entry: FileEntry) {
+    const locationId = state.activeLocationId;
+    if (!locationId) return;
+
+    dom.fileVersionsDrawerPath.textContent = entry.path;
+    dom.fileVersionsDrawerLoading.hidden = false;
+    dom.fileVersionsDrawerEmpty.hidden = true;
+    dom.fileVersionsDrawerList.innerHTML = "";
+
+    openDrawer({ drawer: dom.fileVersionsDrawer, closeOnBackdrop: true, closeOnEscape: true });
+
+    try {
+      const versions = await client.listFileVersions(locationId, entry.path);
+      dom.fileVersionsDrawerLoading.hidden = true;
+      renderVersionsList(versions, locationId, entry.path);
+    } catch (error) {
+      dom.fileVersionsDrawerLoading.hidden = true;
+      dom.fileVersionsDrawerEmpty.hidden = false;
+      const message = error instanceof Error ? error.message : String(error);
+      addActivity("error", `Failed to load versions for "${entry.path}"`, message);
+    }
+  }
+
+  dom.fileVersionsDrawerClose.addEventListener("click", () => {
+    closeDrawer({ drawer: dom.fileVersionsDrawer });
+  });
+
   async function refreshFileTree() {
     if (fileTreeChangeTimer !== null) {
       clearTimeout(fileTreeChangeTimer);
@@ -2648,9 +3275,17 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     beginFileTreeLoading(requestSequence);
 
     try {
-      const entries = mode === "bin"
-        ? await client.listBinEntries(locationId)
-        : await client.listFileEntries(locationId);
+      const activeLocation = getActiveLocation() ?? getSavedActiveLocation();
+      const isVersioningEnabled = mode === "live" && (activeLocation?.objectVersioningEnabled ?? false);
+
+      const [entries, versionCountEntries] = await Promise.all([
+        mode === "bin"
+          ? client.listBinEntries(locationId)
+          : client.listFileEntries(locationId),
+        isVersioningEnabled
+          ? client.listVersionCounts(locationId).catch(() => [] as VersionCountEntry[])
+          : Promise.resolve([] as VersionCountEntry[]),
+      ]);
 
       if (requestSequence !== fileTreeRequestSequence) {
         return;
@@ -2659,6 +3294,10 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       if (state.activeLocationId !== locationId || state.activeLocationViewMode !== mode) {
         return;
       }
+
+      activeVersionCounts = isVersioningEnabled
+        ? new Map(versionCountEntries.map((e) => [e.path, e.count]))
+        : undefined;
 
       const entriesJson = JSON.stringify(entries);
       const cachedSnapshot = getViewSnapshot(viewKey);
@@ -2696,13 +3335,19 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   dom.createCredentialBtn.addEventListener("click", () => void handleCreateCredential());
   dom.restoreSelectedBtn.addEventListener("click", () => void handleBulkBinRestore());
   dom.purgeSelectedBtn.addEventListener("click", () => void handleBulkBinPurge());
-  dom.saveSettingsBtn.addEventListener("click", () => void handleSaveSettings());
+  dom.savePollingBtn.addEventListener("click", () => void handleSaveSettings(dom.savePollingBtn, dom.pollingResult));
+  dom.saveDebugBtn.addEventListener("click", () => void handleSaveSettings(dom.saveDebugBtn, dom.debugResult));
+  dom.saveConflictBtn.addEventListener("click", () => void handleSaveSettings(dom.saveConflictBtn, dom.conflictResult));
   dom.saveLocationBtn.addEventListener("click", () => void handleSaveLocation());
   dom.cancelEditLocationBtn.addEventListener("click", () => {
     resetLocationForm();
     dom.locationsResult.textContent = "Edit cancelled.";
   });
-  dom.locationObjectVersioningEnabledInput.addEventListener("change", renderLocationRemoteBinState);
+  dom.locationVersioningCheckbox.addEventListener("change", () => {
+    dom.locationObjectVersioningEnabledInput.value = dom.locationVersioningCheckbox.checked ? "true" : "false";
+    renderLocationRemoteBinState();
+  });
+  dom.locationObjectVersioningBtn.addEventListener("click", () => void handleVersioningToggle());
   dom.locationRemoteBinEnabledInput.addEventListener("change", renderLocationRemoteBinState);
   dom.locationRemoteBinRetentionInput.addEventListener("input", renderLocationRemoteBinState);
   resetLocationForm();
@@ -2722,11 +3367,27 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     root: dom.nav,
     onSelect: (id) => {
       switch (id) {
-        case "nav-home": closeAllDialogs(); break;
         case "nav-credentials": openDialog("credentials"); break;
         case "nav-locations": openDialog("locations"); break;
         case "nav-activity": openDialog("activity"); break;
-        case "nav-settings": openDialog("settings"); break;
+        case "nav-polling-settings": openDialog("polling"); break;
+        case "nav-debug-settings": openDialog("debug"); break;
+        case "nav-conflict-settings": openDialog("conflict"); break;
+        case "open-debug-folder":
+          client.openActivityDebugLogFolder().catch(console.error);
+          break;
+        case "open-about":
+          openDialog("about");
+          break;
+        case "set-theme-goblin":
+          document.documentElement.setAttribute("data-theme", "goblin");
+          break;
+        case "set-theme-dark":
+          document.documentElement.setAttribute("data-theme", "dark");
+          break;
+        case "set-theme-light":
+          document.documentElement.setAttribute("data-theme", "light");
+          break;
       }
     },
   });
@@ -2761,10 +3422,12 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   await refreshSyncLocations();
 
   dom.homeScreen.hidden = false;
-  dom.navTriggerLabel.textContent = "Menu";
-  dom.settingsResult.textContent = client.supportsNativeProfilePersistence
+  const settingsInitMsg = client.supportsNativeProfilePersistence
     ? "Settings changes stay local until you save them."
     : "Settings changes stay local to this browser preview after you save them.";
+  dom.pollingResult.textContent = settingsInitMsg;
+  dom.debugResult.textContent = settingsInitMsg;
+  dom.conflictResult.textContent = settingsInitMsg;
   dom.credentialsResult.textContent = client.supportsNativeProfilePersistence
     ? "Create named credentials here. The UI will show whether each one was saved and tested."
     : "Credential management is shown here for preview, but real credentials are desktop-only.";

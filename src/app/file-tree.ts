@@ -67,6 +67,10 @@ export interface FileTreeOptions {
   onRestore?: (entry: FileEntry) => void | Promise<void>;
   onStorageClass?: (path: string, currentStorageClass: string | null) => void;
   onResolveConflict?: (entry: FileEntry) => void;
+  /** Version counts per file path. When provided, version badges and history buttons are shown. */
+  versionCounts?: Map<string, number>;
+  /** Called when the user clicks the version history button for a file. */
+  onViewVersions?: (entry: FileEntry) => void;
 }
 
 const RESTORE_BUTTON_LABEL = "Restore";
@@ -429,7 +433,20 @@ function encodeRestoreEntry(entry: FileEntry): string {
   return escapeHtml(JSON.stringify(entry));
 }
 
-function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<string>): string {
+function renderVersionBadgeHtml(count: number): string {
+  const label = count === 1 ? "1 version" : `${count} versions`;
+  return `<span class="badge default tree-version-badge" title="${label}">${label}</span>`;
+}
+
+function renderVersionsButtonHtml(escapedPath: string): string {
+  return [
+    `<button class="icon-btn icon-btn-sm tree-versions-btn" type="button" data-versions-path="${escapedPath}" title="View version history" aria-label="View version history">`,
+    `<i data-lucide="history"></i>`,
+    `</button>`,
+  ].join("");
+}
+
+function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<string>, versionCounts?: Map<string, number>): string {
   const isLeaf = isFileNode(node);
   const escapedPath = escapeHtml(node.path);
   const escapedName = escapeHtml(node.name);
@@ -439,6 +456,7 @@ function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<st
     const statusTooltip = getStatusTooltip(node.entry.status);
     const checked = checkedLeafPaths.has(node.path) ? " checked" : "";
     const disabled = isEntryCheckboxDisabled(node.entry, mode) ? " disabled" : "";
+    const versionCount = versionCounts?.get(node.path);
     return [
       `<li class="tree-item" data-value="${escapedPath}">`,
       `<div class="tree-row" style="--tree-depth: ${node.depth}">`,
@@ -448,6 +466,9 @@ function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<st
       `<i data-lucide="file"></i>`,
       `<span>${escapedName}</span>`,
       `</button>`,
+      ...(mode === "live" && versionCounts !== undefined
+        ? [renderVersionBadgeHtml(versionCount ?? 0)]
+        : []),
       `<button class="icon-btn icon-btn-sm tree-reveal-btn" type="button" data-reveal-path="${escapedPath}" title="Reveal in file manager" aria-label="Reveal in file manager">`,
       `<i data-lucide="folder-open"></i>`,
       `</button>`,
@@ -457,6 +478,9 @@ function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<st
           createRestoreButtonHtml(escapedPath, escapeHtml(node.entry.binKey ?? ""), encodeRestoreEntry(node.entry)),
         ]
         : [
+          ...(mode === "live" && versionCounts !== undefined
+            ? [renderVersionsButtonHtml(escapedPath)]
+            : []),
           ...(isResolvableConflictFileEntry(node.entry)
             ? [createResolveButtonHtml(escapedPath)]
             : []),
@@ -481,7 +505,7 @@ function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<st
   const statusTooltip = deriveDirectoryStatusTooltip(node);
   const checked = deriveDirectoryChecked(node, checkedLeafPaths, mode) ? " checked" : "";
   const disabled = isDirectoryCheckboxDisabled(node, mode) ? " disabled" : "";
-  const childrenHtml = node.children.map((child) => renderNode(child, mode, checkedLeafPaths)).join("");
+  const childrenHtml = node.children.map((child) => renderNode(child, mode, checkedLeafPaths, versionCounts)).join("");
 
   const restoreEntry: FileEntry = node.entry ?? {
     path: node.path,
@@ -521,8 +545,8 @@ function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<st
   ].join("");
 }
 
-function renderTreeHtml(roots: TreeNode[], mode: FileTreeMode, checkedLeafPaths: Set<string>): string {
-  return roots.map((node) => renderNode(node, mode, checkedLeafPaths)).join("");
+function renderTreeHtml(roots: TreeNode[], mode: FileTreeMode, checkedLeafPaths: Set<string>, versionCounts?: Map<string, number>): string {
+  return roots.map((node) => renderNode(node, mode, checkedLeafPaths, versionCounts)).join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -552,7 +576,7 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
   // Build and inject HTML
   const tree = buildTree(entries);
   const checkedLeafPaths = getCheckedLeafPaths(entries, checkedPaths, mode);
-  treeEl.innerHTML = renderTreeHtml(tree, mode, checkedLeafPaths);
+  treeEl.innerHTML = renderTreeHtml(tree, mode, checkedLeafPaths, options.versionCounts);
 
   // Render lucide icon placeholders into SVGs
   applyIcons();
@@ -617,6 +641,19 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
       const entry = entries.find((candidate) => candidate.path === path);
       if (entry) {
         options.onResolveConflict(entry);
+      }
+    }
+  });
+
+  treeEl.addEventListener("click", (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".tree-versions-btn");
+    if (!btn) return;
+    e.stopPropagation();
+    const path = btn.dataset.versionsPath;
+    if (path && options.onViewVersions) {
+      const entry = entries.find((candidate) => candidate.path === path);
+      if (entry) {
+        options.onViewVersions(entry);
       }
     }
   });

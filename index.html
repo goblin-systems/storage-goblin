@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="goblin">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -28,13 +28,36 @@
 
       <div class="top-bar-row">
         <nav id="app-nav" class="nav-bar" aria-label="App menu">
+          <!-- View -->
           <div class="nav-item">
-            <button class="nav-trigger" type="button"><span id="nav-trigger-label">Menu</span> <i data-lucide="chevron-down"></i></button>
+            <button class="nav-trigger" type="button">View <i data-lucide="chevron-down"></i></button>
             <div class="nav-dropdown">
-              <button class="nav-option" type="button" data-nav-id="nav-home">
-                <span class="nav-option-icon"><i data-lucide="house"></i></span>
-                <span class="nav-option-label">Home</span>
-              </button>
+              <div class="nav-option nav-option--has-sub">
+                <span class="nav-option-icon"><i data-lucide="palette"></i></span>
+                <span class="nav-option-label">Theme</span>
+                <span class="nav-option-arrow"><i data-lucide="chevron-right"></i></span>
+                <div class="nav-submenu">
+                  <button class="nav-option" type="button" data-nav-id="set-theme-goblin">
+                    <span class="nav-option-icon"><i data-lucide="circle-dot"></i></span>
+                    <span class="nav-option-label">Goblin</span>
+                  </button>
+                  <button class="nav-option" type="button" data-nav-id="set-theme-dark">
+                    <span class="nav-option-icon"><i data-lucide="circle"></i></span>
+                    <span class="nav-option-label">Dark</span>
+                  </button>
+                  <button class="nav-option" type="button" data-nav-id="set-theme-light">
+                    <span class="nav-option-icon"><i data-lucide="circle"></i></span>
+                    <span class="nav-option-label">Light</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Settings -->
+          <div class="nav-item">
+            <button class="nav-trigger" type="button">Settings <i data-lucide="chevron-down"></i></button>
+            <div class="nav-dropdown">
               <button class="nav-option" type="button" data-nav-id="nav-locations">
                 <span class="nav-option-icon"><i data-lucide="link"></i></span>
                 <span class="nav-option-label">Sync Locations</span>
@@ -43,13 +66,38 @@
                 <span class="nav-option-icon"><i data-lucide="key-round"></i></span>
                 <span class="nav-option-label">Credentials</span>
               </button>
+              <div class="nav-divider"></div>
+              <button class="nav-option" type="button" data-nav-id="nav-polling-settings">
+                <span class="nav-option-icon"><i data-lucide="clock"></i></span>
+                <span class="nav-option-label">Polling</span>
+              </button>
+              <button class="nav-option" type="button" data-nav-id="nav-conflict-settings">
+                <span class="nav-option-icon"><i data-lucide="git-merge"></i></span>
+                <span class="nav-option-label">Conflict Defaults</span>
+              </button>
+              <button class="nav-option" type="button" data-nav-id="nav-debug-settings">
+                <span class="nav-option-icon"><i data-lucide="bug"></i></span>
+                <span class="nav-option-label">Activity Debug</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Help -->
+          <div class="nav-item">
+            <button class="nav-trigger" type="button">Help <i data-lucide="chevron-down"></i></button>
+            <div class="nav-dropdown">
               <button class="nav-option" type="button" data-nav-id="nav-activity">
                 <span class="nav-option-icon"><i data-lucide="logs"></i></span>
-                <span class="nav-option-label">Activity</span>
+                <span class="nav-option-label">Activity Logs</span>
               </button>
-              <button class="nav-option" type="button" data-nav-id="nav-settings">
-                <span class="nav-option-icon"><i data-lucide="settings-2"></i></span>
-                <span class="nav-option-label">Advanced</span>
+              <div class="nav-divider"></div>
+              <button class="nav-option" type="button" data-nav-id="open-debug-folder">
+                <span class="nav-option-icon"><i data-lucide="folder-open"></i></span>
+                <span class="nav-option-label">Open Logs Folder</span>
+              </button>
+              <button class="nav-option" type="button" data-nav-id="open-about">
+                <span class="nav-option-icon"><i data-lucide="info"></i></span>
+                <span class="nav-option-label">About</span>
               </button>
             </div>
           </div>
@@ -185,11 +233,11 @@
           </div>
         </section>
 
-        <section id="screen-settings" class="modal-backdrop storage-modal" hidden>
-          <div class="modal-card storage-modal-card storage-modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="screen-settings-title">
+        <section id="screen-polling" class="modal-backdrop storage-modal" hidden>
+          <div class="modal-card storage-modal-card storage-modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="screen-polling-title">
             <div class="modal-header">
-              <h3 id="screen-settings-title">Advanced</h3>
-              <button class="icon-btn modal-close-btn modal-btn-reject" type="button" aria-label="Close advanced dialog">
+              <h3 id="screen-polling-title">Polling Settings</h3>
+              <button class="icon-btn modal-close-btn modal-btn-reject" type="button" aria-label="Close polling settings dialog">
                 <i data-lucide="x"></i>
               </button>
             </div>
@@ -208,8 +256,27 @@
                     <input id="poll-interval-input" type="number" min="15" max="3600" step="15" value="60" />
                   </label>
                 </div>
+                <div class="stack-actions primary-action-row">
+                  <button id="save-polling-btn" class="secondary-btn" type="button">
+                    <i data-lucide="save"></i>
+                    <span>Save settings</span>
+                  </button>
+                </div>
+                <div id="polling-result" class="callout">Settings changes stay local until you save them.</div>
               </div>
+            </div>
+          </div>
+        </section>
 
+        <section id="screen-debug" class="modal-backdrop storage-modal" hidden>
+          <div class="modal-card storage-modal-card storage-modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="screen-debug-title">
+            <div class="modal-header">
+              <h3 id="screen-debug-title">Activity Debug</h3>
+              <button class="icon-btn modal-close-btn modal-btn-reject" type="button" aria-label="Close debug settings dialog">
+                <i data-lucide="x"></i>
+              </button>
+            </div>
+            <div class="panel-grid storage-modal-grid">
               <div class="settings-section storage-modal-section">
                 <div class="section-heading-row">
                   <h2>Activity debug</h2>
@@ -230,9 +297,26 @@
                     <i data-lucide="folder-search-2"></i>
                     <span>Open log folder</span>
                   </button>
+                  <button id="save-debug-btn" class="secondary-btn" type="button">
+                    <i data-lucide="save"></i>
+                    <span>Save settings</span>
+                  </button>
                 </div>
+                <div id="debug-result" class="callout">Settings changes stay local until you save them.</div>
               </div>
+            </div>
+          </div>
+        </section>
 
+        <section id="screen-conflict" class="modal-backdrop storage-modal" hidden>
+          <div class="modal-card storage-modal-card storage-modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="screen-conflict-title">
+            <div class="modal-header">
+              <h3 id="screen-conflict-title">Conflict Defaults</h3>
+              <button class="icon-btn modal-close-btn modal-btn-reject" type="button" aria-label="Close conflict settings dialog">
+                <i data-lucide="x"></i>
+              </button>
+            </div>
+            <div class="panel-grid storage-modal-grid">
               <div class="settings-section storage-modal-section">
                 <div class="section-heading-row">
                   <h2>Conflict defaults</h2>
@@ -249,12 +333,12 @@
                 </div>
                 <p class="hint">Delete behavior now follows each sync location's remote bin settings. File/file mismatches can prefer local or remote; file/directory mismatches still require conflict review.</p>
                 <div class="stack-actions primary-action-row">
-                  <button id="save-settings-btn" class="secondary-btn" type="button">
+                  <button id="save-conflict-btn" class="secondary-btn" type="button">
                     <i data-lucide="save"></i>
                     <span>Save settings</span>
                   </button>
                 </div>
-                <div id="settings-result" class="callout">Settings changes stay local until you save them.</div>
+                <div id="conflict-result" class="callout">Settings changes stay local until you save them.</div>
               </div>
             </div>
           </div>
@@ -340,10 +424,18 @@
                       <option value="">Choose a credential</option>
                     </select>
                   </label>
-                  <label class="checkbox-label form-span-2">
-                    <input id="location-object-versioning-enabled-input" type="checkbox" />
+                  <input id="location-object-versioning-enabled-input" type="hidden" value="false" />
+                  <label id="location-versioning-checkbox-wrap" class="checkbox-label form-span-2">
+                    <input id="location-versioning-checkbox" type="checkbox" />
                     <span>Object versioning enabled</span>
                   </label>
+                  <div id="location-versioning-btn-wrap" class="form-span-2" hidden>
+                    <button id="location-object-versioning-btn" class="secondary-btn slim-btn" type="button">
+                      <span id="location-versioning-btn-spinner" class="btn-spinner" hidden aria-hidden="true"></span>
+                      <i id="location-versioning-btn-icon" data-lucide="shield-check"></i>
+                      <span id="location-versioning-btn-label">Enable object versioning</span>
+                    </button>
+                  </div>
                   <label class="checkbox-label form-span-2">
                     <input id="location-enabled-input" type="checkbox" checked />
                     <span>Enabled</span>
@@ -399,6 +491,53 @@
       </section>
 
       <div id="app-toast" class="app-toast" role="status" aria-live="polite"></div>
+
+      <div id="drawer-file-versions" class="drawer drawer-right" aria-hidden="true" hidden>
+        <div class="drawer-header">
+          <h3>Version History</h3>
+          <button class="icon-btn icon-btn-sm" id="drawer-file-versions-close" aria-label="Close">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+        <div class="drawer-body">
+          <p id="drawer-file-versions-path" class="list-item-secondary"></p>
+          <div id="drawer-file-versions-compare-toolbar" hidden>
+            <button id="drawer-file-versions-compare-btn" class="secondary-btn slim-btn" type="button">
+              <i data-lucide="diff"></i>
+              <span>Compare selected</span>
+            </button>
+          </div>
+          <div id="drawer-file-versions-loading" hidden>
+            <span class="list-item-secondary">Loading versions&hellip;</span>
+          </div>
+          <div id="drawer-file-versions-empty" class="empty-state" hidden>
+            <div class="empty-state-card">No versions found for this file.</div>
+          </div>
+          <ul id="drawer-file-versions-list" class="list"></ul>
+          <div id="drawer-file-versions-compare-panel" hidden></div>
+        </div>
+        <section id="screen-about" class="modal-backdrop storage-modal" hidden>
+          <div class="modal-card storage-modal-card modal-card--sm" role="dialog" aria-modal="true" aria-labelledby="screen-about-title">
+            <div class="modal-header">
+              <h3 id="screen-about-title">About Storage Goblin</h3>
+              <button class="icon-btn modal-close-btn modal-btn-reject" type="button" aria-label="Close about dialog">
+                <i data-lucide="x"></i>
+              </button>
+            </div>
+            <div class="settings-section storage-modal-section">
+              <div class="form-grid" style="text-align: center; padding: 2rem 0;">
+                <i data-lucide="package-open" style="width: 48px; height: 48px; margin: 0 auto; display: block; color: var(--color-primary);"></i>
+                <h2 style="margin-top: 1rem;">Storage Goblin</h2>
+                <p class="hint">A visual S3 sync tool using Goblin Design System.</p>
+                <div style="margin-top: 1rem;">
+                  <span class="badge default">v0.1.0</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </div>
     </main>
   </body>
 </html>

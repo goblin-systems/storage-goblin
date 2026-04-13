@@ -111,8 +111,10 @@ vi.mock("@goblin-systems/goblin-design-system", () => ({
     }
     return element as T;
   },
+  closeDrawer: vi.fn(),
   closeModal: closeModalMock,
   confirmModal: confirmModalMock,
+  openDrawer: vi.fn(),
   openModal: openModalMock,
   setupWindowControls: vi.fn(),
   showToast: showToastMock,
@@ -163,6 +165,10 @@ vi.mock("./client", () => ({
     updateSyncLocation: updateSyncLocationMock,
     removeSyncLocation: removeSyncLocationMock,
     changeStorageClass: changeStorageClassMock,
+    listFileVersions: vi.fn().mockResolvedValue([]),
+    listVersionCounts: vi.fn().mockResolvedValue([]),
+    restoreFileVersion: vi.fn().mockResolvedValue(undefined),
+    setSyncLocationVersioning: vi.fn().mockResolvedValue({}),
   }),
 }));
 
@@ -790,7 +796,7 @@ describe("bootstrapStorageGoblin", () => {
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
 
     const objectVersioningInput = document.getElementById("location-object-versioning-enabled-input") as HTMLInputElement;
-    expect(objectVersioningInput.checked).toBe(false);
+    expect(objectVersioningInput.value).toBe("false");
   });
 
   it("disables remote bin controls when object versioning is enabled", async () => {
@@ -798,13 +804,13 @@ describe("bootstrapStorageGoblin", () => {
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
 
-    const objectVersioningInput = document.getElementById("location-object-versioning-enabled-input") as HTMLInputElement;
     const enabledInput = document.getElementById("location-remote-bin-enabled-input") as HTMLInputElement;
     const retentionInput = document.getElementById("location-remote-bin-retention-input") as HTMLInputElement;
     const hint = document.getElementById("location-remote-bin-hint");
 
-    objectVersioningInput.checked = true;
-    objectVersioningInput.dispatchEvent(new Event("change", { bubbles: true }));
+    const versioningCheckbox = document.getElementById("location-versioning-checkbox") as HTMLInputElement;
+    versioningCheckbox.checked = true;
+    versioningCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
 
     expect(enabledInput.checked).toBe(false);
     expect(enabledInput.disabled).toBe(true);
@@ -827,8 +833,9 @@ describe("bootstrapStorageGoblin", () => {
     (document.getElementById("location-local-folder-input") as HTMLInputElement).value = "C:/photos";
     (document.getElementById("location-bucket-input") as HTMLInputElement).value = "photo-bucket";
     (document.getElementById("location-region-select") as HTMLSelectElement).value = "us-east-1";
-    (document.getElementById("location-object-versioning-enabled-input") as HTMLInputElement).checked = true;
-    (document.getElementById("location-object-versioning-enabled-input") as HTMLInputElement).dispatchEvent(new Event("change", { bubbles: true }));
+    const versioningCheckbox = document.getElementById("location-versioning-checkbox") as HTMLInputElement;
+    versioningCheckbox.checked = true;
+    versioningCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
 
     document.getElementById("save-location-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();

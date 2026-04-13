@@ -140,6 +140,40 @@ pub struct CredentialTestResult {
     pub permissions: Option<s3_adapter::PermissionProbeSummary>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionComparisonDetails {
+    pub path: String,
+    pub mode: String,
+    pub version_a_id: String,
+    pub version_b_id: String,
+    pub version_a_temp_path: Option<String>,
+    pub version_b_temp_path: Option<String>,
+    pub version_a_text: Option<String>,
+    pub version_b_text: Option<String>,
+    pub version_a_image_data_url: Option<String>,
+    pub version_b_image_data_url: Option<String>,
+    pub fallback_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileVersionEntry {
+    pub version_id: String,
+    pub is_latest: bool,
+    pub size: u64,
+    pub last_modified_at: Option<String>,
+    pub storage_class: Option<String>,
+    pub etag: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionCountEntry {
+    pub path: String,
+    pub count: u32,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileEntryResponse {
@@ -1545,22 +1579,29 @@ async fn reconcile_remote_bin_lifecycle_target<R: Runtime>(
     }
 }
 
-async fn ensure_pair_object_versioning_requirements<R: Runtime>(
+async fn apply_sync_location_versioning<R: Runtime>(
+    app: &AppHandle<R>,
+    pair: &SyncPair,
+    enabled: bool,
+) -> Result<(), String> {
+    let credentials = resolve_credentials_for_pair(app, pair)?;
+    let client = s3_adapter::build_client(&s3_config_for_pair(pair, &credentials)).await?;
+    s3_adapter::set_bucket_versioning(&client, &pair.bucket, enabled).await
+}
+
+async fn reconcile_pair_object_versioning<R: Runtime>(
     app: &AppHandle<R>,
     pair: &SyncPair,
 ) -> Result<(), String> {
-    if !pair.object_versioning_enabled {
-        return Ok(());
-    }
-
     let credentials = resolve_credentials_for_pair(app, pair)?;
     let client = s3_adapter::build_client(&s3_config_for_pair(pair, &credentials)).await?;
+    let currently_enabled =
+        s3_adapter::bucket_versioning_enabled(&client, &pair.bucket).await?;
 
-    if !s3_adapter::bucket_versioning_enabled(&client, &pair.bucket).await? {
-        return Err(format!(
-            "Sync location '{}' requires bucket versioning to be enabled for bucket '{}'.",
-            pair.label, pair.bucket
-        ));
+    if pair.object_versioning_enabled && !currently_enabled {
+        s3_adapter::set_bucket_versioning(&client, &pair.bucket, true).await?;
+    } else if !pair.object_versioning_enabled && currently_enabled {
+        s3_adapter::set_bucket_versioning(&client, &pair.bucket, false).await?;
     }
 
     Ok(())
@@ -5783,7 +5824,7 @@ fn add_sync_pair_impl(app: AppHandle, draft: SyncPairDraft) -> Result<StoredProf
         remote_bin: draft.remote_bin,
     }
     .normalized();
-    run_async_blocking(ensure_pair_object_versioning_requirements(&app, &pair))?;
+    run_async_blocking(reconcile_pair_object_versioning(&app, &pair))?;
     next.sync_pairs.push(pair);
     let next = persist_profile_with_remote_bin_reconciliation(
         &app,
@@ -5818,7 +5859,7 @@ fn add_sync_pair_impl<R: Runtime>(
         remote_bin: draft.remote_bin,
     }
     .normalized();
-    run_async_blocking(ensure_pair_object_versioning_requirements(&app, &pair))?;
+    run_async_blocking(reconcile_pair_object_versioning(&app, &pair))?;
     next.sync_pairs.push(pair);
     persist_profile_with_remote_bin_reconciliation(
         &app,
@@ -5868,7 +5909,7 @@ fn update_sync_pair_impl(app: AppHandle, draft: SyncPairDraft) -> Result<StoredP
         remote_bin: draft.remote_bin,
     }
     .normalized();
-    run_async_blocking(ensure_pair_object_versioning_requirements(&app, &updated))?;
+    run_async_blocking(reconcile_pair_object_versioning(&app, &updated))?;
     next.sync_pairs[position] = updated;
     let next = persist_profile_with_remote_bin_reconciliation(
         &app,
@@ -5913,7 +5954,7 @@ fn update_sync_pair_impl<R: Runtime>(
         remote_bin: draft.remote_bin,
     }
     .normalized();
-    run_async_blocking(ensure_pair_object_versioning_requirements(&app, &updated))?;
+    run_async_blocking(reconcile_pair_object_versioning(&app, &updated))?;
     next.sync_pairs[position] = updated;
     persist_profile_with_remote_bin_reconciliation(
         &app,
@@ -5927,6 +5968,32 @@ fn update_sync_pair_impl<R: Runtime>(
 #[tauri::command]
 pub fn update_sync_location(app: AppHandle, draft: SyncPairDraft) -> Result<StoredProfile, String> {
     update_sync_pair_impl(app, draft)
+}
+
+#[tauri::command]
+pub fn set_sync_location_versioning(
+    app: AppHandle,
+    location_id: String,
+    enabled: bool,
+) -> Result<StoredProfile, String> {
+    let location_id = location_id.trim();
+    if location_id.is_empty() {
+        return Err("Sync location ID is required.".into());
+    }
+    let mut profile = read_profile_from_disk(&app)?;
+    let position = profile
+        .sync_pairs
+        .iter()
+        .position(|p| p.id == location_id)
+        .ok_or_else(|| format!("Sync location '{}' not found.", location_id))?;
+    run_async_blocking(apply_sync_location_versioning(
+        &app,
+        &profile.sync_pairs[position],
+        enabled,
+    ))?;
+    profile.sync_pairs[position].object_versioning_enabled = enabled;
+    write_profile_to_disk(&app, &profile)?;
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -7690,6 +7757,355 @@ pub async fn list_bin_entries(
         let bin_entries = list_remote_bin_inventory_for_pair(&pair, &credentials).await?;
         Ok(build_bin_entry_responses(&pair, &bin_entries))
     }
+}
+
+#[tauri::command]
+pub async fn list_file_versions(
+    app: AppHandle,
+    location_id: String,
+    path: String,
+) -> Result<Vec<FileVersionEntry>, String> {
+    let profile = read_profile_from_disk(&app)?;
+    let pair = sync_pair_for_location(&profile, &location_id)?;
+
+    if !pair.object_versioning_enabled {
+        return Err(format!(
+            "Sync location '{}' does not have object versioning enabled.",
+            pair.label
+        ));
+    }
+
+    let credentials = resolve_credentials_for_pair(&app, &pair)?;
+    let client = s3_adapter::build_client(&s3_config_for_pair(&pair, &credentials)).await?;
+    let object_key = s3_adapter::object_key(&path);
+
+    let mut key_marker: Option<String> = None;
+    let mut version_id_marker: Option<String> = None;
+    let mut versions = Vec::new();
+
+    loop {
+        let page = s3_adapter::list_object_versions_page_with_prefix(
+            &client,
+            &pair.bucket,
+            Some(&object_key),
+            key_marker.as_deref(),
+            version_id_marker.as_deref(),
+        )
+        .await?;
+
+        for version in &page.versions {
+            if version.key == object_key {
+                versions.push(FileVersionEntry {
+                    version_id: version.version_id.clone(),
+                    is_latest: version.is_latest,
+                    size: version.size,
+                    last_modified_at: version.last_modified_at.clone(),
+                    storage_class: version.storage_class.clone(),
+                    etag: version.etag.clone(),
+                });
+            }
+        }
+
+        if !page.truncated {
+            break;
+        }
+
+        key_marker = page.next_key_marker;
+        version_id_marker = page.next_version_id_marker;
+    }
+
+    versions.sort_by(|a, b| {
+        b.last_modified_at
+            .as_deref()
+            .unwrap_or("")
+            .cmp(a.last_modified_at.as_deref().unwrap_or(""))
+    });
+
+    Ok(versions)
+}
+
+#[tauri::command]
+pub async fn list_version_counts(
+    app: AppHandle,
+    location_id: String,
+) -> Result<Vec<VersionCountEntry>, String> {
+    let profile = read_profile_from_disk(&app)?;
+    let pair = sync_pair_for_location(&profile, &location_id)?;
+
+    if !pair.object_versioning_enabled {
+        return Ok(Vec::new());
+    }
+
+    let credentials = resolve_credentials_for_pair(&app, &pair)?;
+    let client = s3_adapter::build_client(&s3_config_for_pair(&pair, &credentials)).await?;
+
+    let mut key_marker: Option<String> = None;
+    let mut version_id_marker: Option<String> = None;
+    let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+
+    loop {
+        let page = s3_adapter::list_object_versions_page(
+            &client,
+            &pair.bucket,
+            key_marker.as_deref(),
+            version_id_marker.as_deref(),
+        )
+        .await?;
+
+        for version in &page.versions {
+            if should_exclude_remote_key(&version.key, &[]) {
+                continue;
+            }
+            *counts.entry(version.key.clone()).or_insert(0) += 1;
+        }
+
+        if !page.truncated {
+            break;
+        }
+
+        key_marker = page.next_key_marker;
+        version_id_marker = page.next_version_id_marker;
+    }
+
+    let result = counts
+        .into_iter()
+        .map(|(key, count)| {
+            let path = relative_path_from_key(&key);
+            VersionCountEntry { path, count }
+        })
+        .collect();
+
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn restore_file_version(
+    app: AppHandle,
+    location_id: String,
+    path: String,
+    version_id: String,
+) -> Result<(), String> {
+    let profile = read_profile_from_disk(&app)?;
+    let pair = sync_pair_for_location(&profile, &location_id)?;
+
+    if !pair.object_versioning_enabled {
+        return Err(format!(
+            "Sync location '{}' does not have object versioning enabled.",
+            pair.label
+        ));
+    }
+
+    let credentials = resolve_credentials_for_pair(&app, &pair)?;
+    let client = s3_adapter::build_client(&s3_config_for_pair(&pair, &credentials)).await?;
+    let key = s3_adapter::object_key(&path);
+
+    s3_adapter::copy_object_version(&client, &pair.bucket, &key, &version_id).await?;
+
+    refresh_pair_state_after_remote_change(&app, &pair, &credentials)
+        .await
+        .map_err(|error| {
+            format!(
+                "Restored version of '{}', but refresh failed: {error}",
+                path
+            )
+        })?;
+
+    Ok(())
+}
+
+fn temp_version_compare_file_path<R: Runtime>(
+    app: &AppHandle<R>,
+    relative_path: &str,
+    label: &str,
+) -> Result<PathBuf, String> {
+    let extension = Path::new(relative_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    let file_name = format!(
+        "storage-goblin-version-compare-{}-{}{}",
+        Uuid::new_v4(),
+        label,
+        extension
+    );
+    app_storage_path(app, &file_name)
+}
+
+fn finalize_version_compare_details(
+    path: String,
+    version_a_id: String,
+    version_b_id: String,
+    path_a: Option<String>,
+    path_b: Option<String>,
+) -> VersionComparisonDetails {
+    let media_type = image_media_type_for_extension(&path);
+
+    if media_type.is_some() {
+        let result = (|| -> Result<(String, String), String> {
+            let a = path_a
+                .as_deref()
+                .ok_or("Version A file is unavailable for inline image compare.")?;
+            let b = path_b
+                .as_deref()
+                .ok_or("Version B file is unavailable for inline image compare.")?;
+            let a_bytes = read_file_with_size_limit(Path::new(a), INLINE_IMAGE_COMPARE_MAX_BYTES)?;
+            let b_bytes = read_file_with_size_limit(Path::new(b), INLINE_IMAGE_COMPARE_MAX_BYTES)?;
+            let mt = media_type.unwrap();
+            Ok((
+                format!("data:{mt};base64,{}", BASE64_STANDARD.encode(a_bytes)),
+                format!("data:{mt};base64,{}", BASE64_STANDARD.encode(b_bytes)),
+            ))
+        })();
+
+        return match result {
+            Ok((a_url, b_url)) => VersionComparisonDetails {
+                path,
+                mode: "image".into(),
+                version_a_id,
+                version_b_id,
+                version_a_temp_path: path_a,
+                version_b_temp_path: path_b,
+                version_a_text: None,
+                version_b_text: None,
+                version_a_image_data_url: Some(a_url),
+                version_b_image_data_url: Some(b_url),
+                fallback_reason: None,
+            },
+            Err(reason) => VersionComparisonDetails {
+                path,
+                mode: "external".into(),
+                version_a_id,
+                version_b_id,
+                version_a_temp_path: path_a,
+                version_b_temp_path: path_b,
+                version_a_text: None,
+                version_b_text: None,
+                version_a_image_data_url: None,
+                version_b_image_data_url: None,
+                fallback_reason: Some(reason),
+            },
+        };
+    }
+
+    let result = (|| -> Result<(String, String), String> {
+        let a = path_a
+            .as_deref()
+            .ok_or("Version A file is unavailable for inline text compare.")?;
+        let b = path_b
+            .as_deref()
+            .ok_or("Version B file is unavailable for inline text compare.")?;
+        let a_bytes = read_file_with_size_limit(Path::new(a), INLINE_TEXT_COMPARE_MAX_BYTES)?;
+        let b_bytes = read_file_with_size_limit(Path::new(b), INLINE_TEXT_COMPARE_MAX_BYTES)?;
+        if !is_probably_text_bytes(&a_bytes) || !is_probably_text_bytes(&b_bytes) {
+            return Err(
+                "One or both versions look binary, so inline text compare is unavailable.".into(),
+            );
+        }
+        let a_text = String::from_utf8(a_bytes)
+            .map_err(|_| "Version A is not valid UTF-8.".to_string())?;
+        let b_text = String::from_utf8(b_bytes)
+            .map_err(|_| "Version B is not valid UTF-8.".to_string())?;
+        Ok((a_text, b_text))
+    })();
+
+    match result {
+        Ok((a_text, b_text)) => VersionComparisonDetails {
+            path,
+            mode: "text".into(),
+            version_a_id,
+            version_b_id,
+            version_a_temp_path: path_a,
+            version_b_temp_path: path_b,
+            version_a_text: Some(a_text),
+            version_b_text: Some(b_text),
+            version_a_image_data_url: None,
+            version_b_image_data_url: None,
+            fallback_reason: None,
+        },
+        Err(reason) => VersionComparisonDetails {
+            path,
+            mode: "external".into(),
+            version_a_id,
+            version_b_id,
+            version_a_temp_path: path_a,
+            version_b_temp_path: path_b,
+            version_a_text: None,
+            version_b_text: None,
+            version_a_image_data_url: None,
+            version_b_image_data_url: None,
+            fallback_reason: Some(reason),
+        },
+    }
+}
+
+#[tauri::command]
+pub async fn prepare_version_comparison(
+    app: AppHandle,
+    location_id: String,
+    path: String,
+    version_id_a: String,
+    version_id_b: String,
+) -> Result<VersionComparisonDetails, String> {
+    let profile = read_profile_from_disk(&app)?;
+    let pair = sync_pair_for_location(&profile, &location_id)?;
+
+    if !pair.object_versioning_enabled {
+        return Err(format!(
+            "Sync location '{}' does not have object versioning enabled.",
+            pair.label
+        ));
+    }
+
+    let credentials = resolve_credentials_for_pair(&app, &pair)?;
+    let client = s3_adapter::build_client(&s3_config_for_pair(&pair, &credentials)).await?;
+    let key = s3_adapter::object_key(&path);
+
+    let temp_path_a = temp_version_compare_file_path(&app, &path, "a")?;
+    let temp_path_b = temp_version_compare_file_path(&app, &path, "b")?;
+
+    s3_adapter::download_file_version(&client, &pair.bucket, &key, &version_id_a, &temp_path_a)
+        .await?;
+    s3_adapter::download_file_version(&client, &pair.bucket, &key, &version_id_b, &temp_path_b)
+        .await?;
+
+    let path_a_str = temp_path_a.to_string_lossy().into_owned();
+    let path_b_str = temp_path_b.to_string_lossy().into_owned();
+
+    Ok(finalize_version_compare_details(
+        path,
+        version_id_a,
+        version_id_b,
+        Some(path_a_str),
+        Some(path_b_str),
+    ))
+}
+
+#[tauri::command]
+pub async fn delete_file_version(
+    app: AppHandle,
+    location_id: String,
+    path: String,
+    version_id: String,
+) -> Result<(), String> {
+    let profile = read_profile_from_disk(&app)?;
+    let pair = sync_pair_for_location(&profile, &location_id)?;
+
+    if !pair.object_versioning_enabled {
+        return Err(format!(
+            "Sync location '{}' does not have object versioning enabled.",
+            pair.label
+        ));
+    }
+
+    let credentials = resolve_credentials_for_pair(&app, &pair)?;
+    let client = s3_adapter::build_client(&s3_config_for_pair(&pair, &credentials)).await?;
+    let key = s3_adapter::object_key(&path);
+
+    s3_adapter::delete_object_version(&client, &pair.bucket, &key, &version_id).await?;
+
+    Ok(())
 }
 
 #[tauri::command]

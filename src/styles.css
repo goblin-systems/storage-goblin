@@ -333,6 +333,18 @@ button svg {
   pointer-events: none;
 }
 
+.btn-spinner {
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 999px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  display: inline-block;
+  flex: 0 0 auto;
+  animation: storage-inline-spinner-spin 0.8s linear infinite;
+  vertical-align: -0.1em;
+}
+
 .storage-conflict-action-content {
   display: inline-flex;
   align-items: center;

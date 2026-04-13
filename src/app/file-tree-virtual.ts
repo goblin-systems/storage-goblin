@@ -60,6 +60,8 @@ interface VirtualTreeState {
   onRestore?: (entry: FileEntry) => void;
   onStorageClass?: (path: string, currentStorageClass: string | null) => void;
   onResolveConflict?: (entry: FileEntry) => void;
+  onViewVersions?: (entry: FileEntry) => void;
+  versionCounts?: Map<string, number>;
   mode: "live" | "bin";
 }
 
@@ -302,7 +304,7 @@ function getCheckedPathsForCallback(state: VirtualTreeState): string[] {
 // Row element creation
 // ---------------------------------------------------------------------------
 
-function createRowElement(row: FlatRow, mode: "live" | "bin"): HTMLElement {
+function createRowElement(row: FlatRow, mode: "live" | "bin", versionCounts?: Map<string, number>): HTMLElement {
   // .vtree-row container
   const vtreeRow = document.createElement("div");
   vtreeRow.className = "vtree-row";
@@ -373,6 +375,17 @@ function createRowElement(row: FlatRow, mode: "live" | "bin"): HTMLElement {
 
   treeRow.appendChild(button);
 
+  // Version count badge (files in live mode with versioning enabled)
+  if (!row.isDirectory && mode === "live" && versionCounts !== undefined) {
+    const versionCount = versionCounts.get(row.node.path) ?? 0;
+    const versionBadge = document.createElement("span");
+    versionBadge.className = "badge default tree-version-badge";
+    const label = versionCount === 1 ? "1 version" : `${versionCount} versions`;
+    versionBadge.textContent = label;
+    versionBadge.title = label;
+    treeRow.appendChild(versionBadge);
+  }
+
   const revealBtn = document.createElement("button");
   revealBtn.className = "icon-btn icon-btn-sm tree-reveal-btn";
   revealBtn.type = "button";
@@ -391,6 +404,19 @@ function createRowElement(row: FlatRow, mode: "live" | "bin"): HTMLElement {
       lifecycle.setAttribute("title", lifecycle.textContent);
       treeRow.appendChild(lifecycle);
     }
+  }
+
+  // Version history button for file rows in live mode with versioning enabled
+  if (!row.isDirectory && mode === "live" && versionCounts !== undefined) {
+    const versionsBtn = document.createElement("button");
+    versionsBtn.className = "icon-btn icon-btn-sm tree-versions-btn";
+    versionsBtn.type = "button";
+    versionsBtn.setAttribute("data-versions-path", row.node.path);
+    versionsBtn.setAttribute("title", "View version history");
+    versionsBtn.setAttribute("aria-label", "View version history");
+    const historyIcon = createIcon("history");
+    if (historyIcon) versionsBtn.appendChild(historyIcon);
+    treeRow.appendChild(versionsBtn);
   }
 
   // Storage class button for file rows only in live mode
@@ -515,6 +541,8 @@ export function renderFileTreeVirtual(
     onRestore,
     onStorageClass,
     onResolveConflict,
+    onViewVersions,
+    versionCounts,
     mode = "live",
   } = options;
 
@@ -563,6 +591,8 @@ export function renderFileTreeVirtual(
     onRestore,
     onStorageClass,
     onResolveConflict,
+    onViewVersions,
+    versionCounts,
     mode,
   };
 
@@ -610,7 +640,7 @@ export function renderFileTreeVirtual(
 
     for (let i = range.start; i < range.end; i++) {
       const row = state.flatRows[i];
-      const el = createRowElement(row, state.mode);
+      const el = createRowElement(row, state.mode, state.versionCounts);
       el.style.position = "absolute";
       el.style.top = `${i * state.rowHeight}px`;
       el.style.left = "0";
@@ -717,6 +747,19 @@ export function renderFileTreeVirtual(
         const node = state.nodesByPath.get(resolvePath);
         if (node?.entry) {
           state.onResolveConflict(node.entry as FileEntry);
+        }
+      }
+      return;
+    }
+
+    const versionsBtn = target.closest(".tree-versions-btn");
+    if (versionsBtn) {
+      e.stopPropagation();
+      const versionsPath = (versionsBtn as HTMLElement).getAttribute("data-versions-path");
+      if (versionsPath && state.onViewVersions) {
+        const node = state.nodesByPath.get(versionsPath);
+        if (node?.entry) {
+          state.onViewVersions(node.entry as FileEntry);
         }
       }
       return;
