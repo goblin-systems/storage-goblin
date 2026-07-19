@@ -355,16 +355,17 @@ fn pair_sync_cycle_issue_details(
     details.join(" ")
 }
 
-async fn run_with_timeout<F, T>(
+async fn run_with_timeout<F, T, E>(
     future: F,
     timeout: Duration,
     operation: impl FnOnce() -> String,
 ) -> Result<T, String>
 where
-    F: Future<Output = Result<T, String>>,
+    F: Future<Output = Result<T, E>>,
+    E: Into<String>,
 {
     match tokio::time::timeout(timeout, future).await {
-        Ok(result) => result,
+        Ok(result) => result.map_err(Into::into),
         Err(_) => Err(operation()),
     }
 }
@@ -823,7 +824,9 @@ async fn perform_planned_download_for_pair(
 ) -> Result<(), String> {
     match executor {
         PairTransferExecutor::Real(client) => {
-            object_store::download_file(client, &pair.bucket, key, local_path).await
+            object_store::download_file(client, &pair.bucket, key, local_path)
+                .await
+                .map_err(String::from)
         }
         #[cfg(test)]
         PairTransferExecutor::Mock => mock_download_file(_path, local_path),
@@ -1283,7 +1286,7 @@ async fn test_credential_against_context<R: Runtime>(
                     summary.buckets,
                 )
             }
-            Err(error) => (false, now_iso(), error, 0, vec![]),
+            Err(error) => (false, now_iso(), String::from(error), 0, vec![]),
         };
 
     // Phase 2: Permission probes (when bucket configured)
@@ -1697,6 +1700,7 @@ async fn reconcile_remote_bin_lifecycle_target<R: Runtime>(
 
     object_store::reconcile_remote_bin_lifecycle(&client, &target.bucket, &target.managed_rules)
         .await
+        .map_err(String::from)
 }
 
 async fn apply_sync_location_versioning<R: Runtime>(
@@ -1709,7 +1713,9 @@ async fn apply_sync_location_versioning<R: Runtime>(
         return Err(sync_location_runtime_object_versioning_message(pair));
     }
     let client = object_store::build_client(&storage_config_for_pair(pair, &credentials)).await?;
-    object_store::set_bucket_versioning(&client, &pair.bucket, enabled).await
+    object_store::set_bucket_versioning(&client, &pair.bucket, enabled)
+        .await
+        .map_err(String::from)
 }
 
 async fn reconcile_pair_object_versioning<R: Runtime>(
@@ -6595,7 +6601,9 @@ async fn download_remote_file_for_pair(
     }
 
     let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
-    object_store::download_file(&client, &pair.bucket, key, destination_path).await
+    object_store::download_file(&client, &pair.bucket, key, destination_path)
+        .await
+        .map_err(String::from)
 }
 
 async fn upload_local_file_for_pair_and_refresh_remote(
@@ -8520,7 +8528,7 @@ pub async fn toggle_local_copy(
             if let Err(e) =
                 object_store::download_file(&client, &pair.bucket, &key, &local_path).await
             {
-                errors.push(e);
+                errors.push(String::from(e));
             }
         }
     } else {

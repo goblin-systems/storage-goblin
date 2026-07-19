@@ -9,6 +9,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use super::error::SyncError;
 use super::remote_bin::{namespace_prefix, ManagedLifecycleRulePlan};
 use super::sanitizer::sanitize_sensitive_text;
 
@@ -265,7 +266,7 @@ fn is_default_token_uri(value: &String) -> bool {
 }
 
 impl GcsServiceAccountCredentials {
-    pub fn from_json(raw: &str) -> Result<Self, String> {
+    pub fn from_json(raw: &str) -> Result<Self, SyncError> {
         let parsed: RawServiceAccountJson = serde_json::from_str(raw)
             .map_err(|error| format!("failed to parse GCS service account JSON: {error}"))?;
 
@@ -291,7 +292,7 @@ impl GcsServiceAccountCredentials {
         })
     }
 
-    pub fn to_canonical_json(&self) -> Result<String, String> {
+    pub fn to_canonical_json(&self) -> Result<String, SyncError> {
         serde_json::to_string(&CanonicalServiceAccountJson {
             account_type: "service_account",
             project_id: self.project_id.clone(),
@@ -303,16 +304,20 @@ impl GcsServiceAccountCredentials {
                 .filter(|value| !value.trim().is_empty()),
             token_uri: self.token_uri.clone(),
         })
-        .map_err(|error| format!("failed to serialize canonical GCS service account JSON: {error}"))
+        .map_err(|error| {
+            SyncError::internal(format!(
+                "failed to serialize canonical GCS service account JSON: {error}"
+            ))
+        })
     }
 }
 
-pub fn compact_service_account_json(raw: &str) -> Result<String, String> {
+pub fn compact_service_account_json(raw: &str) -> Result<String, SyncError> {
     GcsServiceAccountCredentials::from_json(raw)?.to_canonical_json()
 }
 
 impl GcsClient {
-    pub async fn new(credentials: &GcsServiceAccountCredentials) -> Result<Self, String> {
+    pub async fn new(credentials: &GcsServiceAccountCredentials) -> Result<Self, SyncError> {
         let http = reqwest::Client::builder()
             .build()
             .map_err(|error| format!("failed to build GCS HTTP client: {error}"))?;
@@ -341,7 +346,7 @@ impl GcsClient {
         }
     }
 
-    pub async fn list_buckets(&self) -> Result<Vec<String>, String> {
+    pub async fn list_buckets(&self) -> Result<Vec<String>, SyncError> {
         let response = self
             .authorized_get(&format!(
                 "https://storage.googleapis.com/storage/v1/b?project={}",
@@ -353,7 +358,11 @@ impl GcsClient {
     }
 
     #[allow(dead_code)]
-    pub async fn get_object_metadata(&self, bucket: &str, key: &str) -> Result<GcsObject, String> {
+    pub async fn get_object_metadata(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<GcsObject, SyncError> {
         let response = self
             .authorized_get(&format!(
                 "https://storage.googleapis.com/storage/v1/b/{}/o/{}",
@@ -381,7 +390,7 @@ impl GcsClient {
         })
     }
 
-    pub async fn get_bucket(&self, bucket: &str) -> Result<(), String> {
+    pub async fn get_bucket(&self, bucket: &str) -> Result<(), SyncError> {
         let response = self
             .authorized_get(&format!(
                 "https://storage.googleapis.com/storage/v1/b/{}",
@@ -396,7 +405,7 @@ impl GcsClient {
         }
     }
 
-    pub async fn bucket_exists(&self, bucket: &str) -> Result<bool, String> {
+    pub async fn bucket_exists(&self, bucket: &str) -> Result<bool, SyncError> {
         let response = self
             .authorized_get(&format!(
                 "https://storage.googleapis.com/storage/v1/b/{}",
@@ -411,7 +420,7 @@ impl GcsClient {
         }
     }
 
-    pub async fn create_bucket(&self, bucket: &str, region: &str) -> Result<(), String> {
+    pub async fn create_bucket(&self, bucket: &str, region: &str) -> Result<(), SyncError> {
         let request = GcsCreateBucketRequest {
             name: bucket,
             location: normalize_region(region),
@@ -427,7 +436,9 @@ impl GcsClient {
             .json(&request)
             .send()
             .await
-            .map_err(|error| format!("failed to create GCS bucket '{bucket}': {error}"))?;
+            .map_err(|error| {
+                SyncError::transient(format!("failed to create GCS bucket '{bucket}': {error}"))
+            })?;
 
         if response.status().is_success() {
             Ok(())
@@ -441,7 +452,7 @@ impl GcsClient {
         bucket: &str,
         prefix: Option<&str>,
         max_results: Option<u32>,
-    ) -> Result<Vec<GcsObject>, String> {
+    ) -> Result<Vec<GcsObject>, SyncError> {
         let mut page_token: Option<String> = None;
         let mut objects = Vec::new();
 
@@ -500,9 +511,12 @@ impl GcsClient {
         key: &str,
         path: &Path,
         metadata: Option<HashMap<String, String>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), SyncError> {
         let body = std::fs::read(path).map_err(|error| {
-            format!("failed to read upload source '{}': {error}", path.display())
+            SyncError::storage(format!(
+                "failed to read upload source '{}': {error}",
+                path.display()
+            ))
         })?;
         self.upload_object_bytes(bucket, key, body, metadata).await
     }
@@ -513,7 +527,7 @@ impl GcsClient {
         key: &str,
         bytes: Vec<u8>,
         metadata: Option<HashMap<String, String>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), SyncError> {
         let boundary = "storage-goblin-gcs-boundary";
         let object_metadata = serde_json::to_string(&GcsObjectMetadata {
             name: key,
@@ -544,7 +558,9 @@ impl GcsClient {
             .send()
             .await
             .map_err(|error| {
-                format!("failed to upload '{key}' to GCS bucket '{bucket}': {error}")
+                SyncError::transient(format!(
+                    "failed to upload '{key}' to GCS bucket '{bucket}': {error}"
+                ))
             })?;
 
         if response.status().is_success() {
@@ -563,7 +579,7 @@ impl GcsClient {
         bucket: &str,
         key: &str,
         path: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<(), SyncError> {
         let response = self
             .authorized_get(&format!(
                 "https://storage.googleapis.com/storage/v1/b/{}/o/{}?alt=media",
@@ -587,22 +603,22 @@ impl GcsClient {
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
-                format!(
+                SyncError::storage(format!(
                     "failed to create parent directory for '{}': {error}",
                     path.display()
-                )
+                ))
             })?;
         }
 
         std::fs::write(path, &bytes).map_err(|error| {
-            format!(
+            SyncError::storage(format!(
                 "failed to write downloaded file '{}': {error}",
                 path.display()
-            )
+            ))
         })
     }
 
-    pub async fn delete_object(&self, bucket: &str, key: &str) -> Result<(), String> {
+    pub async fn delete_object(&self, bucket: &str, key: &str) -> Result<(), SyncError> {
         let response = self
             .http
             .delete(self.storage_api_url(&format!(
@@ -614,7 +630,9 @@ impl GcsClient {
             .send()
             .await
             .map_err(|error| {
-                format!("failed to delete '{key}' from GCS bucket '{bucket}': {error}")
+                SyncError::transient(format!(
+                    "failed to delete '{key}' from GCS bucket '{bucket}': {error}"
+                ))
             })?;
 
         if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
@@ -628,7 +646,7 @@ impl GcsClient {
         }
     }
 
-    pub async fn object_exists(&self, bucket: &str, key: &str) -> Result<bool, String> {
+    pub async fn object_exists(&self, bucket: &str, key: &str) -> Result<bool, SyncError> {
         let response = self
             .authorized_get(&format!(
                 "https://storage.googleapis.com/storage/v1/b/{}/o/{}",
@@ -653,7 +671,7 @@ impl GcsClient {
         bucket: &str,
         from_key: &str,
         to_key: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), SyncError> {
         let base_url = self.storage_api_url(&format!(
             "/storage/v1/b/{}/o/{}/rewriteTo/b/{}/o/{}",
             encode_component(bucket),
@@ -672,7 +690,9 @@ impl GcsClient {
                     .bearer_auth(&self.token)
                     .send()
                     .await
-                    .map_err(|error| format!("failed to {action}: {error}"))?;
+                    .map_err(|error| {
+                        SyncError::transient(format!("failed to {action}: {error}"))
+                    })?;
 
                 parse_json_response(response, &action).await
             }
@@ -682,16 +702,16 @@ impl GcsClient {
         self.delete_object(bucket, from_key).await
     }
 
-    async fn authorized_get(&self, url: &str) -> Result<reqwest::Response, String> {
+    async fn authorized_get(&self, url: &str) -> Result<reqwest::Response, SyncError> {
         self.http
             .get(url)
             .bearer_auth(&self.token)
             .send()
             .await
-            .map_err(|error| format!("failed GCS request '{url}': {error}"))
+            .map_err(|error| SyncError::transient(format!("failed GCS request '{url}': {error}")))
     }
 
-    pub async fn bucket_versioning_enabled(&self, bucket: &str) -> Result<bool, String> {
+    pub async fn bucket_versioning_enabled(&self, bucket: &str) -> Result<bool, SyncError> {
         let response = self
             .authorized_get(&format!(
                 "https://storage.googleapis.com/storage/v1/b/{}",
@@ -703,7 +723,11 @@ impl GcsClient {
         Ok(body.versioning.and_then(|v| v.enabled).unwrap_or(false))
     }
 
-    pub async fn set_bucket_versioning(&self, bucket: &str, enabled: bool) -> Result<(), String> {
+    pub async fn set_bucket_versioning(
+        &self,
+        bucket: &str,
+        enabled: bool,
+    ) -> Result<(), SyncError> {
         let response = self
             .http
             .patch(format!(
@@ -715,7 +739,9 @@ impl GcsClient {
             .send()
             .await
             .map_err(|error| {
-                format!("failed to set versioning on GCS bucket '{bucket}': {error}")
+                SyncError::transient(format!(
+                    "failed to set versioning on GCS bucket '{bucket}': {error}"
+                ))
             })?;
 
         if response.status().is_success() {
@@ -732,7 +758,7 @@ impl GcsClient {
     pub async fn get_bucket_lifecycle_configuration(
         &self,
         bucket: &str,
-    ) -> Result<GcsBucketLifecycleState, String> {
+    ) -> Result<GcsBucketLifecycleState, SyncError> {
         let response = self
             .authorized_get(&self.storage_api_url(&format!(
                 "/storage/v1/b/{}?fields=lifecycle,metageneration",
@@ -758,7 +784,7 @@ impl GcsClient {
         bucket: &str,
         configuration: Option<&GcsBucketLifecycleConfiguration>,
         if_metageneration_match: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), SyncError> {
         let mut url = self.storage_api_url(&format!(
             "/storage/v1/b/{}?fields=lifecycle,metageneration",
             encode_component(bucket)
@@ -782,9 +808,9 @@ impl GcsClient {
             .send()
             .await
             .map_err(|error| {
-                format!(
+                SyncError::transient(format!(
                     "failed to update lifecycle configuration for GCS bucket '{bucket}': {error}"
-                )
+                ))
             })?;
 
         if response.status().is_success() {
@@ -803,7 +829,7 @@ impl GcsClient {
         bucket: &str,
         prefix: Option<&str>,
         page_token: Option<&str>,
-    ) -> Result<GcsObjectVersionPage, String> {
+    ) -> Result<GcsObjectVersionPage, SyncError> {
         let mut url = format!(
             "https://storage.googleapis.com/storage/v1/b/{}/o?versions=true",
             encode_component(bucket)
@@ -850,7 +876,7 @@ impl GcsClient {
         key: &str,
         generation: &str,
         path: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<(), SyncError> {
         let response = self
             .authorized_get(&format!(
                 "https://storage.googleapis.com/storage/v1/b/{}/o/{}?alt=media&generation={}",
@@ -875,18 +901,18 @@ impl GcsClient {
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
-                format!(
+                SyncError::storage(format!(
                     "failed to create parent directory for '{}': {error}",
                     path.display()
-                )
+                ))
             })?;
         }
 
         std::fs::write(path, &bytes).map_err(|error| {
-            format!(
+            SyncError::storage(format!(
                 "failed to write downloaded file '{}': {error}",
                 path.display()
-            )
+            ))
         })
     }
 
@@ -895,7 +921,7 @@ impl GcsClient {
         bucket: &str,
         key: &str,
         generation: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), SyncError> {
         let encoded_bucket = encode_component(bucket);
         let encoded_key = encode_component(key);
         let response = self
@@ -908,7 +934,7 @@ impl GcsClient {
             .send()
             .await
             .map_err(|error| {
-                format!("failed to restore '{key}' generation {generation} in GCS bucket '{bucket}': {error}")
+                SyncError::transient(format!("failed to restore '{key}' generation {generation} in GCS bucket '{bucket}': {error}"))
             })?;
 
         if response.status().is_success() {
@@ -927,7 +953,7 @@ impl GcsClient {
         bucket: &str,
         key: &str,
         storage_class: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), SyncError> {
         let base_url = self.storage_api_url(&format!(
             "/storage/v1/b/{}/o/{}/rewriteTo/b/{}/o/{}",
             encode_component(bucket),
@@ -949,7 +975,9 @@ impl GcsClient {
                     .json(&body)
                     .send()
                     .await
-                    .map_err(|error| format!("failed to {action}: {error}"))?;
+                    .map_err(|error| {
+                        SyncError::transient(format!("failed to {action}: {error}"))
+                    })?;
 
                 parse_json_response(response, &action).await
             }
@@ -962,7 +990,7 @@ impl GcsClient {
         bucket: &str,
         key: &str,
         generation: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), SyncError> {
         let response = self
             .http
             .delete(format!(
@@ -975,7 +1003,7 @@ impl GcsClient {
             .send()
             .await
             .map_err(|error| {
-                format!("failed to delete '{key}' generation {generation} from GCS bucket '{bucket}': {error}")
+                SyncError::transient(format!("failed to delete '{key}' generation {generation} from GCS bucket '{bucket}': {error}"))
             })?;
 
         if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
@@ -1000,10 +1028,10 @@ impl GcsClient {
         base_url: &str,
         action: &str,
         mut send_request: F,
-    ) -> Result<(), String>
+    ) -> Result<(), SyncError>
     where
         F: FnMut(String) -> Fut,
-        Fut: Future<Output = Result<GcsRewriteResponse, String>>,
+        Fut: Future<Output = Result<GcsRewriteResponse, SyncError>>,
     {
         let mut rewrite_token: Option<String> = None;
 
@@ -1017,9 +1045,9 @@ impl GcsClient {
 
             rewrite_token = parsed.rewrite_token;
             if rewrite_token.is_none() {
-                return Err(format!(
+                return Err(SyncError::internal(format!(
                     "failed to {action}: rewrite did not complete and no rewrite token was returned"
-                ));
+                )));
             }
         }
     }
@@ -1125,7 +1153,7 @@ fn pair_id_from_managed_prefix(prefix: &str) -> Option<&str> {
 async fn fetch_access_token(
     http: &reqwest::Client,
     credentials: &GcsServiceAccountCredentials,
-) -> Result<String, String> {
+) -> Result<String, SyncError> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("failed to resolve current time for GCS auth: {error}"))?
@@ -1156,7 +1184,9 @@ async fn fetch_access_token(
         ])
         .send()
         .await
-        .map_err(|error| format!("failed to request GCS access token: {error}"))?;
+        .map_err(|error| {
+            SyncError::transient(format!("failed to request GCS access token: {error}"))
+        })?;
 
     let token: GcsTokenResponse = parse_json_response(response, "request GCS access token").await?;
     Ok(token.access_token)
@@ -1165,25 +1195,30 @@ async fn fetch_access_token(
 async fn parse_json_response<T: for<'de> Deserialize<'de>>(
     response: reqwest::Response,
     action: &str,
-) -> Result<T, String> {
+) -> Result<T, SyncError> {
     if !response.status().is_success() {
         return Err(render_http_error(response, action).await);
     }
 
-    response
-        .json::<T>()
-        .await
-        .map_err(|error| format!("failed to parse response for {action}: {error}"))
+    response.json::<T>().await.map_err(|error| {
+        SyncError::internal(format!("failed to parse response for {action}: {error}"))
+    })
 }
 
-async fn render_http_error(response: reqwest::Response, action: &str) -> String {
+async fn render_http_error(response: reqwest::Response, action: &str) -> SyncError {
     let status = response.status();
+    let retry_after_seconds = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok());
     let body = sanitize_sensitive_text(response.text().await.unwrap_or_default());
-    if body.trim().is_empty() {
+    let message = if body.trim().is_empty() {
         format!("failed to {action}: HTTP {status}")
     } else {
         format!("failed to {action}: HTTP {status} {body}")
-    }
+    };
+    SyncError::from_http_status(status.as_u16(), message).with_retry_after(retry_after_seconds)
 }
 
 fn normalize_region(region: &str) -> Option<String> {
@@ -1415,7 +1450,7 @@ mod tests {
         let error = GcsServiceAccountCredentials::from_json("{}")
             .expect_err("missing required service account fields should fail");
 
-        assert!(error.contains("project_id") || error.contains("client_email"));
+        assert!(error.message.contains("project_id") || error.message.contains("client_email"));
     }
 
     #[test]
@@ -1594,7 +1629,9 @@ mod tests {
                 .await
                 .expect_err("missing rewrite token should fail");
 
-            assert!(error.contains("rewrite did not complete and no rewrite token was returned"));
+            assert!(error
+                .message
+                .contains("rewrite did not complete and no rewrite token was returned"));
         });
     }
 

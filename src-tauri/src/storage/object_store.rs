@@ -5,6 +5,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use super::error::SyncError;
 use super::{
     credentials_store::StoredCredentials,
     gcs_adapter::{
@@ -50,9 +51,9 @@ pub struct CredentialTestSummary {
 
 fn summarize_gcs_credential_validation(
     configured_bucket: Option<&str>,
-    listed_buckets: Result<Vec<String>, String>,
-    bucket_probe: Option<Result<(), String>>,
-) -> Result<CredentialTestSummary, String> {
+    listed_buckets: Result<Vec<String>, SyncError>,
+    bucket_probe: Option<Result<(), SyncError>>,
+) -> Result<CredentialTestSummary, SyncError> {
     match listed_buckets {
         Ok(buckets) => Ok(CredentialTestSummary {
             checked_at: now_iso(),
@@ -76,9 +77,12 @@ fn summarize_gcs_credential_validation(
                     buckets: vec![bucket.to_string()],
                     bucket_scoped: true,
                 }),
-                Err(bucket_error) => Err(sanitize_sensitive_text(format!(
-                    "Failed to validate access to configured bucket '{bucket}': {bucket_error}"
-                ))),
+                Err(bucket_error) => Err(SyncError::new(
+                    bucket_error.kind,
+                    sanitize_sensitive_text(format!(
+                        "Failed to validate access to configured bucket '{bucket}': {bucket_error}"
+                    )),
+                )),
             }
         }
     }
@@ -259,7 +263,9 @@ fn map_gcs_object_version_page(page: GcsObjectVersionPage) -> ObjectVersionPage 
     }
 }
 
-pub async fn build_client(config: &StorageConnectionConfig) -> Result<ObjectStoreClient, String> {
+pub async fn build_client(
+    config: &StorageConnectionConfig,
+) -> Result<ObjectStoreClient, SyncError> {
     match normalize_provider(&config.provider).as_str() {
         GCS_PROVIDER => {
             let raw = config
@@ -286,7 +292,7 @@ pub async fn build_client(config: &StorageConnectionConfig) -> Result<ObjectStor
 
 pub async fn validate_credentials(
     config: &StorageCredentialTestConfig,
-) -> Result<CredentialTestSummary, String> {
+) -> Result<CredentialTestSummary, SyncError> {
     match normalize_provider(&config.provider).as_str() {
         GCS_PROVIDER => {
             let client = build_client(&StorageConnectionConfig {
@@ -372,7 +378,7 @@ pub async fn probe_bucket_permissions(
 
 pub async fn validate_connection(
     config: &StorageConnectionConfig,
-) -> Result<ValidationSummary, String> {
+) -> Result<ValidationSummary, SyncError> {
     match normalize_provider(&config.provider).as_str() {
         GCS_PROVIDER => {
             let client = build_client(config).await?;
@@ -408,7 +414,7 @@ pub async fn validate_connection(
 
 pub async fn ensure_bucket_exists(
     config: &StorageConnectionConfig,
-) -> Result<BucketEnsureSummary, String> {
+) -> Result<BucketEnsureSummary, SyncError> {
     match normalize_provider(&config.provider).as_str() {
         GCS_PROVIDER => {
             let client = build_client(config).await?;
@@ -449,7 +455,7 @@ pub async fn list_objects(
     client: &ObjectStoreClient,
     bucket: &str,
     prefix: Option<&str>,
-) -> Result<Vec<ObjectEntry>, String> {
+) -> Result<Vec<ObjectEntry>, SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => {
             let mut continuation_token: Option<String> = None;
@@ -516,7 +522,7 @@ pub async fn upload_file(
     key: &str,
     path: &Path,
     metadata: Option<HashMap<String, String>>,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => {
             s3_adapter::upload_file(client, bucket, key, path, metadata).await
@@ -529,7 +535,7 @@ pub async fn create_directory_placeholder(
     client: &ObjectStoreClient,
     bucket: &str,
     key: &str,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => {
             s3_adapter::create_directory_placeholder(client, bucket, key).await
@@ -547,7 +553,7 @@ pub async fn download_file(
     bucket: &str,
     key: &str,
     path: &Path,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => {
             s3_adapter::download_file(client, bucket, key, path).await
@@ -560,7 +566,7 @@ pub async fn delete_object(
     client: &ObjectStoreClient,
     bucket: &str,
     key: &str,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => s3_adapter::delete_object(client, bucket, key).await,
         ObjectStoreClient::Gcs(client) => client.delete_object(bucket, key).await,
@@ -573,7 +579,7 @@ pub async fn move_object(
     from_key: &str,
     to_key: &str,
     metadata: Option<HashMap<String, String>>,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => {
             s3_adapter::move_object(client, bucket, from_key, to_key, metadata).await
@@ -589,7 +595,7 @@ pub async fn list_object_keys_with_prefix(
     client: &ObjectStoreClient,
     bucket: &str,
     prefix: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => {
             s3_adapter::list_object_keys_with_prefix(client, bucket, prefix).await
@@ -605,7 +611,7 @@ pub async fn object_exists(
     client: &ObjectStoreClient,
     bucket: &str,
     key: &str,
-) -> Result<bool, String> {
+) -> Result<bool, SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => s3_adapter::object_exists(client, bucket, key).await,
         ObjectStoreClient::Gcs(client) => client.object_exists(bucket, key).await,
@@ -617,7 +623,7 @@ pub async fn get_object_metadata(
     client: &ObjectStoreClient,
     bucket: &str,
     key: &str,
-) -> Result<ObjectMetadata, String> {
+) -> Result<ObjectMetadata, SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => {
             let response = client
@@ -660,7 +666,7 @@ pub async fn get_object_metadata(
 pub async fn bucket_versioning_enabled(
     client: &ObjectStoreClient,
     bucket: &str,
-) -> Result<bool, String> {
+) -> Result<bool, SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => {
             s3_adapter::bucket_versioning_enabled(client, bucket).await
@@ -673,7 +679,7 @@ pub async fn set_bucket_versioning(
     client: &ObjectStoreClient,
     bucket: &str,
     enabled: bool,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => {
             s3_adapter::set_bucket_versioning(client, bucket, enabled).await
@@ -692,7 +698,7 @@ pub fn supports_remote_bin_lifecycle_reconciliation(provider: &str) -> bool {
 pub async fn get_bucket_lifecycle_configuration_state(
     client: &ObjectStoreClient,
     bucket: &str,
-) -> Result<BucketLifecycleConfigurationState, String> {
+) -> Result<BucketLifecycleConfigurationState, SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => {
             let state = s3_adapter::get_bucket_lifecycle_configuration(client, bucket).await?;
@@ -717,7 +723,7 @@ pub async fn put_bucket_lifecycle_configuration_state(
     bucket: &str,
     configuration: BucketLifecycleConfiguration,
     state: &BucketLifecycleConfigurationState,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     match (client, state) {
         (
             ObjectStoreClient::Aws(client),
@@ -756,7 +762,7 @@ pub async fn put_bucket_lifecycle_configuration_state(
 pub async fn delete_bucket_lifecycle_configuration(
     client: &ObjectStoreClient,
     bucket: &str,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => s3_adapter::delete_bucket_lifecycle(client, bucket).await,
         ObjectStoreClient::Gcs(client) => {
@@ -771,12 +777,12 @@ pub async fn reconcile_remote_bin_lifecycle(
     client: &ObjectStoreClient,
     bucket: &str,
     managed_rules: &[ManagedLifecycleRulePlan],
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     if !managed_rules.is_empty() && bucket_versioning_enabled(client, bucket).await? {
-        return Err(format!(
+        return Err(SyncError::config(format!(
             "Remote bin requires bucket versioning to be disabled for bucket '{}'.",
             bucket
-        ));
+        )));
     }
 
     let lifecycle_state = get_bucket_lifecycle_configuration_state(client, bucket).await?;
@@ -888,7 +894,7 @@ pub async fn list_object_versions_page(
     bucket: &str,
     key_marker: Option<&str>,
     version_id_marker: Option<&str>,
-) -> Result<ObjectVersionPage, String> {
+) -> Result<ObjectVersionPage, SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => {
             s3_adapter::list_object_versions_page(client, bucket, key_marker, version_id_marker)
@@ -908,7 +914,7 @@ pub async fn list_object_versions_page_with_prefix(
     prefix: Option<&str>,
     key_marker: Option<&str>,
     version_id_marker: Option<&str>,
-) -> Result<ObjectVersionPage, String> {
+) -> Result<ObjectVersionPage, SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => s3_adapter::list_object_versions_page_with_prefix(
             client,
@@ -931,7 +937,7 @@ pub async fn copy_object_version(
     bucket: &str,
     key: &str,
     version_id: &str,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => {
             s3_adapter::copy_object_version(client, bucket, key, version_id).await
@@ -945,7 +951,7 @@ pub async fn delete_object_version(
     bucket: &str,
     key: &str,
     version_id: &str,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => {
             s3_adapter::delete_object_version(client, bucket, key, version_id).await
@@ -962,7 +968,7 @@ pub async fn download_file_version(
     key: &str,
     version_id: &str,
     path: &Path,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => {
             s3_adapter::download_file_version(client, bucket, key, version_id, path).await
@@ -980,7 +986,7 @@ pub async fn copy_object_with_storage_class(
     bucket: &str,
     key: &str,
     storage_class: &str,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => {
             s3_adapter::copy_object_with_storage_class(client, bucket, key, storage_class).await
@@ -1086,7 +1092,7 @@ async fn probe_gcs_bucket_permissions(
             Err(error) => PermissionProbeResult {
                 name: "get_bucket_versioning".into(),
                 allowed: false,
-                message: sanitize_sensitive_text(error),
+                message: sanitize_sensitive_text(String::from(error)),
             },
         });
     }
@@ -1123,7 +1129,7 @@ mod tests {
         let error = summarize_gcs_credential_validation(None, Err("list denied".into()), None)
             .expect_err("listing failure without bucket should fail");
 
-        assert_eq!(error, "list denied");
+        assert_eq!(error.message, "list denied");
     }
 
     #[test]
@@ -1136,7 +1142,7 @@ mod tests {
         .expect_err("failed bucket probe should fail validation");
 
         assert_eq!(
-            error,
+            error.message,
             "Failed to validate access to configured bucket 'least-privilege-bucket': 403 forbidden"
         );
     }

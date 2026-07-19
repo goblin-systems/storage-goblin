@@ -13,9 +13,53 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
+use super::error::{SyncError, SyncErrorKind};
 use super::now_iso;
 
 pub const LOCAL_FINGERPRINT_METADATA_KEY: &str = "storage-goblin-local-fingerprint";
+
+/// Classify an AWS SDK error into the sync error taxonomy while keeping the
+/// human-readable message unchanged.
+fn classify_sdk_error<E, R>(error: &aws_sdk_s3::error::SdkError<E, R>, message: String) -> SyncError
+where
+    E: ProvideErrorMetadata,
+{
+    use aws_sdk_s3::error::SdkError;
+
+    match error {
+        SdkError::TimeoutError(_) | SdkError::DispatchFailure(_) | SdkError::ResponseError(_) => {
+            return SyncError::transient(message);
+        }
+        _ => {}
+    }
+
+    let kind = match error.code() {
+        Some(
+            "AccessDenied"
+            | "InvalidAccessKeyId"
+            | "SignatureDoesNotMatch"
+            | "ExpiredToken"
+            | "TokenRefreshRequired"
+            | "AccountProblem"
+            | "AuthorizationHeaderMalformed",
+        ) => SyncErrorKind::Auth,
+        Some("NoSuchKey" | "NoSuchBucket" | "NotFound" | "NoSuchUpload" | "NoSuchVersion") => {
+            SyncErrorKind::NotFound
+        }
+        Some("PreconditionFailed" | "ConditionalRequestConflict") => SyncErrorKind::Precondition,
+        Some(
+            "SlowDown"
+            | "RequestTimeout"
+            | "InternalError"
+            | "ServiceUnavailable"
+            | "ThrottlingException"
+            | "RequestLimitExceeded"
+            | "OperationAborted",
+        ) => SyncErrorKind::Transient,
+        _ => SyncErrorKind::Internal,
+    };
+    SyncError::new(kind, message)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,7 +159,7 @@ pub struct ObjectVersionPage {
 
 pub async fn validate_connection(
     config: &S3ConnectionConfig,
-) -> Result<S3ValidationSummary, String> {
+) -> Result<S3ValidationSummary, SyncError> {
     validate_required_fields(config)?;
 
     let client = build_client(config).await?;
@@ -125,7 +169,9 @@ pub async fn validate_connection(
         .max_keys(1)
         .send()
         .await
-        .map_err(|error| format!("failed to validate S3 connection: {error}"))?;
+        .map_err(|error| {
+            classify_sdk_error(&error, format!("failed to validate S3 connection: {error}"))
+        })?;
 
     Ok(S3ValidationSummary {
         checked_at: now_iso(),
@@ -133,7 +179,7 @@ pub async fn validate_connection(
         object_count_sampled: response.key_count().unwrap_or(0) as usize,
     })
 }
-pub async fn build_client(config: &S3ConnectionConfig) -> Result<Client, String> {
+pub async fn build_client(config: &S3ConnectionConfig) -> Result<Client, SyncError> {
     validate_required_fields(config)?;
 
     let credentials = Credentials::new(
@@ -158,7 +204,7 @@ pub async fn build_client(config: &S3ConnectionConfig) -> Result<Client, String>
 
 pub async fn build_credential_test_client(
     config: &S3CredentialTestConfig,
-) -> Result<Client, String> {
+) -> Result<Client, SyncError> {
     let access_key_id = config.access_key_id.trim();
     let secret_access_key = config.secret_access_key.trim();
 
@@ -191,14 +237,13 @@ pub async fn build_credential_test_client(
 
 pub async fn validate_credentials(
     config: &S3CredentialTestConfig,
-) -> Result<CredentialTestSummary, String> {
+) -> Result<CredentialTestSummary, SyncError> {
     let client = build_credential_test_client(config).await?;
 
-    let response = client
-        .list_buckets()
-        .send()
-        .await
-        .map_err(|error| format!("Credential test failed: {error}"))?;
+    let response =
+        client.list_buckets().send().await.map_err(|error| {
+            classify_sdk_error(&error, format!("Credential test failed: {error}"))
+        })?;
 
     let buckets: Vec<String> = response
         .buckets()
@@ -215,7 +260,7 @@ pub async fn validate_credentials(
 
 pub async fn ensure_bucket_exists(
     config: &S3ConnectionConfig,
-) -> Result<BucketEnsureSummary, String> {
+) -> Result<BucketEnsureSummary, SyncError> {
     validate_required_fields(config)?;
 
     let client = build_client(config).await?;
@@ -230,7 +275,10 @@ pub async fn ensure_bucket_exists(
             });
         }
         Err(error) if !is_missing_bucket_error(&error) => {
-            return Err(format!("failed to verify bucket '{bucket}': {error}"));
+            return Err(classify_sdk_error(
+                &error,
+                format!("failed to verify bucket '{bucket}': {error}"),
+            ));
         }
         Err(_) => {}
     }
@@ -252,7 +300,10 @@ pub async fn ensure_bucket_exists(
             bucket,
             created: false,
         }),
-        Err(error) => Err(format!("failed to create bucket '{bucket}': {error}")),
+        Err(error) => Err(classify_sdk_error(
+            &error,
+            format!("failed to create bucket '{bucket}': {error}"),
+        )),
     }
 }
 
@@ -262,10 +313,13 @@ pub async fn upload_file(
     key: &str,
     path: &Path,
     metadata: Option<HashMap<String, String>>,
-) -> Result<(), String> {
-    let body = ByteStream::from_path(path)
-        .await
-        .map_err(|error| format!("failed to read upload source '{}': {error}", path.display()))?;
+) -> Result<(), SyncError> {
+    let body = ByteStream::from_path(path).await.map_err(|error| {
+        SyncError::storage(format!(
+            "failed to read upload source '{}': {error}",
+            path.display()
+        ))
+    })?;
 
     let mut request = client.put_object().bucket(bucket).key(key).body(body);
 
@@ -273,10 +327,12 @@ pub async fn upload_file(
         request = request.set_metadata(Some(metadata));
     }
 
-    request
-        .send()
-        .await
-        .map_err(|error| format!("failed to upload '{key}' to bucket '{bucket}': {error}"))?;
+    request.send().await.map_err(|error| {
+        classify_sdk_error(
+            &error,
+            format!("failed to upload '{key}' to bucket '{bucket}': {error}"),
+        )
+    })?;
 
     Ok(())
 }
@@ -285,7 +341,7 @@ pub async fn create_directory_placeholder(
     client: &Client,
     bucket: &str,
     key: &str,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     client
         .put_object()
         .bucket(bucket)
@@ -294,7 +350,12 @@ pub async fn create_directory_placeholder(
         .send()
         .await
         .map_err(|error| {
-            format!("failed to create directory placeholder '{key}' in bucket '{bucket}': {error}")
+            classify_sdk_error(
+                &error,
+                format!(
+                    "failed to create directory placeholder '{key}' in bucket '{bucket}': {error}"
+                ),
+            )
         })?;
 
     Ok(())
@@ -305,14 +366,19 @@ pub async fn download_file(
     bucket: &str,
     key: &str,
     path: &Path,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     let response = client
         .get_object()
         .bucket(bucket)
         .key(key)
         .send()
         .await
-        .map_err(|error| format!("failed to download '{key}' from bucket '{bucket}': {error}"))?;
+        .map_err(|error| {
+            classify_sdk_error(
+                &error,
+                format!("failed to download '{key}' from bucket '{bucket}': {error}"),
+            )
+        })?;
 
     let bytes = response
         .body
@@ -340,14 +406,19 @@ pub async fn download_file(
     Ok(())
 }
 
-pub async fn delete_object(client: &Client, bucket: &str, key: &str) -> Result<(), String> {
+pub async fn delete_object(client: &Client, bucket: &str, key: &str) -> Result<(), SyncError> {
     client
         .delete_object()
         .bucket(bucket)
         .key(key)
         .send()
         .await
-        .map_err(|error| format!("failed to delete '{key}' from bucket '{bucket}': {error}"))?;
+        .map_err(|error| {
+            classify_sdk_error(
+                &error,
+                format!("failed to delete '{key}' from bucket '{bucket}': {error}"),
+            )
+        })?;
 
     Ok(())
 }
@@ -357,7 +428,7 @@ pub async fn delete_object_version(
     bucket: &str,
     key: &str,
     version_id: &str,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     client
         .delete_object()
         .bucket(bucket)
@@ -365,11 +436,9 @@ pub async fn delete_object_version(
         .version_id(version_id)
         .send()
         .await
-        .map_err(|error| {
-            format!(
+        .map_err(|error| classify_sdk_error(&error, format!(
                 "failed to delete version '{version_id}' for '{key}' from bucket '{bucket}': {error}"
-            )
-        })?;
+            )))?;
 
     Ok(())
 }
@@ -380,7 +449,7 @@ pub async fn move_object(
     from_key: &str,
     to_key: &str,
     metadata: Option<HashMap<String, String>>,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     let copy_source = copy_source(bucket, from_key);
     let mut request = client
         .copy_object()
@@ -394,7 +463,10 @@ pub async fn move_object(
     }
 
     request.send().await.map_err(|error| {
-        format!("failed to move '{from_key}' to '{to_key}' in bucket '{bucket}': {error}")
+        classify_sdk_error(
+            &error,
+            format!("failed to move '{from_key}' to '{to_key}' in bucket '{bucket}': {error}"),
+        )
     })?;
 
     delete_object(client, bucket, from_key).await
@@ -404,7 +476,7 @@ pub async fn list_object_keys_with_prefix(
     client: &Client,
     bucket: &str,
     prefix: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, SyncError> {
     let mut continuation_token: Option<String> = None;
     let mut keys = Vec::new();
 
@@ -416,7 +488,12 @@ pub async fn list_object_keys_with_prefix(
         }
 
         let response = request.send().await.map_err(|error| {
-            format!("failed to list objects with prefix '{prefix}' in bucket '{bucket}': {error}")
+            classify_sdk_error(
+                &error,
+                format!(
+                    "failed to list objects with prefix '{prefix}' in bucket '{bucket}': {error}"
+                ),
+            )
         })?;
 
         for object in response.contents() {
@@ -443,12 +520,13 @@ fn move_object_metadata_directive(metadata: Option<&HashMap<String, String>>) ->
     }
 }
 
-pub async fn object_exists(client: &Client, bucket: &str, key: &str) -> Result<bool, String> {
+pub async fn object_exists(client: &Client, bucket: &str, key: &str) -> Result<bool, SyncError> {
     match client.head_object().bucket(bucket).key(key).send().await {
         Ok(_) => Ok(true),
         Err(error) if is_missing_object_error(&error) => Ok(false),
-        Err(error) => Err(format!(
-            "failed to check whether '{key}' exists in bucket '{bucket}': {error}"
+        Err(error) => Err(classify_sdk_error(
+            &error,
+            format!("failed to check whether '{key}' exists in bucket '{bucket}': {error}"),
         )),
     }
 }
@@ -456,7 +534,7 @@ pub async fn object_exists(client: &Client, bucket: &str, key: &str) -> Result<b
 pub async fn get_bucket_lifecycle_configuration(
     client: &Client,
     bucket: &str,
-) -> Result<BucketLifecycleState, String> {
+) -> Result<BucketLifecycleState, SyncError> {
     match client
         .get_bucket_lifecycle_configuration()
         .bucket(bucket)
@@ -489,8 +567,9 @@ pub async fn get_bucket_lifecycle_configuration(
                 transition_default_minimum_object_size: None,
             })
         }
-        Err(error) => Err(format!(
-            "failed to get lifecycle configuration for bucket '{bucket}': {error}"
+        Err(error) => Err(classify_sdk_error(
+            &error,
+            format!("failed to get lifecycle configuration for bucket '{bucket}': {error}"),
         )),
     }
 }
@@ -500,7 +579,7 @@ pub async fn put_bucket_lifecycle_configuration(
     bucket: &str,
     configuration: BucketLifecycleConfiguration,
     transition_default_minimum_object_size: Option<TransitionDefaultMinimumObjectSize>,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     let mut request = client
         .put_bucket_lifecycle_configuration()
         .bucket(bucket)
@@ -512,33 +591,42 @@ pub async fn put_bucket_lifecycle_configuration(
     }
 
     request.send().await.map_err(|error| {
-        format!("failed to update lifecycle configuration for bucket '{bucket}': {error}")
+        classify_sdk_error(
+            &error,
+            format!("failed to update lifecycle configuration for bucket '{bucket}': {error}"),
+        )
     })?;
 
     Ok(())
 }
 
-pub async fn delete_bucket_lifecycle(client: &Client, bucket: &str) -> Result<(), String> {
+pub async fn delete_bucket_lifecycle(client: &Client, bucket: &str) -> Result<(), SyncError> {
     client
         .delete_bucket_lifecycle()
         .bucket(bucket)
         .send()
         .await
         .map_err(|error| {
-            format!("failed to delete lifecycle configuration for bucket '{bucket}': {error}")
+            classify_sdk_error(
+                &error,
+                format!("failed to delete lifecycle configuration for bucket '{bucket}': {error}"),
+            )
         })?;
 
     Ok(())
 }
 
-pub async fn bucket_versioning_enabled(client: &Client, bucket: &str) -> Result<bool, String> {
+pub async fn bucket_versioning_enabled(client: &Client, bucket: &str) -> Result<bool, SyncError> {
     let response = client
         .get_bucket_versioning()
         .bucket(bucket)
         .send()
         .await
         .map_err(|error| {
-            format!("failed to get versioning status for bucket '{bucket}': {error}")
+            classify_sdk_error(
+                &error,
+                format!("failed to get versioning status for bucket '{bucket}': {error}"),
+            )
         })?;
 
     Ok(matches!(
@@ -551,7 +639,7 @@ pub async fn set_bucket_versioning(
     client: &Client,
     bucket: &str,
     enabled: bool,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     let status = if enabled {
         BucketVersioningStatus::Enabled
     } else {
@@ -564,7 +652,12 @@ pub async fn set_bucket_versioning(
         .versioning_configuration(config)
         .send()
         .await
-        .map_err(|error| format!("failed to set versioning for bucket '{bucket}': {error}"))?;
+        .map_err(|error| {
+            classify_sdk_error(
+                &error,
+                format!("failed to set versioning for bucket '{bucket}': {error}"),
+            )
+        })?;
     Ok(())
 }
 
@@ -573,7 +666,7 @@ pub async fn list_object_versions_page(
     bucket: &str,
     key_marker: Option<&str>,
     version_id_marker: Option<&str>,
-) -> Result<ObjectVersionPage, String> {
+) -> Result<ObjectVersionPage, SyncError> {
     list_object_versions_page_with_prefix(client, bucket, None, key_marker, version_id_marker).await
 }
 
@@ -583,7 +676,7 @@ pub async fn list_object_versions_page_with_prefix(
     prefix: Option<&str>,
     key_marker: Option<&str>,
     version_id_marker: Option<&str>,
-) -> Result<ObjectVersionPage, String> {
+) -> Result<ObjectVersionPage, SyncError> {
     let mut request = client.list_object_versions().bucket(bucket);
 
     if let Some(prefix) = prefix {
@@ -599,7 +692,10 @@ pub async fn list_object_versions_page_with_prefix(
     }
 
     let response = request.send().await.map_err(|error| {
-        format!("failed to list object versions for bucket '{bucket}': {error}")
+        classify_sdk_error(
+            &error,
+            format!("failed to list object versions for bucket '{bucket}': {error}"),
+        )
     })?;
 
     let versions = response
@@ -677,7 +773,7 @@ pub fn region_or_default(region: &str) -> String {
     }
 }
 
-fn validate_required_fields(config: &S3ConnectionConfig) -> Result<(), String> {
+fn validate_required_fields(config: &S3ConnectionConfig) -> Result<(), SyncError> {
     if config.bucket.trim().is_empty() {
         return Err("Bucket is required for S3 access.".into());
     }
@@ -979,7 +1075,7 @@ pub async fn download_file_version(
     key: &str,
     version_id: &str,
     path: &Path,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     let response = client
         .get_object()
         .bucket(bucket)
@@ -987,11 +1083,9 @@ pub async fn download_file_version(
         .version_id(version_id)
         .send()
         .await
-        .map_err(|error| {
-            format!(
+        .map_err(|error| classify_sdk_error(&error, format!(
                 "failed to download version '{version_id}' of '{key}' from bucket '{bucket}': {error}"
-            )
-        })?;
+            )))?;
 
     let bytes = response
         .body
@@ -1026,7 +1120,7 @@ pub async fn copy_object_version(
     bucket: &str,
     key: &str,
     version_id: &str,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     // Append ?versionId=... to the copy source so S3 copies the specific version
     let base_copy_source = copy_source(bucket, key);
     let versioned_copy_source = format!("{base_copy_source}?versionId={version_id}");
@@ -1040,8 +1134,11 @@ pub async fn copy_object_version(
         .send()
         .await
         .map_err(|error| {
-            format!(
+            classify_sdk_error(
+                &error,
+                format!(
                 "failed to restore version '{version_id}' of '{key}' in bucket '{bucket}': {error}"
+            ),
             )
         })?;
 
@@ -1053,7 +1150,7 @@ pub async fn copy_object_with_storage_class(
     bucket: &str,
     key: &str,
     storage_class: &str,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     let copy_source = format!("{bucket}/{key}");
 
     client
@@ -1065,11 +1162,9 @@ pub async fn copy_object_with_storage_class(
         .metadata_directive(MetadataDirective::Copy)
         .send()
         .await
-        .map_err(|error| {
-            format!(
+        .map_err(|error| classify_sdk_error(&error, format!(
                 "failed to change storage class of '{key}' in bucket '{bucket}' to '{storage_class}': {error}"
-            )
-        })?;
+            )))?;
 
     Ok(())
 }
