@@ -158,14 +158,6 @@ pub fn managed_lifecycle_rule(plan: &ManagedLifecycleRulePlan) -> LifecycleRule 
     )
 }
 
-fn legacy_managed_lifecycle_rule(retention_days: u32) -> LifecycleRule {
-    managed_lifecycle_rule_with_id(
-        REMOTE_BIN_LIFECYCLE_RULE_ID,
-        &namespace_prefix(),
-        retention_days,
-    )
-}
-
 fn managed_lifecycle_rule_with_id(
     rule_id: &str,
     prefix: &str,
@@ -313,7 +305,11 @@ pub fn key_matches_excluded_prefix(key: &str, excluded_prefixes: &[String]) -> b
 
 #[cfg(test)]
 fn legacy_lifecycle_rule_for_test(retention_days: u32) -> LifecycleRule {
-    legacy_managed_lifecycle_rule(retention_days)
+    managed_lifecycle_rule_with_id(
+        REMOTE_BIN_LIFECYCLE_RULE_ID,
+        &namespace_prefix(),
+        retention_days,
+    )
 }
 
 #[cfg(test)]
@@ -518,7 +514,7 @@ mod tests {
             .expect("user rule should build");
 
         let updated = upsert_lifecycle_rules(
-            &[unrelated_rule.clone()],
+            std::slice::from_ref(&unrelated_rule),
             &[
                 managed_lifecycle_rule_plan("pair-1", 14),
                 managed_lifecycle_rule_plan("pair-2", 21),

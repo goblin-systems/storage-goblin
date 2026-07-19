@@ -1,9 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::Path};
 use tauri::{AppHandle, Runtime};
 
 use super::{app_storage_path, now_iso, system_time_to_iso, LOCAL_INDEX_FILE_NAME};
@@ -101,7 +98,7 @@ pub fn scan_local_folder(root: &Path) -> Result<LocalIndexSnapshot, String> {
 }
 
 pub(crate) fn snapshot_matches_folder(snapshot: &LocalIndexSnapshot, folder: &str) -> bool {
-    PathBuf::from(&snapshot.root_folder) == PathBuf::from(folder)
+    Path::new(&snapshot.root_folder) == Path::new(folder)
 }
 
 fn local_index_file_name_for_pair(pair_id: &str) -> String {
@@ -156,7 +153,7 @@ fn scan_directory_recursive(
             )
         })?;
 
-    children.sort_by(|left, right| left.path().cmp(&right.path()));
+    children.sort_by_key(|entry| entry.path());
 
     for child in children {
         let path = child.path();

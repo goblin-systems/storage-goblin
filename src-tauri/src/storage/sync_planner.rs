@@ -298,6 +298,8 @@ pub fn build_sync_plan(
     }
 }
 
+// Signature slated for restructuring in overhaul phase 3 (backlog/phase-3-backend-architecture.md).
+#[allow(clippy::too_many_arguments)]
 fn push_file_decision(
     observed_entries: &mut Vec<ObservedEntry>,
     queue_items: &mut Vec<PlannedQueueItem>,

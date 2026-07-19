@@ -620,6 +620,72 @@ fn migrate_flat_fields_to_sync_pairs(profile: &mut StoredProfile) -> bool {
     true
 }
 
+pub fn is_profile_configured(profile: &StoredProfile) -> bool {
+    !profile.local_folder.is_empty() && !profile.bucket.is_empty()
+}
+
+pub fn validate_bucket_pair_invariant(_profile: &StoredProfile) -> Result<(), String> {
+    for pair in &_profile.sync_pairs {
+        if pair.object_versioning_enabled && pair.remote_bin.enabled {
+            return Err(format!(
+                "Sync location '{}' cannot enable object versioning and remote bin at the same time.",
+                pair.label
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn read_profile_from_disk<R: Runtime>(app: &AppHandle<R>) -> Result<StoredProfile, String> {
+    let path = app_storage_path(app, PROFILE_FILE_NAME)?;
+    if !path.exists() {
+        return Ok(StoredProfile::default());
+    }
+
+    let raw =
+        fs::read_to_string(&path).map_err(|error| format!("failed to read profile: {error}"))?;
+    validate_unsupported_legacy_profile_shape(&raw)?;
+    let persisted: PersistedProfile =
+        serde_json::from_str(&raw).map_err(|error| format!("failed to parse profile: {error}"))?;
+    let mut profile = StoredProfile::from(persisted);
+
+    if migrate_flat_fields_to_sync_pairs(&mut profile) {
+        write_profile_to_disk(app, &profile)?;
+
+        let pair_id = &profile.sync_pairs[0].id;
+
+        let local_src = app_storage_path(app, LOCAL_INDEX_FILE_NAME)?;
+        let local_dst =
+            app_storage_path(app, &format!("storage-goblin-local-index-{pair_id}.json"))?;
+        if local_src.exists() {
+            let _ = std::fs::rename(&local_src, &local_dst);
+        }
+
+        let remote_src = app_storage_path(app, REMOTE_INDEX_FILE_NAME)?;
+        let remote_dst =
+            app_storage_path(app, &format!("storage-goblin-remote-index-{pair_id}.json"))?;
+        if remote_src.exists() {
+            let _ = std::fs::rename(&remote_src, &remote_dst);
+        }
+    }
+
+    validate_bucket_pair_invariant(&profile)?;
+
+    Ok(profile)
+}
+
+pub fn write_profile_to_disk<R: Runtime>(
+    app: &AppHandle<R>,
+    profile: &StoredProfile,
+) -> Result<(), String> {
+    let path = app_storage_path(app, PROFILE_FILE_NAME)?;
+    let normalized = profile.clone().normalized();
+    validate_bucket_pair_invariant(&normalized)?;
+    let raw = serde_json::to_string_pretty(&PersistedProfile::from(&normalized))
+        .map_err(|error| format!("failed to serialize profile: {error}"))?;
+    fs::write(path, raw).map_err(|error| format!("failed to write profile: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1572,70 +1638,4 @@ mod hard_break_persisted_profile_loading_tests {
         assert!(profile.sync_pairs.is_empty());
         assert!(profile.active_location_id.is_none());
     }
-}
-
-pub fn is_profile_configured(profile: &StoredProfile) -> bool {
-    !profile.local_folder.is_empty() && !profile.bucket.is_empty()
-}
-
-pub fn validate_bucket_pair_invariant(_profile: &StoredProfile) -> Result<(), String> {
-    for pair in &_profile.sync_pairs {
-        if pair.object_versioning_enabled && pair.remote_bin.enabled {
-            return Err(format!(
-                "Sync location '{}' cannot enable object versioning and remote bin at the same time.",
-                pair.label
-            ));
-        }
-    }
-    Ok(())
-}
-
-pub fn read_profile_from_disk<R: Runtime>(app: &AppHandle<R>) -> Result<StoredProfile, String> {
-    let path = app_storage_path(app, PROFILE_FILE_NAME)?;
-    if !path.exists() {
-        return Ok(StoredProfile::default());
-    }
-
-    let raw =
-        fs::read_to_string(&path).map_err(|error| format!("failed to read profile: {error}"))?;
-    validate_unsupported_legacy_profile_shape(&raw)?;
-    let persisted: PersistedProfile =
-        serde_json::from_str(&raw).map_err(|error| format!("failed to parse profile: {error}"))?;
-    let mut profile = StoredProfile::from(persisted);
-
-    if migrate_flat_fields_to_sync_pairs(&mut profile) {
-        write_profile_to_disk(app, &profile)?;
-
-        let pair_id = &profile.sync_pairs[0].id;
-
-        let local_src = app_storage_path(app, LOCAL_INDEX_FILE_NAME)?;
-        let local_dst =
-            app_storage_path(app, &format!("storage-goblin-local-index-{pair_id}.json"))?;
-        if local_src.exists() {
-            let _ = std::fs::rename(&local_src, &local_dst);
-        }
-
-        let remote_src = app_storage_path(app, REMOTE_INDEX_FILE_NAME)?;
-        let remote_dst =
-            app_storage_path(app, &format!("storage-goblin-remote-index-{pair_id}.json"))?;
-        if remote_src.exists() {
-            let _ = std::fs::rename(&remote_src, &remote_dst);
-        }
-    }
-
-    validate_bucket_pair_invariant(&profile)?;
-
-    Ok(profile)
-}
-
-pub fn write_profile_to_disk<R: Runtime>(
-    app: &AppHandle<R>,
-    profile: &StoredProfile,
-) -> Result<(), String> {
-    let path = app_storage_path(app, PROFILE_FILE_NAME)?;
-    let normalized = profile.clone().normalized();
-    validate_bucket_pair_invariant(&normalized)?;
-    let raw = serde_json::to_string_pretty(&PersistedProfile::from(&normalized))
-        .map_err(|error| format!("failed to serialize profile: {error}"))?;
-    fs::write(path, raw).map_err(|error| format!("failed to write profile: {error}"))
 }

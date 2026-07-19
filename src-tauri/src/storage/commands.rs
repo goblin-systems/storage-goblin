@@ -40,8 +40,8 @@ use super::{
     remote_bin::{
         bin_prefix_contains_bin_key, deleted_directory_key, deleted_object_key,
         managed_lifecycle_rule_plan, namespace_prefix,
-        original_relative_path_from_bin_key_for_pair, pair_bin_prefix,
-        ManagedLifecycleRulePlan, DEFAULT_REMOTE_BIN_PAIR_ID,
+        original_relative_path_from_bin_key_for_pair, pair_bin_prefix, ManagedLifecycleRulePlan,
+        DEFAULT_REMOTE_BIN_PAIR_ID,
     },
     remote_index::{
         directory_relative_paths_from_key, directory_relative_paths_from_relative_path,
@@ -1489,7 +1489,10 @@ fn target_for_pair(pair: &SyncPair) -> Option<RemoteBinLifecycleTarget> {
         credential_profile_id: pair.credential_profile_id.clone(),
         source_labels: vec![format!("sync pair '{}'", pair.label)],
         managed_rules: if pair.remote_bin.enabled {
-            vec![managed_lifecycle_rule_plan(&pair.id, pair.remote_bin.retention_days)]
+            vec![managed_lifecycle_rule_plan(
+                &pair.id,
+                pair.remote_bin.retention_days,
+            )]
         } else {
             vec![]
         },
@@ -1570,20 +1573,24 @@ fn planned_remote_bin_reconciliation(
 
     buckets
         .into_iter()
-        .filter_map(|bucket| match (current_targets.get(&bucket), next_targets.get(&bucket)) {
-            (_, Some(target)) if !target.managed_rules.is_empty() => Some(target.clone()),
-            (Some(current_target), Some(next_target)) if !current_target.managed_rules.is_empty() => {
-                let mut disabled_target = next_target.clone();
-                disabled_target.managed_rules.clear();
-                Some(disabled_target)
-            }
-            (Some(current_target), None) if !current_target.managed_rules.is_empty() => {
-                let mut disabled_target = current_target.clone();
-                disabled_target.managed_rules.clear();
-                Some(disabled_target)
-            }
-            _ => None,
-        })
+        .filter_map(
+            |bucket| match (current_targets.get(&bucket), next_targets.get(&bucket)) {
+                (_, Some(target)) if !target.managed_rules.is_empty() => Some(target.clone()),
+                (Some(current_target), Some(next_target))
+                    if !current_target.managed_rules.is_empty() =>
+                {
+                    let mut disabled_target = next_target.clone();
+                    disabled_target.managed_rules.clear();
+                    Some(disabled_target)
+                }
+                (Some(current_target), None) if !current_target.managed_rules.is_empty() => {
+                    let mut disabled_target = current_target.clone();
+                    disabled_target.managed_rules.clear();
+                    Some(disabled_target)
+                }
+                _ => None,
+            },
+        )
         .collect()
 }
 
@@ -1639,7 +1646,8 @@ fn load_credentials_for_remote_bin_target<R: Runtime>(
     load_credentials_by_id(app, credential_id)?.ok_or_else(|| {
         format!(
             "Credential '{}' for {} is unavailable.",
-            credential_id, target_source_label(target)
+            credential_id,
+            target_source_label(target)
         )
     })
 }
@@ -1698,7 +1706,7 @@ async fn apply_sync_location_versioning<R: Runtime>(
 ) -> Result<(), String> {
     let credentials = resolve_credentials_for_pair(app, pair)?;
     if !provider_supports_runtime_object_versioning(&pair.provider) {
-        return Err(sync_location_runtime_object_versioning_message(&pair));
+        return Err(sync_location_runtime_object_versioning_message(pair));
     }
     let client = object_store::build_client(&storage_config_for_pair(pair, &credentials)).await?;
     object_store::set_bucket_versioning(&client, &pair.bucket, enabled).await
@@ -1710,7 +1718,7 @@ async fn reconcile_pair_object_versioning<R: Runtime>(
 ) -> Result<(), String> {
     let credentials = resolve_credentials_for_pair(app, pair)?;
     if !provider_supports_runtime_object_versioning(&pair.provider) {
-        return Err(sync_location_runtime_object_versioning_message(&pair));
+        return Err(sync_location_runtime_object_versioning_message(pair));
     }
     let client = object_store::build_client(&storage_config_for_pair(pair, &credentials)).await?;
     let currently_enabled = object_store::bucket_versioning_enabled(&client, &pair.bucket).await?;
@@ -2351,6 +2359,8 @@ async fn execute_planned_download_queue_with_timeout(
     .await
 }
 
+// Signature slated for restructuring in overhaul phase 3 (backlog/phase-3-backend-architecture.md).
+#[allow(clippy::too_many_arguments)]
 fn build_status_with_phase(
     state: &State<'_, SyncState>,
     profile: &StoredProfile,
@@ -2437,6 +2447,8 @@ async fn sleep_until_pair_work(
     }
 }
 
+// Signature slated for restructuring in overhaul phase 3 (backlog/phase-3-backend-architecture.md).
+#[allow(clippy::too_many_arguments)]
 async fn run_sync_cycle(
     app: &AppHandle,
     debug_state: &ActivityDebugState,
@@ -5894,7 +5906,8 @@ fn start_polling_worker_for_pairs(app: &AppHandle) -> Result<(), String> {
                     let _ = clear_dirty_pair(&state, &pair.id);
                 }
 
-                match run_sync_cycle_for_pair(
+                // On Err the error was already emitted by run_sync_cycle_for_pair.
+                if let Ok(status) = run_sync_cycle_for_pair(
                     &app_handle,
                     &debug_state,
                     &pair,
@@ -5903,10 +5916,7 @@ fn start_polling_worker_for_pairs(app: &AppHandle) -> Result<(), String> {
                 )
                 .await
                 {
-                    Ok(status) => {
-                        let _ = set_pair_status_from_handle(&app_handle, status);
-                    }
-                    Err(_) => {} // error already emitted by run_sync_cycle_for_pair
+                    let _ = set_pair_status_from_handle(&app_handle, status);
                 }
             }
 
@@ -7308,7 +7318,7 @@ async fn list_versioned_bin_inventory_for_pair(
     credentials: &StoredCredentials,
 ) -> Result<Vec<VersionedBinEntry>, String> {
     if !provider_supports_runtime_object_versioning(&pair.provider) {
-        return Err(sync_location_runtime_object_versioning_message(&pair));
+        return Err(sync_location_runtime_object_versioning_message(pair));
     }
     let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
     let mut key_marker: Option<String> = None;
@@ -9385,7 +9395,10 @@ mod tests {
             targets[0].managed_rules,
             vec![managed_lifecycle_rule_plan("pair-1", 7)]
         );
-        assert_eq!(targets[0].source_labels, vec!["sync pair 'Docs'".to_string()]);
+        assert_eq!(
+            targets[0].source_labels,
+            vec!["sync pair 'Docs'".to_string()]
+        );
     }
 
     #[test]
@@ -9438,12 +9451,16 @@ mod tests {
         );
         assert_eq!(
             targets[0].source_labels,
-            vec!["sync pair 'Docs'".to_string(), "sync pair 'Media'".to_string()]
+            vec![
+                "sync pair 'Docs'".to_string(),
+                "sync pair 'Media'".to_string()
+            ]
         );
     }
 
     #[test]
-    fn planned_remote_bin_reconciliation_clears_removed_pair_rule_but_keeps_other_shared_bucket_rules() {
+    fn planned_remote_bin_reconciliation_clears_removed_pair_rule_but_keeps_other_shared_bucket_rules(
+    ) {
         let current = StoredProfile {
             sync_pairs: vec![
                 SyncPair {
@@ -9591,7 +9608,10 @@ mod tests {
             reconciled[0].managed_rules,
             vec![managed_lifecycle_rule_plan("pair-1", 7)]
         );
-        assert_eq!(reconciled[0].source_labels, vec!["sync pair 'Docs'".to_string()]);
+        assert_eq!(
+            reconciled[0].source_labels,
+            vec!["sync pair 'Docs'".to_string()]
+        );
     }
 
     #[test]

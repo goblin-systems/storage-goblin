@@ -16,7 +16,7 @@ use super::{
     watchers::ActivePairWatcher,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncStatusStats {
     pub exact_match_count: u64,
@@ -26,20 +26,6 @@ pub struct SyncStatusStats {
     pub upload_pending_count: u64,
     pub download_pending_count: u64,
     pub conflict_pending_count: u64,
-}
-
-impl Default for SyncStatusStats {
-    fn default() -> Self {
-        Self {
-            exact_match_count: 0,
-            local_only_count: 0,
-            remote_only_count: 0,
-            size_mismatch_count: 0,
-            upload_pending_count: 0,
-            download_pending_count: 0,
-            conflict_pending_count: 0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,7 +132,7 @@ pub(crate) fn set_status_from_handle<R: tauri::Runtime>(
 pub(crate) fn pair_statuses_snapshot(
     state: &State<'_, SyncState>,
 ) -> Result<BTreeMap<String, PairSyncStatus>, String> {
-    pair_statuses_snapshot_inner(&**state)
+    pair_statuses_snapshot_inner(state)
 }
 
 fn pair_statuses_snapshot_inner(
@@ -191,7 +177,7 @@ pub(crate) fn replace_pair_statuses_from_handle<R: tauri::Runtime>(
 pub(crate) fn begin_polling_worker(
     state: &State<'_, SyncState>,
 ) -> Result<(u64, Arc<AtomicBool>), String> {
-    begin_polling_worker_inner(&**state)
+    begin_polling_worker_inner(state)
 }
 
 fn begin_polling_worker_inner(state: &SyncState) -> Result<(u64, Arc<AtomicBool>), String> {
@@ -213,7 +199,7 @@ fn begin_polling_worker_inner(state: &SyncState) -> Result<(u64, Arc<AtomicBool>
 }
 
 pub(crate) fn stop_polling_worker(state: &State<'_, SyncState>) -> Result<bool, String> {
-    stop_polling_worker_inner(&**state)
+    stop_polling_worker_inner(state)
 }
 
 fn stop_polling_worker_inner(state: &SyncState) -> Result<bool, String> {
@@ -247,7 +233,7 @@ pub(crate) fn clear_polling_worker(
     state: &State<'_, SyncState>,
     worker_id: u64,
 ) -> Result<(), String> {
-    clear_polling_worker_inner(&**state, worker_id)
+    clear_polling_worker_inner(state, worker_id)
 }
 
 fn clear_polling_worker_inner(state: &SyncState, worker_id: u64) -> Result<(), String> {
@@ -273,7 +259,7 @@ pub(crate) fn polling_worker_active(state: &State<'_, SyncState>) -> Result<bool
 }
 
 pub(crate) fn try_begin_sync_cycle(state: &State<'_, SyncState>) -> bool {
-    try_begin_sync_cycle_inner(&**state)
+    try_begin_sync_cycle_inner(state)
 }
 
 fn try_begin_sync_cycle_inner(state: &SyncState) -> bool {
@@ -284,7 +270,7 @@ fn try_begin_sync_cycle_inner(state: &SyncState) -> bool {
 }
 
 pub(crate) fn finish_sync_cycle(state: &State<'_, SyncState>) {
-    finish_sync_cycle_inner(&**state);
+    finish_sync_cycle_inner(state);
 }
 
 fn finish_sync_cycle_inner(state: &SyncState) {
@@ -296,7 +282,7 @@ pub(crate) fn install_pair_watcher(
     pair_id: String,
     watcher: ActivePairWatcher,
 ) -> Result<(), String> {
-    install_pair_watcher_inner(&**state, pair_id, watcher)
+    install_pair_watcher_inner(state, pair_id, watcher)
 }
 
 fn install_pair_watcher_inner(
@@ -317,7 +303,7 @@ pub(crate) fn remove_pair_watcher(
     state: &State<'_, SyncState>,
     pair_id: &str,
 ) -> Result<(), String> {
-    remove_pair_watcher_inner(&**state, pair_id)
+    remove_pair_watcher_inner(state, pair_id)
 }
 
 fn remove_pair_watcher_inner(state: &SyncState, pair_id: &str) -> Result<(), String> {
@@ -336,7 +322,7 @@ fn remove_pair_watcher_inner(state: &SyncState, pair_id: &str) -> Result<(), Str
 }
 
 pub(crate) fn clear_all_pair_watchers(state: &State<'_, SyncState>) -> Result<(), String> {
-    clear_all_pair_watchers_inner(&**state)
+    clear_all_pair_watchers_inner(state)
 }
 
 fn clear_all_pair_watchers_inner(state: &SyncState) -> Result<(), String> {
@@ -352,7 +338,7 @@ fn clear_all_pair_watchers_inner(state: &SyncState) -> Result<(), String> {
 pub(crate) fn active_watcher_pair_paths(
     state: &State<'_, SyncState>,
 ) -> Result<BTreeMap<String, std::path::PathBuf>, String> {
-    active_watcher_pair_paths_inner(&**state)
+    active_watcher_pair_paths_inner(state)
 }
 
 fn active_watcher_pair_paths_inner(
@@ -383,7 +369,7 @@ pub(crate) fn pair_has_active_watcher(
 }
 
 pub(crate) fn mark_pair_dirty(state: &State<'_, SyncState>, pair_id: &str) -> Result<(), String> {
-    mark_pair_dirty_at_inner(&**state, pair_id, Instant::now())
+    mark_pair_dirty_at_inner(state, pair_id, Instant::now())
 }
 
 fn mark_pair_dirty_at_inner(state: &SyncState, pair_id: &str, now: Instant) -> Result<(), String> {
@@ -405,7 +391,7 @@ pub(crate) fn due_dirty_pairs(
     now: Instant,
     debounce: Duration,
 ) -> Result<Vec<String>, String> {
-    due_dirty_pairs_inner(&**state, now, debounce)
+    due_dirty_pairs_inner(state, now, debounce)
 }
 
 fn due_dirty_pairs_inner(
@@ -420,10 +406,8 @@ fn due_dirty_pairs_inner(
 
     Ok(dirty_pairs
         .iter()
-        .filter_map(|(pair_id, entry)| {
-            (now.saturating_duration_since(entry.last_marked_at) >= debounce)
-                .then(|| pair_id.clone())
-        })
+        .filter(|(_, entry)| now.saturating_duration_since(entry.last_marked_at) >= debounce)
+        .map(|(pair_id, _)| pair_id.clone())
         .collect())
 }
 
@@ -444,7 +428,7 @@ pub(crate) fn next_dirty_pair_deadline(
 }
 
 pub(crate) fn clear_dirty_pair(state: &State<'_, SyncState>, pair_id: &str) -> Result<(), String> {
-    clear_dirty_pair_inner(&**state, pair_id)
+    clear_dirty_pair_inner(state, pair_id)
 }
 
 fn clear_dirty_pair_inner(state: &SyncState, pair_id: &str) -> Result<(), String> {

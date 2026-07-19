@@ -1,12 +1,15 @@
-use std::{collections::{BTreeMap, HashMap}, path::Path};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
 
 use super::{
     credentials_store::StoredCredentials,
     gcs_adapter::{
-        self, GcsBucketLifecycleConfiguration, GcsClient,
-        GcsLifecycleRulesChange, GcsObjectVersionPage, GcsServiceAccountCredentials,
+        self, GcsBucketLifecycleConfiguration, GcsClient, GcsLifecycleRulesChange,
+        GcsObjectVersionPage, GcsServiceAccountCredentials,
     },
     now_iso,
     provider::{
@@ -680,7 +683,10 @@ pub async fn set_bucket_versioning(
 }
 
 pub fn supports_remote_bin_lifecycle_reconciliation(provider: &str) -> bool {
-    matches!(normalize_provider(provider).as_str(), AWS_PROVIDER | GCS_PROVIDER)
+    matches!(
+        normalize_provider(provider).as_str(),
+        AWS_PROVIDER | GCS_PROVIDER
+    )
 }
 
 pub async fn get_bucket_lifecycle_configuration_state(
@@ -692,7 +698,8 @@ pub async fn get_bucket_lifecycle_configuration_state(
             let state = s3_adapter::get_bucket_lifecycle_configuration(client, bucket).await?;
             Ok(BucketLifecycleConfigurationState::Aws {
                 configuration: state.configuration,
-                transition_default_minimum_object_size: state.transition_default_minimum_object_size,
+                transition_default_minimum_object_size: state
+                    .transition_default_minimum_object_size,
             })
         }
         ObjectStoreClient::Gcs(client) => {
@@ -752,9 +759,11 @@ pub async fn delete_bucket_lifecycle_configuration(
 ) -> Result<(), String> {
     match client {
         ObjectStoreClient::Aws(client) => s3_adapter::delete_bucket_lifecycle(client, bucket).await,
-        ObjectStoreClient::Gcs(client) => client
-            .patch_bucket_lifecycle_configuration(bucket, None, None)
-            .await,
+        ObjectStoreClient::Gcs(client) => {
+            client
+                .patch_bucket_lifecycle_configuration(bucket, None, None)
+                .await
+        }
     }
 }
 
@@ -773,19 +782,23 @@ pub async fn reconcile_remote_bin_lifecycle(
     let lifecycle_state = get_bucket_lifecycle_configuration_state(client, bucket).await?;
 
     let existing_rules = match &lifecycle_state {
-        BucketLifecycleConfigurationState::Aws { configuration, .. } => {
-            configuration.as_ref().map(|configuration| configuration.rules())
-        }
+        BucketLifecycleConfigurationState::Aws { configuration, .. } => configuration
+            .as_ref()
+            .map(|configuration| configuration.rules()),
         BucketLifecycleConfigurationState::Gcs {
             configuration,
             metageneration,
         } => {
             let ObjectStoreClient::Gcs(gcs_client) = client else {
-                return Err("Lifecycle configuration state does not match object store provider.".into());
+                return Err(
+                    "Lifecycle configuration state does not match object store provider.".into(),
+                );
             };
 
             return match gcs_adapter::reconcile_managed_lifecycle_rules(
-                configuration.as_ref().map(|configuration| configuration.rule.as_slice()),
+                configuration
+                    .as_ref()
+                    .map(|configuration| configuration.rule.as_slice()),
                 managed_rules,
             ) {
                 GcsLifecycleRulesChange::None => Ok(()),
@@ -824,8 +837,13 @@ pub async fn reconcile_remote_bin_lifecycle(
                         bucket
                     )
                 })?;
-            put_bucket_lifecycle_configuration_state(client, bucket, configuration, &lifecycle_state)
-                .await
+            put_bucket_lifecycle_configuration_state(
+                client,
+                bucket,
+                configuration,
+                &lifecycle_state,
+            )
+            .await
         }
         LifecycleRulesChange::DeleteBucketLifecycle => {
             delete_bucket_lifecycle_configuration(client, bucket).await
@@ -1083,9 +1101,7 @@ async fn probe_gcs_bucket_permissions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::provider::{
-        provider_capabilities, runtime_provider_capabilities,
-    };
+    use crate::storage::provider::{provider_capabilities, runtime_provider_capabilities};
     use crate::storage::remote_bin::managed_lifecycle_rule_plan;
 
     #[test]

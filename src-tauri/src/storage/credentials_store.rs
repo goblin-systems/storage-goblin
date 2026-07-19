@@ -1363,7 +1363,7 @@ fn dpapi_protect_bytes(raw: &[u8]) -> Result<Vec<u8>, String> {
         Security::Cryptography::{CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB},
     };
 
-    let mut input = CRYPT_INTEGER_BLOB {
+    let input = CRYPT_INTEGER_BLOB {
         cbData: raw.len() as u32,
         pbData: raw.as_ptr() as *mut u8,
     };
@@ -1374,7 +1374,7 @@ fn dpapi_protect_bytes(raw: &[u8]) -> Result<Vec<u8>, String> {
 
     let ok = unsafe {
         CryptProtectData(
-            &mut input,
+            &input,
             null(),
             null(),
             null_mut(),
@@ -1405,7 +1405,7 @@ fn dpapi_unprotect_bytes(encrypted: &[u8]) -> Result<Vec<u8>, String> {
         },
     };
 
-    let mut input = CRYPT_INTEGER_BLOB {
+    let input = CRYPT_INTEGER_BLOB {
         cbData: encrypted.len() as u32,
         pbData: encrypted.as_ptr() as *mut u8,
     };
@@ -1416,7 +1416,7 @@ fn dpapi_unprotect_bytes(encrypted: &[u8]) -> Result<Vec<u8>, String> {
 
     let ok = unsafe {
         CryptUnprotectData(
-            &mut input,
+            &input,
             null_mut(),
             null(),
             null_mut(),
@@ -1840,7 +1840,7 @@ mod tests {
             .count()
     }
 
-    fn test_dpapi_secret_payload(path: &PathBuf, credential_id: &str) -> Vec<u8> {
+    fn test_dpapi_secret_payload(path: &Path, credential_id: &str) -> Vec<u8> {
         let secret_dir = secret_storage_dir(path);
         let file_path = dpapi_secret_file_path(&secret_dir, credential_id);
         fs::read(file_path).expect("dpapi payload should exist")

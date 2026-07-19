@@ -9,8 +9,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::sanitizer::sanitize_sensitive_text;
 use super::remote_bin::{namespace_prefix, ManagedLifecycleRulePlan};
+use super::sanitizer::sanitize_sensitive_text;
 
 const STORAGE_SCOPE: &str = "https://www.googleapis.com/auth/devstorage.full_control";
 const GCS_STORAGE_API_BASE_URL: &str = "https://storage.googleapis.com";
@@ -746,7 +746,9 @@ impl GcsClient {
         .await?;
 
         Ok(GcsBucketLifecycleState {
-            configuration: body.lifecycle.filter(|configuration| !configuration.rule.is_empty()),
+            configuration: body
+                .lifecycle
+                .filter(|configuration| !configuration.rule.is_empty()),
             metageneration: body.metageneration,
         })
     }
@@ -768,9 +770,9 @@ impl GcsClient {
             ));
         }
 
-        let lifecycle = configuration.cloned().unwrap_or(GcsBucketLifecycleConfiguration {
-            rule: Vec::new(),
-        });
+        let lifecycle = configuration
+            .cloned()
+            .unwrap_or(GcsBucketLifecycleConfiguration { rule: Vec::new() });
 
         let response = self
             .http
@@ -1207,8 +1209,9 @@ fn rewrite_request_url(base_url: &str, rewrite_token: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_service_account_json, reconcile_managed_lifecycle_rules, GcsBucketLifecycleConfiguration,
-        GcsClient, GcsLifecycleRulesChange, GcsLifecycleRule, GcsServiceAccountCredentials,
+        compact_service_account_json, reconcile_managed_lifecycle_rules,
+        GcsBucketLifecycleConfiguration, GcsClient, GcsLifecycleRule, GcsLifecycleRulesChange,
+        GcsServiceAccountCredentials,
     };
     use crate::storage::remote_bin::managed_lifecycle_rule_plan;
     use serde_json::Value;
@@ -1622,7 +1625,14 @@ mod tests {
             "/storage/v1/b/demo-bucket?fields=lifecycle,metageneration"
         );
         assert_eq!(state.metageneration.as_deref(), Some("12"));
-        assert_eq!(state.configuration.expect("configuration should exist").rule.len(), 1);
+        assert_eq!(
+            state
+                .configuration
+                .expect("configuration should exist")
+                .rule
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1649,9 +1659,7 @@ mod tests {
                             },
                             condition: super::GcsLifecycleCondition {
                                 age: Some(7),
-                                matches_prefix: vec![
-                                    ".storage-goblin-bin/pairs/pair-1/".into(),
-                                ],
+                                matches_prefix: vec![".storage-goblin-bin/pairs/pair-1/".into()],
                                 extra: BTreeMap::new(),
                             },
                         }],
@@ -1692,10 +1700,7 @@ mod tests {
         let existing = vec![GcsLifecycleRule {
             action: super::GcsLifecycleAction {
                 action_type: "SetStorageClass".into(),
-                extra: BTreeMap::from([(
-                    "storageClass".into(),
-                    serde_json::json!("ARCHIVE"),
-                )]),
+                extra: BTreeMap::from([("storageClass".into(), serde_json::json!("ARCHIVE"))]),
             },
             condition: super::GcsLifecycleCondition {
                 age: Some(60),

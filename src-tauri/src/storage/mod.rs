@@ -6,6 +6,7 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 pub mod activity;
 pub mod commands;
 pub mod credentials_store;
+pub mod error;
 pub mod gcs_adapter;
 pub mod inventory_compare;
 pub mod local_index;

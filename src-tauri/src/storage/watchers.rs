@@ -113,7 +113,10 @@ fn event_should_mark_dirty(event: &Event) -> bool {
 mod tests {
     use super::{event_should_mark_dirty, plan_watch_reconciliation, WatchTarget};
     use notify::{event::AccessKind, Event, EventKind};
-    use std::{collections::BTreeMap, path::PathBuf};
+    use std::{
+        collections::BTreeMap,
+        path::{Path, PathBuf},
+    };
 
     #[test]
     fn reconciliation_starts_new_watchers_and_stops_removed_or_retargeted_pairs() {
@@ -141,11 +144,12 @@ mod tests {
         assert_eq!(plan.stop, vec!["pair-b".to_string()]);
         assert_eq!(plan.start.len(), 2);
         assert!(plan.start.iter().any(|target| {
-            target.pair_id == "pair-b" && target.root_path == PathBuf::from("D:/retargeted-b")
+            target.pair_id == "pair-b" && target.root_path == Path::new("D:/retargeted-b")
         }));
-        assert!(plan.start.iter().any(|target| {
-            target.pair_id == "pair-c" && target.root_path == PathBuf::from("C:/c")
-        }));
+        assert!(plan
+            .start
+            .iter()
+            .any(|target| { target.pair_id == "pair-c" && target.root_path == Path::new("C:/c") }));
     }
 
     #[test]
