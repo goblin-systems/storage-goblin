@@ -2,7 +2,12 @@
 
 ## Overhaul status
 
-- **Current overhaul phase: 0 (Foundations & Guardrails)** — see `backlog/phase-0-foundations.md`.
+- **Current overhaul phase: 0 complete (2026-07-19); next up phase 1 (Sync Correctness)** —
+  see `backlog/phase-0-foundations.md` for what landed (incl. deferred items) and
+  `backlog/phase-1-sync-correctness.md` for what's next. The 6 ignored "truth case" tests in
+  `src-tauri/src/storage/sim/scenarios.rs` are phase 1's executable definition of done.
+- Errors: provider adapters + object_store return `storage::error::SyncError` (classified);
+  `commands.rs` still uses `Result<_, String>` via `From` escape hatches until phase 3.
 - Roadmap/backlog lives in `backlog/` (one MD per phase); update the phase doc during session handoff.
 - Package manager is bun only (`bun.lock`); never generate `package-lock.json`.
 - Sync-engine changes require simulator coverage (`src-tauri/src/storage/sim/`).

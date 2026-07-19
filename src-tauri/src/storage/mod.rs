@@ -4,6 +4,8 @@ use tauri::{AppHandle, Manager, Runtime};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 pub mod activity;
+#[cfg(test)]
+mod bench_baseline;
 pub mod commands;
 pub mod credentials_store;
 pub mod error;
