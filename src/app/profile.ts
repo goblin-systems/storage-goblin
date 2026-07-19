@@ -1,4 +1,16 @@
-import { CONFLICT_STRATEGIES, type ConflictStrategy, type CredentialSummary, type StoredStorageProfile, type StorageProfileDraft, type SyncLocation } from "./types";
+import {
+  defaultProviderDefinition,
+  CONFLICT_STRATEGIES,
+  normalizeCredentialSummaryRecord,
+  normalizeProviderDefinition,
+  normalizeProvider,
+  normalizeProviderCapabilities,
+  type ConflictStrategy,
+  type CredentialSummary,
+  type StoredStorageProfile,
+  type StorageProfileDraft,
+  type SyncLocation,
+} from "./types";
 
 type LegacyRemoteBinCarrier = {
   remoteBin?: {
@@ -11,6 +23,7 @@ type LegacyRemoteBinCarrier = {
 export const DEFAULT_REMOTE_BIN_RETENTION_DAYS = 7;
 
 export const DEFAULT_STORED_PROFILE: StoredStorageProfile = {
+  provider: "aws",
   localFolder: "",
   region: "",
   bucket: "",
@@ -41,17 +54,7 @@ function normalizeText(value: string | undefined): string {
 }
 
 function normalizeCredentialSummary(value: Partial<CredentialSummary> | null | undefined): CredentialSummary | null {
-  if (!value?.id) return null;
-  return {
-    id: normalizeText(value.id),
-    name: normalizeText(value.name),
-    ready: Boolean(value.ready),
-    validationStatus: value.validationStatus === "passed" || value.validationStatus === "failed"
-      ? value.validationStatus
-      : "untested",
-    lastTestedAt: normalizeText(value.lastTestedAt ?? undefined) || null,
-    lastTestMessage: normalizeText(value.lastTestMessage ?? undefined) || null,
-  };
+  return normalizeCredentialSummaryRecord(value);
 }
 
 function clampInt(value: number | undefined, min: number, max: number, fallback: number): number {
@@ -75,6 +78,7 @@ function normalizeSyncLocation(input: Partial<SyncLocation> | null | undefined):
   return {
     id,
     label: normalizeText(input?.label),
+    provider: normalizeProvider(input?.provider),
     localFolder: normalizeText(input?.localFolder),
     region: normalizeText(input?.region),
     bucket: normalizeText(input?.bucket),
@@ -88,6 +92,9 @@ function normalizeSyncLocation(input: Partial<SyncLocation> | null | undefined):
       enabled: Boolean(input?.objectVersioningEnabled) ? false : (legacyInput?.remoteBin?.enabled ?? true),
       retentionDays,
     },
+    providerDefinition: normalizeProviderDefinition((input as Record<string, unknown> | undefined)?.providerDefinition)
+      ?? defaultProviderDefinition(normalizeProvider(input?.provider)),
+    capabilities: normalizeProviderCapabilities((input as Record<string, unknown> | undefined)?.capabilities, normalizeProvider(input?.provider)),
   };
 }
 
@@ -111,6 +118,7 @@ export function normalizeStoredProfile(input?: Partial<StoredStorageProfile> | n
     .filter((location): location is SyncLocation => location !== null);
 
   return {
+    provider: normalizeProvider(input?.provider),
     localFolder: normalizeText(input?.localFolder),
     region: normalizeText(input?.region),
     bucket: normalizeText(input?.bucket),
@@ -122,6 +130,9 @@ export function normalizeStoredProfile(input?: Partial<StoredStorageProfile> | n
     selectedCredential,
     selectedCredentialAvailable,
     credentialsStoredSecurely,
+    providerDefinition: normalizeProviderDefinition((input as Record<string, unknown> | undefined)?.providerDefinition)
+      ?? defaultProviderDefinition(normalizeProvider(input?.provider)),
+    capabilities: normalizeProviderCapabilities((input as Record<string, unknown> | undefined)?.capabilities, normalizeProvider(input?.provider)),
     syncLocations: normalizedSyncLocations,
     activeLocationId: typeof input?.activeLocationId === "string" && input.activeLocationId.trim() ? input.activeLocationId.trim() : null,
   };

@@ -10,6 +10,8 @@ pub fn run() {
             storage::activity::get_activity_debug_log_state,
             storage::activity::open_activity_debug_log_folder,
             storage::commands::validate_s3_connection,
+            storage::commands::validate_storage_connection,
+            storage::commands::list_provider_capabilities_command,
             storage::commands::list_credentials_command,
             storage::commands::create_credential_command,
             storage::commands::test_credential_command,

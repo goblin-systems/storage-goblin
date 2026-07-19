@@ -6,12 +6,16 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 pub mod activity;
 pub mod commands;
 pub mod credentials_store;
+pub mod gcs_adapter;
 pub mod inventory_compare;
 pub mod local_index;
+pub mod object_store;
 pub mod profile_store;
+pub mod provider;
 pub mod remote_bin;
 pub mod remote_index;
 pub mod s3_adapter;
+pub mod sanitizer;
 pub mod sync_db;
 pub mod sync_planner;
 pub mod sync_state;
@@ -34,6 +38,10 @@ pub(crate) fn now_iso() -> String {
 pub(crate) fn system_time_to_iso(value: SystemTime) -> Option<String> {
     let value: OffsetDateTime = value.into();
     value.format(&Rfc3339).ok()
+}
+
+pub fn default_provider() -> String {
+    provider::normalize_provider("aws")
 }
 
 pub(crate) fn app_storage_path<R: Runtime>(

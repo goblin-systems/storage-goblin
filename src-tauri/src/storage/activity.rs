@@ -10,7 +10,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use time::macros::format_description;
 
-use super::{now_iso, profile_store::read_profile_from_disk};
+use super::{now_iso, profile_store::read_profile_from_disk, sanitizer::sanitize_sensitive_text};
 
 const ACTIVITY_EVENT_NAME: &str = "storage://activity";
 const DEBUG_LOG_FILE_NAME: &str = "activity-debug.log";
@@ -245,8 +245,7 @@ fn prune_log_lines(path: &PathBuf) -> Result<(), String> {
 }
 
 fn sanitize_log_text(value: impl AsRef<str>) -> String {
-    value
-        .as_ref()
+    sanitize_sensitive_text(value)
         .replace(['\r', '\n'], " ")
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -279,5 +278,17 @@ mod tests {
             build_activity_event(ActivityLevel::Info, "Message".into(), Some("  \n  ".into()));
 
         assert!(event.details.is_none());
+    }
+
+    #[test]
+    fn sanitize_log_text_redacts_secrets() {
+        let sanitized = sanitize_log_text(
+            "accessKeyId=AKIA123 secretAccessKey=super-secret client_email=test@example.com",
+        );
+
+        assert!(!sanitized.contains("AKIA123"));
+        assert!(!sanitized.contains("super-secret"));
+        assert!(!sanitized.contains("test@example.com"));
+        assert!(sanitized.contains("[redacted]"));
     }
 }

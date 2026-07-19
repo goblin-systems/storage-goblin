@@ -1052,10 +1052,12 @@ mod tests {
             selected_credential: Some(crate::storage::credentials_store::CredentialSummary {
                 id: "cred-1".into(),
                 name: "Primary".into(),
+                provider: "aws".into(),
                 ready: true,
                 validation_status: CredentialValidationStatus::Failed,
                 last_tested_at: Some("2026-04-04T12:00:00Z".into()),
                 last_test_message: Some("Access denied".into()),
+                summary: None,
             }),
             credentials_stored_securely: true,
             ..StoredProfile::default()

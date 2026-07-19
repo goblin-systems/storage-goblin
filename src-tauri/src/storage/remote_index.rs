@@ -26,11 +26,16 @@ pub struct RemoteObjectEntry {
     pub storage_class: Option<String>,
 }
 
-/// Returns true if the storage class represents an S3 Glacier tier.
-pub fn is_glacier_storage_class(storage_class: Option<&str>) -> bool {
+/// Returns true if the storage class represents a cold/archive storage tier.
+pub fn is_cold_storage_class(storage_class: Option<&str>) -> bool {
     matches!(
         storage_class,
-        Some("GLACIER") | Some("DEEP_ARCHIVE") | Some("GLACIER_IR")
+        Some("GLACIER")
+            | Some("DEEP_ARCHIVE")
+            | Some("GLACIER_IR")
+            | Some("NEARLINE")
+            | Some("COLDLINE")
+            | Some("ARCHIVE")
     )
 }
 

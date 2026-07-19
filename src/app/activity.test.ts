@@ -26,4 +26,11 @@ describe("activity helpers", () => {
     expect(item.message).toBe("Connected with accessKeyId=[redacted]");
     expect(item.details).toBe('{"secretAccessKey":"[redacted]"}');
   });
+
+  it("redacts GCS service account fields in assignments and JSON payloads", () => {
+    expect(sanitizeActivityText("client_email=sync@example.iam.gserviceaccount.com private_key=-----BEGIN PRIVATE KEY-----abc"))
+      .toBe("client_email=[redacted] private_key=[redacted]");
+    expect(sanitizeActivityText('{"client_email":"sync@example.iam.gserviceaccount.com","private_key":"super-secret","private_key_id":"abc123"}'))
+      .toBe('{"client_email":"[redacted]","private_key":"[redacted]","private_key_id":"[redacted]"}');
+  });
 });

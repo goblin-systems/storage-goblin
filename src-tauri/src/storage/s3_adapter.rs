@@ -20,6 +20,7 @@ pub const LOCAL_FINGERPRINT_METADATA_KEY: &str = "storage-goblin-local-fingerpri
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct S3ConnectionConfig {
+    pub provider: String,
     pub region: String,
     pub bucket: String,
     pub access_key_id: String,
@@ -29,6 +30,7 @@ pub struct S3ConnectionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct S3CredentialTestConfig {
+    pub provider: String,
     pub region: String,
     pub access_key_id: String,
     pub secret_access_key: String,
@@ -131,7 +133,6 @@ pub async fn validate_connection(
         object_count_sampled: response.key_count().unwrap_or(0) as usize,
     })
 }
-
 pub async fn build_client(config: &S3ConnectionConfig) -> Result<Client, String> {
     validate_required_fields(config)?;
 
@@ -143,15 +144,16 @@ pub async fn build_client(config: &S3ConnectionConfig) -> Result<Client, String>
         "storage-goblin",
     );
 
-    let shared_config = aws_config::defaults(BehaviorVersion::latest())
+    let mut config_loader = aws_config::defaults(BehaviorVersion::latest())
         .credentials_provider(SharedCredentialsProvider::new(credentials))
-        .region(Region::new(region_or_default(&config.region)))
-        .load()
-        .await;
+        .region(Region::new(region_or_default(&config.region)));
 
-    Ok(Client::from_conf(
-        aws_sdk_s3::config::Builder::from(&shared_config).build(),
-    ))
+    if config.provider == "gcp" {
+        config_loader = config_loader.endpoint_url("https://storage.googleapis.com");
+    }
+
+    let shared_config = config_loader.load().await;
+    Ok(Client::new(&shared_config))
 }
 
 pub async fn build_credential_test_client(
@@ -175,15 +177,16 @@ pub async fn build_credential_test_client(
         "storage-goblin",
     );
 
-    let shared_config = aws_config::defaults(BehaviorVersion::latest())
+    let mut config_loader = aws_config::defaults(BehaviorVersion::latest())
         .credentials_provider(SharedCredentialsProvider::new(credentials))
-        .region(Region::new(region_or_default(&config.region)))
-        .load()
-        .await;
+        .region(Region::new(region_or_default(&config.region)));
 
-    Ok(Client::from_conf(
-        aws_sdk_s3::config::Builder::from(&shared_config).build(),
-    ))
+    if config.provider == "gcp" {
+        config_loader = config_loader.endpoint_url("https://storage.googleapis.com");
+    }
+
+    let shared_config = config_loader.load().await;
+    Ok(Client::new(&shared_config))
 }
 
 pub async fn validate_credentials(
@@ -612,7 +615,9 @@ pub async fn list_object_versions_page_with_prefix(
                 storage_class: version
                     .storage_class()
                     .map(|value| value.as_str().to_string()),
-                etag: version.e_tag().map(|value| value.trim_matches('"').to_string()),
+                etag: version
+                    .e_tag()
+                    .map(|value| value.trim_matches('"').to_string()),
             })
         })
         .collect();

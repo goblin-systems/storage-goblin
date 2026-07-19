@@ -7,6 +7,7 @@ function redactKnownAssignment(text: string): string {
     .replace(/(access[_-]?key(?:[_-]?id)?\s*[:=]\s*)([^\s,;]+)/gi, `$1${REDACTED_VALUE}`)
     .replace(/(secret[_-]?access[_-]?key\s*[:=]\s*)([^\s,;]+)/gi, `$1${REDACTED_VALUE}`)
     .replace(/(session[_-]?token\s*[:=]\s*)([^\s,;]+)/gi, `$1${REDACTED_VALUE}`)
+    .replace(/((?:service[_-]?account(?:[_-]?json)?|serviceAccountJson|private[_-]?key(?:[_-]?id)?|privateKey|client[_-]?email|clientEmail)\s*[:=]\s*)(.*?)(?=(?:\s+[A-Za-z_][A-Za-z0-9_-]*\s*[:=])|$)/gi, `$1${REDACTED_VALUE}`)
     .replace(/(authorization\s*[:=]\s*)([^\r\n]+)/gi, `$1${REDACTED_VALUE}`)
     .replace(/(bearer\s+)([^\s]+)/gi, `$1${REDACTED_VALUE}`);
 }
@@ -14,7 +15,9 @@ function redactKnownAssignment(text: string): string {
 function redactQuotedSecrets(text: string): string {
   return text
     .replace(/("(?:accessKeyId|secretAccessKey|sessionToken|authorization)"\s*:\s*")([^"]+)(")/gi, `$1${REDACTED_VALUE}$3`)
-    .replace(/('(?:accessKeyId|secretAccessKey|sessionToken|authorization)'\s*:\s*')([^']+)(')/gi, `$1${REDACTED_VALUE}$3`);
+    .replace(/('(?:accessKeyId|secretAccessKey|sessionToken|authorization)'\s*:\s*')([^']+)(')/gi, `$1${REDACTED_VALUE}$3`)
+    .replace(/("(?:serviceAccountJson|private_key|privateKey|private_key_id|privateKeyId|client_email|clientEmail)"\s*:\s*")([^"]+)(")/gi, `$1${REDACTED_VALUE}$3`)
+    .replace(/('(?:serviceAccountJson|private_key|privateKey|private_key_id|privateKeyId|client_email|clientEmail)'\s*:\s*')([^']+)(')/gi, `$1${REDACTED_VALUE}$3`);
 }
 
 function redactAwsStyleKey(text: string): string {

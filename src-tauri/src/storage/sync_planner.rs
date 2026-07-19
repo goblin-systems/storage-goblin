@@ -4,7 +4,7 @@ use super::{
     local_index::LocalIndexSnapshot,
     now_iso,
     profile_store::normalize_conflict_strategy,
-    remote_index::{is_glacier_storage_class, RemoteIndexSnapshot},
+    remote_index::{is_cold_storage_class, RemoteIndexSnapshot},
     sync_db::SyncAnchor,
 };
 
@@ -108,7 +108,7 @@ pub fn build_sync_plan(
     let remote_object_count = remote_entries
         .values()
         .filter(|entry| {
-            entry.kind == "file" && !is_glacier_storage_class(entry.storage_class.as_deref())
+            entry.kind == "file" && !is_cold_storage_class(entry.storage_class.as_deref())
         })
         .count() as u64;
 
@@ -130,7 +130,7 @@ pub fn build_sync_plan(
         let remote = remote_entries.get(&path);
         let anchor = anchors.get(&path);
 
-        if remote.is_some_and(|entry| is_glacier_storage_class(entry.storage_class.as_deref())) {
+        if remote.is_some_and(|entry| is_cold_storage_class(entry.storage_class.as_deref())) {
             noop_count += 1;
             observed_entries.push(ObservedEntry {
                 path,

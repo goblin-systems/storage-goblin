@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     local_index::LocalIndexSnapshot,
     now_iso,
-    remote_index::{is_glacier_storage_class, RemoteIndexSnapshot},
+    remote_index::{is_cold_storage_class, RemoteIndexSnapshot},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,7 +92,7 @@ fn remote_entry_map(snapshot: &RemoteIndexSnapshot) -> BTreeMap<String, IndexedE
     snapshot
         .entries
         .iter()
-        .filter(|entry| !is_glacier_storage_class(entry.storage_class.as_deref()))
+        .filter(|entry| !is_cold_storage_class(entry.storage_class.as_deref()))
         .filter_map(|entry| match entry.kind.as_str() {
             "file" => Some((
                 entry.relative_path.clone(),

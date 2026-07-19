@@ -1,16 +1,26 @@
 use aws_sdk_s3::types::{
     ExpirationStatus, LifecycleExpiration, LifecycleRule, LifecycleRuleFilter,
 };
+use std::collections::BTreeMap;
 
 pub const REMOTE_BIN_NAMESPACE: &str = ".storage-goblin-bin";
 pub const REMOTE_BIN_LIFECYCLE_RULE_ID: &str = "storage-goblin-remote-bin-expiration";
+pub const DEFAULT_REMOTE_BIN_PAIR_ID: &str = "default";
 const REMOTE_BIN_PAIRS_SEGMENT: &str = "pairs";
+const LEGACY_NAMESPACE_RULE_KEY: &str = "__storage_goblin_legacy_namespace__";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LifecycleRulesChange {
     None,
     Replace(Vec<LifecycleRule>),
     DeleteBucketLifecycle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ManagedLifecycleRulePlan {
+    pub pair_id: String,
+    pub prefix: String,
+    pub retention_days: u32,
 }
 
 pub fn namespace_prefix() -> String {
@@ -23,6 +33,15 @@ fn pair_namespace_prefix() -> String {
 
 pub fn pair_bin_prefix(pair_id: &str) -> String {
     format!("{}{}/", pair_namespace_prefix(), pair_id.trim_matches('/'))
+}
+
+pub fn managed_lifecycle_rule_plan(pair_id: &str, retention_days: u32) -> ManagedLifecycleRulePlan {
+    let pair_id = normalized_pair_id(pair_id);
+    ManagedLifecycleRulePlan {
+        prefix: pair_bin_prefix(&pair_id),
+        pair_id,
+        retention_days,
+    }
 }
 
 pub fn deleted_object_key(pair_id: &str, relative_path: &str) -> String {
@@ -131,15 +150,31 @@ pub fn bin_prefix_contains_bin_key(
     Ok(normalized_key == prefix || normalized_key.starts_with(&format!("{prefix}/")))
 }
 
-pub fn managed_lifecycle_rule(retention_days: u32) -> LifecycleRule {
+pub fn managed_lifecycle_rule(plan: &ManagedLifecycleRulePlan) -> LifecycleRule {
+    managed_lifecycle_rule_with_id(
+        &managed_lifecycle_rule_id(&plan.pair_id),
+        &plan.prefix,
+        plan.retention_days,
+    )
+}
+
+fn legacy_managed_lifecycle_rule(retention_days: u32) -> LifecycleRule {
+    managed_lifecycle_rule_with_id(
+        REMOTE_BIN_LIFECYCLE_RULE_ID,
+        &namespace_prefix(),
+        retention_days,
+    )
+}
+
+fn managed_lifecycle_rule_with_id(
+    rule_id: &str,
+    prefix: &str,
+    retention_days: u32,
+) -> LifecycleRule {
     let expiration_days = i32::try_from(retention_days).unwrap_or(i32::MAX);
     LifecycleRule::builder()
-        .id(REMOTE_BIN_LIFECYCLE_RULE_ID)
-        .filter(
-            LifecycleRuleFilter::builder()
-                .prefix(namespace_prefix())
-                .build(),
-        )
+        .id(rule_id)
+        .filter(LifecycleRuleFilter::builder().prefix(prefix).build())
         .expiration(LifecycleExpiration::builder().days(expiration_days).build())
         .status(ExpirationStatus::Enabled)
         .build()
@@ -148,53 +183,48 @@ pub fn managed_lifecycle_rule(retention_days: u32) -> LifecycleRule {
 
 pub fn upsert_lifecycle_rules(
     existing: &[LifecycleRule],
-    retention_days: u32,
+    managed_rules: &[ManagedLifecycleRulePlan],
 ) -> Vec<LifecycleRule> {
-    let managed_rule = managed_lifecycle_rule(retention_days);
-    let mut updated = Vec::with_capacity(existing.len() + 1);
-    let mut inserted = false;
+    let mut desired_rules = managed_rules
+        .iter()
+        .map(|plan| {
+            (
+                managed_rule_key(&plan.pair_id),
+                managed_lifecycle_rule(plan),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut updated = Vec::with_capacity(existing.len() + desired_rules.len());
 
     for rule in existing {
-        if is_storage_goblin_managed_rule(rule) {
-            if !inserted {
-                updated.push(managed_rule.clone());
-                inserted = true;
+        if let Some(rule_key) = managed_rule_key_for_existing_rule(rule) {
+            if let Some(desired_rule) = desired_rules.remove(&rule_key) {
+                updated.push(desired_rule);
             }
         } else {
             updated.push(rule.clone());
         }
     }
 
-    if !inserted {
-        updated.push(managed_rule);
-    }
-
+    updated.extend(desired_rules.into_values());
     updated
 }
 
 pub fn remove_managed_lifecycle_rules(existing: &[LifecycleRule]) -> Vec<LifecycleRule> {
     existing
         .iter()
-        .filter(|rule| !is_storage_goblin_managed_rule(rule))
+        .filter(|rule| managed_rule_key_for_existing_rule(rule).is_none())
         .cloned()
         .collect()
 }
 
 pub fn reconcile_lifecycle_rules(
     existing: Option<&[LifecycleRule]>,
-    enabled: bool,
-    retention_days: u32,
+    managed_rules: &[ManagedLifecycleRulePlan],
 ) -> LifecycleRulesChange {
     let existing_rules = existing.unwrap_or(&[]);
 
-    if enabled {
-        let merged = upsert_lifecycle_rules(existing_rules, retention_days);
-        if merged == existing_rules {
-            LifecycleRulesChange::None
-        } else {
-            LifecycleRulesChange::Replace(merged)
-        }
-    } else {
+    if managed_rules.is_empty() {
         let cleaned = remove_managed_lifecycle_rules(existing_rules);
         if cleaned == existing_rules {
             LifecycleRulesChange::None
@@ -203,7 +233,59 @@ pub fn reconcile_lifecycle_rules(
         } else {
             LifecycleRulesChange::Replace(cleaned)
         }
+    } else {
+        let merged = upsert_lifecycle_rules(existing_rules, managed_rules);
+        if merged == existing_rules {
+            LifecycleRulesChange::None
+        } else {
+            LifecycleRulesChange::Replace(merged)
+        }
     }
+}
+
+fn normalized_pair_id(pair_id: &str) -> String {
+    let normalized = pair_id.trim_matches('/');
+    if normalized.is_empty() {
+        DEFAULT_REMOTE_BIN_PAIR_ID.into()
+    } else {
+        normalized.into()
+    }
+}
+
+fn managed_lifecycle_rule_id(pair_id: &str) -> String {
+    format!(
+        "{REMOTE_BIN_LIFECYCLE_RULE_ID}-{}",
+        normalized_pair_id(pair_id)
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || character == '-' {
+                    character
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+    )
+}
+
+fn managed_rule_key(pair_id: &str) -> String {
+    normalized_pair_id(pair_id)
+}
+
+fn managed_rule_key_for_existing_rule(rule: &LifecycleRule) -> Option<String> {
+    if is_legacy_storage_goblin_rule(rule) {
+        Some(LEGACY_NAMESPACE_RULE_KEY.into())
+    } else {
+        rule.id()
+            .and_then(pair_id_from_managed_rule_id)
+            .map(str::to_string)
+    }
+}
+
+fn pair_id_from_managed_rule_id(rule_id: &str) -> Option<&str> {
+    rule_id
+        .strip_prefix(&format!("{REMOTE_BIN_LIFECYCLE_RULE_ID}-"))
+        .filter(|pair_id| !pair_id.is_empty())
 }
 
 #[allow(deprecated)]
@@ -214,7 +296,7 @@ fn lifecycle_rule_prefix(rule: &LifecycleRule) -> Option<&str> {
 }
 
 #[allow(deprecated)]
-fn is_storage_goblin_managed_rule(rule: &LifecycleRule) -> bool {
+fn is_legacy_storage_goblin_rule(rule: &LifecycleRule) -> bool {
     let namespace_prefix = namespace_prefix();
     rule.id() == Some(REMOTE_BIN_LIFECYCLE_RULE_ID)
         || lifecycle_rule_prefix(rule) == Some(namespace_prefix.as_str())
@@ -230,6 +312,21 @@ pub fn key_matches_excluded_prefix(key: &str, excluded_prefixes: &[String]) -> b
 }
 
 #[cfg(test)]
+fn legacy_lifecycle_rule_for_test(retention_days: u32) -> LifecycleRule {
+    legacy_managed_lifecycle_rule(retention_days)
+}
+
+#[cfg(test)]
+fn managed_lifecycle_rule_id_for_test(pair_id: &str) -> String {
+    managed_lifecycle_rule_id(pair_id)
+}
+
+#[cfg(test)]
+fn managed_rule_key_for_test(rule: &LifecycleRule) -> Option<String> {
+    managed_rule_key_for_existing_rule(rule)
+}
+
+#[cfg(test)]
 mod tests {
     use aws_sdk_s3::types::{
         ExpirationStatus, LifecycleExpiration, LifecycleRule, LifecycleRuleFilter,
@@ -237,11 +334,12 @@ mod tests {
 
     use super::{
         bin_prefix_contains_bin_key, bin_prefix_for_path, deleted_directory_key,
-        deleted_object_key, key_matches_excluded_prefix, managed_lifecycle_rule, namespace_prefix,
-        normalize_bin_path, original_relative_path_from_bin_key,
+        deleted_object_key, key_matches_excluded_prefix, legacy_lifecycle_rule_for_test,
+        managed_lifecycle_rule, managed_lifecycle_rule_id_for_test, managed_lifecycle_rule_plan,
+        managed_rule_key_for_test, normalize_bin_path, original_relative_path_from_bin_key,
         original_relative_path_from_bin_key_for_pair, pair_bin_prefix, reconcile_lifecycle_rules,
         remove_managed_lifecycle_rules, upsert_lifecycle_rules, LifecycleRulesChange,
-        REMOTE_BIN_LIFECYCLE_RULE_ID,
+        DEFAULT_REMOTE_BIN_PAIR_ID,
     };
 
     #[test]
@@ -250,6 +348,23 @@ mod tests {
             pair_bin_prefix("pair-1"),
             ".storage-goblin-bin/pairs/pair-1/"
         );
+    }
+
+    #[test]
+    fn managed_lifecycle_rule_plan_scopes_to_pair_prefix() {
+        let plan = managed_lifecycle_rule_plan("pair-1", 30);
+
+        assert_eq!(plan.pair_id, "pair-1");
+        assert_eq!(plan.prefix, ".storage-goblin-bin/pairs/pair-1/");
+        assert_eq!(plan.retention_days, 30);
+    }
+
+    #[test]
+    fn managed_lifecycle_rule_plan_defaults_empty_pair_id() {
+        let plan = managed_lifecycle_rule_plan("", 14);
+
+        assert_eq!(plan.pair_id, DEFAULT_REMOTE_BIN_PAIR_ID);
+        assert_eq!(plan.prefix, ".storage-goblin-bin/pairs/default/");
     }
 
     #[test]
@@ -364,14 +479,14 @@ mod tests {
     }
 
     #[test]
-    fn managed_lifecycle_rule_targets_reserved_namespace() {
-        let rule = managed_lifecycle_rule(30);
-        let namespace_prefix = namespace_prefix();
+    fn managed_lifecycle_rule_targets_pair_prefix() {
+        let expected_id = managed_lifecycle_rule_id_for_test("pair-1");
+        let rule = managed_lifecycle_rule(&managed_lifecycle_rule_plan("pair-1", 30));
 
-        assert_eq!(rule.id(), Some(REMOTE_BIN_LIFECYCLE_RULE_ID));
+        assert_eq!(rule.id(), Some(expected_id.as_str()));
         assert_eq!(
             rule.filter().and_then(|filter| filter.prefix()),
-            Some(namespace_prefix.as_str())
+            Some(".storage-goblin-bin/pairs/pair-1/")
         );
         assert_eq!(
             rule.expiration().and_then(|expiration| expiration.days()),
@@ -381,7 +496,19 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_upsert_preserves_unrelated_rules_and_adds_managed_rule() {
+    fn lifecycle_rule_key_recognizes_pair_scoped_and_legacy_rules() {
+        let managed_rule = managed_lifecycle_rule(&managed_lifecycle_rule_plan("pair-1", 7));
+        let legacy_rule = legacy_lifecycle_rule_for_test(7);
+
+        assert_eq!(
+            managed_rule_key_for_test(&managed_rule).as_deref(),
+            Some("pair-1")
+        );
+        assert!(managed_rule_key_for_test(&legacy_rule).is_some());
+    }
+
+    #[test]
+    fn lifecycle_upsert_preserves_unrelated_rules_and_adds_managed_rules() {
         let unrelated_rule = LifecycleRule::builder()
             .id("user-archive-expiration")
             .filter(LifecycleRuleFilter::builder().prefix("archive/").build())
@@ -390,22 +517,30 @@ mod tests {
             .build()
             .expect("user rule should build");
 
-        let updated = upsert_lifecycle_rules(&[unrelated_rule.clone()], 14);
+        let updated = upsert_lifecycle_rules(
+            &[unrelated_rule.clone()],
+            &[
+                managed_lifecycle_rule_plan("pair-1", 14),
+                managed_lifecycle_rule_plan("pair-2", 21),
+            ],
+        );
 
-        assert_eq!(updated.len(), 2);
+        assert_eq!(updated.len(), 3);
         assert_eq!(updated[0], unrelated_rule);
-        assert_eq!(updated[1].id(), Some(REMOTE_BIN_LIFECYCLE_RULE_ID));
         assert_eq!(
-            updated[1]
-                .expiration()
-                .and_then(|expiration| expiration.days()),
-            Some(14)
+            managed_rule_key_for_test(&updated[1]).as_deref(),
+            Some("pair-1")
+        );
+        assert_eq!(
+            managed_rule_key_for_test(&updated[2]).as_deref(),
+            Some("pair-2")
         );
     }
 
     #[test]
-    fn lifecycle_upsert_replaces_existing_storage_goblin_rule() {
-        let old_managed_rule = managed_lifecycle_rule(7);
+    fn lifecycle_upsert_replaces_existing_storage_goblin_rules_and_removes_legacy_namespace_rule() {
+        let old_pair_rule = managed_lifecycle_rule(&managed_lifecycle_rule_plan("pair-1", 7));
+        let legacy_rule = legacy_lifecycle_rule_for_test(7);
         let unrelated_rule = LifecycleRule::builder()
             .id("user-archive-expiration")
             .filter(LifecycleRuleFilter::builder().prefix("archive/").build())
@@ -414,10 +549,15 @@ mod tests {
             .build()
             .expect("user rule should build");
 
-        let updated = upsert_lifecycle_rules(&[old_managed_rule, unrelated_rule.clone()], 21);
+        let updated = upsert_lifecycle_rules(
+            &[old_pair_rule, legacy_rule, unrelated_rule.clone()],
+            &[
+                managed_lifecycle_rule_plan("pair-1", 21),
+                managed_lifecycle_rule_plan("pair-2", 30),
+            ],
+        );
 
-        assert_eq!(updated.len(), 2);
-        assert_eq!(updated[0].id(), Some(REMOTE_BIN_LIFECYCLE_RULE_ID));
+        assert_eq!(updated.len(), 3);
         assert_eq!(
             updated[0]
                 .expiration()
@@ -425,11 +565,16 @@ mod tests {
             Some(21)
         );
         assert_eq!(updated[1], unrelated_rule);
+        assert_eq!(
+            managed_rule_key_for_test(&updated[2]).as_deref(),
+            Some("pair-2")
+        );
     }
 
     #[test]
-    fn lifecycle_remove_managed_rule_preserves_unrelated_rules() {
-        let managed_rule = managed_lifecycle_rule(7);
+    fn lifecycle_remove_managed_rules_preserves_unrelated_rules() {
+        let managed_rule = managed_lifecycle_rule(&managed_lifecycle_rule_plan("pair-1", 7));
+        let legacy_rule = legacy_lifecycle_rule_for_test(7);
         let unrelated_rule = LifecycleRule::builder()
             .id("user-archive-expiration")
             .filter(LifecycleRuleFilter::builder().prefix("archive/").build())
@@ -438,17 +583,27 @@ mod tests {
             .build()
             .expect("user rule should build");
 
-        let updated = remove_managed_lifecycle_rules(&[managed_rule, unrelated_rule.clone()]);
+        let updated =
+            remove_managed_lifecycle_rules(&[managed_rule, legacy_rule, unrelated_rule.clone()]);
 
         assert_eq!(updated, vec![unrelated_rule]);
     }
 
     #[test]
-    fn lifecycle_reconcile_returns_none_when_enabled_rule_already_matches() {
-        let existing = vec![managed_lifecycle_rule(30)];
+    fn lifecycle_reconcile_returns_none_when_desired_rules_already_match() {
+        let existing = vec![
+            managed_lifecycle_rule(&managed_lifecycle_rule_plan("pair-1", 30)),
+            managed_lifecycle_rule(&managed_lifecycle_rule_plan("pair-2", 14)),
+        ];
 
         assert_eq!(
-            reconcile_lifecycle_rules(Some(&existing), true, 30),
+            reconcile_lifecycle_rules(
+                Some(&existing),
+                &[
+                    managed_lifecycle_rule_plan("pair-1", 30),
+                    managed_lifecycle_rule_plan("pair-2", 14),
+                ]
+            ),
             LifecycleRulesChange::None
         );
     }
@@ -464,22 +619,49 @@ mod tests {
             .expect("user rule should build");
 
         assert_eq!(
-            reconcile_lifecycle_rules(Some(&[unrelated_rule]), false, 7),
+            reconcile_lifecycle_rules(Some(&[unrelated_rule]), &[]),
             LifecycleRulesChange::None
         );
         assert_eq!(
-            reconcile_lifecycle_rules(None, false, 7),
+            reconcile_lifecycle_rules(None, &[]),
             LifecycleRulesChange::None
         );
     }
 
     #[test]
     fn lifecycle_reconcile_deletes_bucket_lifecycle_when_disabling_last_managed_rule() {
-        let existing = vec![managed_lifecycle_rule(7)];
+        let existing = vec![managed_lifecycle_rule(&managed_lifecycle_rule_plan(
+            "pair-1", 7,
+        ))];
 
         assert_eq!(
-            reconcile_lifecycle_rules(Some(&existing), false, 7),
+            reconcile_lifecycle_rules(Some(&existing), &[]),
             LifecycleRulesChange::DeleteBucketLifecycle
+        );
+    }
+
+    #[test]
+    fn lifecycle_reconcile_replaces_legacy_namespace_rule_with_pair_scoped_rules() {
+        let existing = vec![legacy_lifecycle_rule_for_test(7)];
+
+        let LifecycleRulesChange::Replace(updated) = reconcile_lifecycle_rules(
+            Some(&existing),
+            &[
+                managed_lifecycle_rule_plan("pair-1", 7),
+                managed_lifecycle_rule_plan("pair-2", 14),
+            ],
+        ) else {
+            panic!("legacy namespace rule should be replaced");
+        };
+
+        assert_eq!(updated.len(), 2);
+        assert_eq!(
+            managed_rule_key_for_test(&updated[0]).as_deref(),
+            Some("pair-1")
+        );
+        assert_eq!(
+            managed_rule_key_for_test(&updated[1]).as_deref(),
+            Some("pair-2")
         );
     }
 }

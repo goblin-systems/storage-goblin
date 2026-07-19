@@ -66,6 +66,7 @@ export interface FileTreeOptions {
   onDelete?: (target: DeleteTarget) => void;
   onRestore?: (entry: FileEntry) => void | Promise<void>;
   onStorageClass?: (path: string, currentStorageClass: string | null) => void;
+  getStorageClassActionState?: (entry: FileEntry) => { disabled: boolean; title: string };
   onResolveConflict?: (entry: FileEntry) => void;
   /** Version counts per file path. When provided, version badges and history buttons are shown. */
   versionCounts?: Map<string, number>;
@@ -172,7 +173,7 @@ export const STATUS_TOOLTIP_MAP: Record<FileEntryStatus, string> = {
   "remote-only": "Only in cloud storage",
   "review-required": "Requires review before syncing changes",
   "conflict": "Sync conflict needs attention",
-  "glacier": "Archived in Glacier storage",
+  "glacier": "Archived in cold storage",
   "deleted": "Deleted and available to restore",
 };
 
@@ -446,6 +447,15 @@ function renderVersionsButtonHtml(escapedPath: string): string {
   ].join("");
 }
 
+function renderStorageClassButtonHtml(escapedPath: string, title: string, disabled: boolean): string {
+  const escapedTitle = escapeHtml(title);
+  return [
+    `<button class="icon-btn icon-btn-sm tree-storage-class-btn" type="button" data-storage-class-path="${escapedPath}" title="${escapedTitle}" aria-label="${escapedTitle}"${disabled ? " disabled" : ""}>`,
+    `<i data-lucide="snowflake"></i>`,
+    `</button>`,
+  ].join("");
+}
+
 function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<string>, versionCounts?: Map<string, number>): string {
   const isLeaf = isFileNode(node);
   const escapedPath = escapeHtml(node.path);
@@ -457,6 +467,8 @@ function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<st
     const checked = checkedLeafPaths.has(node.path) ? " checked" : "";
     const disabled = isEntryCheckboxDisabled(node.entry, mode) ? " disabled" : "";
     const versionCount = versionCounts?.get(node.path);
+    const storageClassAction = optionsForRender?.getStorageClassActionState?.(node.entry)
+      ?? { disabled: false, title: "Change archive storage tier" };
     return [
       `<li class="tree-item" data-value="${escapedPath}">`,
       `<div class="tree-row" style="--tree-depth: ${node.depth}">`,
@@ -486,9 +498,7 @@ function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<st
             : []),
           ...(canMutateLiveFileEntry(node.entry)
             ? [
-              `<button class="icon-btn icon-btn-sm tree-storage-class-btn" type="button" data-storage-class-path="${escapedPath}">`,
-              `<i data-lucide="snowflake"></i>`,
-              `</button>`,
+              renderStorageClassButtonHtml(escapedPath, storageClassAction.title, storageClassAction.disabled),
               `<button class="icon-btn icon-btn-sm tree-delete-btn" type="button" data-delete-path="${escapedPath}" data-delete-kind="file">`,
               `<i data-lucide="trash-2"></i>`,
               `</button>`,
@@ -545,6 +555,8 @@ function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<st
   ].join("");
 }
 
+let optionsForRender: Pick<FileTreeOptions, "getStorageClassActionState"> | null = null;
+
 function renderTreeHtml(roots: TreeNode[], mode: FileTreeMode, checkedLeafPaths: Set<string>, versionCounts?: Map<string, number>): string {
   return roots.map((node) => renderNode(node, mode, checkedLeafPaths, versionCounts)).join("");
 }
@@ -576,7 +588,9 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
   // Build and inject HTML
   const tree = buildTree(entries);
   const checkedLeafPaths = getCheckedLeafPaths(entries, checkedPaths, mode);
+  optionsForRender = { getStorageClassActionState: options.getStorageClassActionState };
   treeEl.innerHTML = renderTreeHtml(tree, mode, checkedLeafPaths, options.versionCounts);
+  optionsForRender = null;
 
   // Render lucide icon placeholders into SVGs
   applyIcons();
@@ -588,7 +602,7 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
   });
 
   // Delete button delegation – fire onDelete for .tree-delete-btn clicks
-  treeEl.addEventListener("click", (e) => {
+  const handleRevealClick = (e: Event) => {
     const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".tree-reveal-btn");
     if (!btn) return;
     e.stopPropagation();
@@ -596,9 +610,10 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
     if (path && options.onReveal) {
       options.onReveal(path);
     }
-  });
+  };
+  treeEl.addEventListener("click", handleRevealClick);
 
-  treeEl.addEventListener("click", (e) => {
+  const handleDeleteClick = (e: Event) => {
     const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".tree-delete-btn");
     if (!btn) return;
     e.stopPropagation();
@@ -607,9 +622,10 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
     if (path && (kind === "file" || kind === "directory") && options.onDelete) {
       options.onDelete({ path, kind });
     }
-  });
+  };
+  treeEl.addEventListener("click", handleDeleteClick);
 
-  treeEl.addEventListener("click", (e) => {
+  const handleRestoreClick = (e: Event) => {
     const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".tree-restore-btn");
     if (!btn) return;
     e.stopPropagation();
@@ -618,10 +634,11 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
       const entry = JSON.parse(encodedEntry) as FileEntry;
       runRestoreAction(btn, () => options.onRestore?.(entry));
     }
-  });
+  };
+  treeEl.addEventListener("click", handleRestoreClick);
 
   // Storage class button delegation
-  treeEl.addEventListener("click", (e) => {
+  const handleStorageClassClick = (e: Event) => {
     const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".tree-storage-class-btn");
     if (!btn) return;
     e.stopPropagation();
@@ -630,9 +647,10 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
       const entry = entries.find((entry) => entry.path === path);
       options.onStorageClass(path, entry?.storageClass ?? null);
     }
-  });
+  };
+  treeEl.addEventListener("click", handleStorageClassClick);
 
-  treeEl.addEventListener("click", (e) => {
+  const handleResolveClick = (e: Event) => {
     const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".tree-resolve-btn");
     if (!btn) return;
     e.stopPropagation();
@@ -643,9 +661,10 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
         options.onResolveConflict(entry);
       }
     }
-  });
+  };
+  treeEl.addEventListener("click", handleResolveClick);
 
-  treeEl.addEventListener("click", (e) => {
+  const handleVersionsClick = (e: Event) => {
     const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".tree-versions-btn");
     if (!btn) return;
     e.stopPropagation();
@@ -656,7 +675,8 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
         options.onViewVersions(entry);
       }
     }
-  });
+  };
+  treeEl.addEventListener("click", handleVersionsClick);
 
   // Reconcile parent checkbox state bottom-up (no events, no onChange firing).
   // Walk all directory items (those with a .tree-branch child), deepest first,
@@ -699,6 +719,12 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
         treeHandle.destroy();
         treeHandle = null;
       }
+      treeEl.removeEventListener("click", handleRevealClick);
+      treeEl.removeEventListener("click", handleDeleteClick);
+      treeEl.removeEventListener("click", handleRestoreClick);
+      treeEl.removeEventListener("click", handleStorageClassClick);
+      treeEl.removeEventListener("click", handleResolveClick);
+      treeEl.removeEventListener("click", handleVersionsClick);
     },
   };
 }

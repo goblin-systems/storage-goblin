@@ -409,6 +409,24 @@ describe("renderFileTree", () => {
     expect(canMutateLiveFileEntry(entry)).toBe(true);
   });
 
+  it("renders disabled archive storage actions when capability is unavailable", () => {
+    const entry = fileEntry({ path: "normal.txt", status: "remote-only", hasLocalCopy: false });
+
+    renderFileTree({
+      treeEl,
+      emptyStateEl,
+      entries: [entry],
+      getStorageClassActionState: () => ({
+        disabled: true,
+        title: "Unsupported for this provider.",
+      }),
+    });
+
+    const button = treeEl.querySelector<HTMLButtonElement>('.tree-item[data-value="normal.txt"] .tree-storage-class-btn');
+    expect(button?.disabled).toBe(true);
+    expect(button?.title).toBe("Unsupported for this provider.");
+  });
+
   it("disables review-required directory checkboxes", () => {
     const entries: FileEntry[] = [
       directoryEntry({ path: "review-dir", status: "review-required", hasLocalCopy: false }),
@@ -802,6 +820,25 @@ describe("renderFileTree", () => {
 
       expect(onReveal).toHaveBeenCalledOnce();
       expect(onReveal).toHaveBeenCalledWith(revealBtn!.dataset.revealPath);
+    });
+
+    it("does not duplicate reveal handlers after destroy and rerender", () => {
+      const onReveal = vi.fn();
+      const entries: FileEntry[] = [
+        fileEntry({ path: "photos/img.jpg" }),
+      ];
+
+      const firstHandle = renderFileTree({ treeEl, emptyStateEl, entries, onReveal });
+      firstHandle.destroy();
+
+      renderFileTree({ treeEl, emptyStateEl, entries, onReveal });
+
+      const revealBtn = treeEl.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/img.jpg"] .tree-reveal-btn');
+      expect(revealBtn).not.toBeNull();
+      revealBtn!.click();
+
+      expect(onReveal).toHaveBeenCalledOnce();
+      expect(onReveal).toHaveBeenCalledWith("photos/img.jpg");
     });
   });
 });

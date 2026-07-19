@@ -11,7 +11,7 @@ import {
 } from "@goblin-systems/goblin-design-system";
 import { createNativeActivity, createUiActivity } from "./activity";
 import { createStorageGoblinClient } from "./client";
-import { createAppDom } from "./dom";
+import { createAppDom, type AppDom } from "./dom";
 import { renderFileTree, type DeleteTarget, type FileEntry, type FileTreeHandle, type FileTreeMode } from "./file-tree";
 import {
   applyStoredProfile,
@@ -22,6 +22,17 @@ import {
 } from "./profile";
 import { createProfilePersistence } from "./persistence";
 import { describeSyncStatus, formatTimestamp, getSyncOverviewStats } from "./status";
+import {
+  capabilitiesFromProviderDefinition,
+  defaultProviderDefinition,
+  defaultProviderCapabilities,
+  describeCapabilityAvailability,
+  getProviderCredentialKind,
+  getProviderCredentialLabel,
+  getProviderLabel,
+  isCapabilityAvailable,
+  normalizeProvider,
+} from "./types";
 import type {
   ActivityDebugLogState,
   ActivityItem,
@@ -36,6 +47,10 @@ import type {
   FileVersionEntry,
   LocationSyncStatus,
   PermissionProbeSummary,
+  Provider,
+  ProviderDefinition,
+  ProviderCapabilities,
+  ProviderCapabilityStatus,
   StorageProfileDraft,
   SyncLocation,
   SyncLocationDraft,
@@ -64,6 +79,8 @@ type FileTreeSnapshot = {
   viewKey: string;
   entries: FileEntry[];
   entriesJson: string;
+  versionCounts?: Map<string, number>;
+  versionCountsJson?: string;
 };
 
 type AsyncConfirmOptions = {
@@ -136,8 +153,11 @@ function describeRemoteBinBehavior(enabled: boolean, retentionDays: number): str
 }
 
 function describeDeleteBehavior(location: SyncLocation): string {
+  const provider = location.provider;
   if (location.objectVersioningEnabled) {
-    return "Deleting a file removes the local copy immediately and adds an S3 delete marker. You can restore deleted objects from bucket version history.";
+    return provider === "aws"
+      ? "Deleting a file removes the local copy immediately and adds an S3 delete marker. You can restore deleted objects from bucket version history."
+      : "Deleting a file removes the local copy immediately and creates a recoverable deleted object state in object version history.";
   }
 
   return describeRemoteBinBehavior(location.remoteBin.enabled, location.remoteBin.retentionDays);
@@ -154,7 +174,9 @@ function parseRemoteBinRetentionDays(value: string): number {
 
 function getDeleteConfirmationMessage(path: string, location: SyncLocation): string {
   if (location.objectVersioningEnabled) {
-    return `"${path}" will be removed from local storage immediately. The remote object will be deleted using S3 object versioning so it can be restored from version history.`;
+    return location.provider === "aws"
+      ? `"${path}" will be removed from local storage immediately. The remote object will be deleted using S3 object versioning so it can be restored from version history.`
+      : `"${path}" will be removed from local storage immediately. The remote object will be deleted using object version history so it can be restored later.`;
   }
 
   if (!location.remoteBin.enabled) {
@@ -168,7 +190,9 @@ function getDeleteConfirmationMessage(path: string, location: SyncLocation): str
 
 function getFolderDeleteConfirmationMessage(path: string, location: SyncLocation): string {
   if (location.objectVersioningEnabled) {
-    return `Folder "${path}" and all nested contents will be removed from local storage immediately. Remote objects in this folder will be deleted using S3 object versioning so they can be restored from version history.`;
+    return location.provider === "aws"
+      ? `Folder "${path}" and all nested contents will be removed from local storage immediately. Remote objects in this folder will be deleted using S3 object versioning so they can be restored from version history.`
+      : `Folder "${path}" and all nested contents will be removed from local storage immediately. Remote objects in this folder will be deleted using object version history so they can be restored later.`;
   }
 
   if (!location.remoteBin.enabled) {
@@ -178,6 +202,39 @@ function getFolderDeleteConfirmationMessage(path: string, location: SyncLocation
   const retentionDays = location.remoteBin.retentionDays;
   const retentionLabel = retentionDays === 1 ? "1 day" : `${retentionDays} days`;
   return `Folder "${path}" and all nested contents will be removed from local storage immediately. Remote objects in this folder will be moved into this sync location's remote bin for ${retentionLabel}.`;
+}
+
+function getLocationBinLabel(location: SyncLocation): string {
+  return location.objectVersioningEnabled ? "Deleted" : "Bin";
+}
+
+function canViewLocationBin(location: SyncLocation): boolean {
+  const capabilities = getLocationCapabilities(location);
+  return location.objectVersioningEnabled || isCapabilityAvailable(capabilities.remoteBin);
+}
+
+function getVersionedDeleteToastMessage(location: SyncLocation, subject: "file" | "folder"): string {
+  if (location.provider === "aws") {
+    return subject === "file"
+      ? "File deleted locally and marked deleted in S3 version history."
+      : "Folder deleted locally and marked deleted in S3 version history.";
+  }
+
+  return subject === "file"
+    ? "File deleted locally and marked deleted in object version history."
+    : "Folder deleted locally and marked deleted in object version history.";
+}
+
+function getVersionedDeleteActivityMessage(location: SyncLocation, subject: "file" | "folder"): string {
+  if (location.provider === "aws") {
+    return subject === "file"
+      ? "Deleted file locally and added S3 delete marker"
+      : "Deleted folder locally and added S3 delete markers";
+  }
+
+  return subject === "file"
+    ? "Deleted file locally and added object-version history marker"
+    : "Deleted folder locally and added object-version history markers";
 }
 
 function getLocationSyncStatusId(location: LocationSyncStatus): string {
@@ -820,15 +877,204 @@ function createAsyncConfirmController(): AsyncConfirmController {
   };
 }
 
-function createUnavailableCredential(id: string, name?: string | null): CredentialSummary {
-  return {
-    id,
-    name: name?.trim() || "Missing credential",
-    ready: false,
-    validationStatus: "untested",
-    lastTestedAt: null,
-    lastTestMessage: null,
-  };
+function createUnavailableCredential(id: string, provider: Provider, name?: string | null): CredentialSummary {
+  return provider === "gcs"
+    ? {
+        id,
+        name: name?.trim() || "Missing credential",
+        provider,
+        ready: false,
+        validationStatus: "untested",
+        lastTestedAt: null,
+        lastTestMessage: null,
+        summary: null,
+      }
+    : {
+        id,
+        name: name?.trim() || "Missing credential",
+        provider,
+        ready: false,
+        validationStatus: "untested",
+        lastTestedAt: null,
+        lastTestMessage: null,
+        summary: null,
+      };
+}
+
+function describeCredentialSummary(credential: CredentialSummary): string | null {
+  if (credential.provider === "aws") {
+    return credential.summary?.accessKeyIdPreview ?? null;
+  }
+
+  return credential.summary?.clientEmail
+    ?? credential.summary?.projectId
+    ?? null;
+}
+
+function getSelectedCredentialContextLabel(profile: StorageProfileDraft): string {
+  return profile.bucket ? `Selected for bucket "${profile.bucket}"` : "Selected for current setup";
+}
+
+function getEffectiveProfileProvider(profile: StorageProfileDraft): Provider {
+  return profile.selectedCredential?.provider ?? profile.provider ?? "aws";
+}
+
+function getLocationCapabilities(location: Pick<SyncLocationDraft, "provider" | "providerDefinition" | "capabilities">): ProviderCapabilities {
+  return location.capabilities
+    ?? capabilitiesFromProviderDefinition(
+      location.providerDefinition ?? defaultProviderDefinition(location.provider),
+      location.provider,
+    )
+    ?? defaultProviderCapabilities(location.provider);
+}
+
+function getLocationProviderDefinition(location: Pick<SyncLocationDraft, "provider" | "providerDefinition" | "capabilities">): ProviderDefinition {
+  return location.providerDefinition ?? defaultProviderDefinition(location.provider);
+}
+
+function getProviderLocationLabel(provider: Provider): string {
+  return provider === "aws" ? "Region" : "Bucket location";
+}
+
+function getProviderLocationHelp(provider: Provider): string {
+  return provider === "aws"
+    ? "Choose the AWS region for this bucket when creation or validation requires it."
+    : "Use the bucket location or leave blank when Google Cloud Storage can infer it automatically.";
+}
+
+function getProviderLocationPlaceholder(provider: Provider): string {
+  return provider === "aws" ? "Auto-detect" : "Auto-detect or enter a GCS location such as US, EU, us-central1, or europe-west2";
+}
+
+function describeCapabilityState(label: string, capability: ProviderCapabilityStatus): string {
+  switch (capability.status) {
+    case "unsupported":
+      return `${label}: unsupported`;
+    case "permission-unavailable":
+      return `${label}: permission required`;
+    case "config-unavailable":
+      return `${label}: setup required`;
+    case "runtime-unavailable":
+      return `${label}: temporarily unavailable`;
+    case "supported":
+    default:
+      return `${label}: available`;
+  }
+}
+
+function describeVersionHistoryLabel(provider: Provider): string {
+  return provider === "aws" ? "bucket version history" : "object version history";
+}
+
+function getArchiveActionLabel(provider: Provider): string {
+  return provider === "aws" ? "Archive storage" : "Storage class";
+}
+
+function setControlDisabledState(control: HTMLElement, disabled: boolean, reason?: string | null) {
+  if ("disabled" in control) {
+    (control as HTMLInputElement | HTMLButtonElement | HTMLSelectElement | HTMLTextAreaElement).disabled = disabled;
+  }
+  if (disabled && reason) {
+    control.setAttribute("title", reason);
+    control.setAttribute("aria-label", reason);
+  } else {
+    control.removeAttribute("title");
+    control.removeAttribute("aria-label");
+  }
+}
+
+function renderCredentialFormState(dom: AppDom, provider: Provider) {
+  const isAws = getProviderCredentialKind(provider) === "access-key";
+  dom.credentialProviderHelp.textContent = isAws
+    ? "Use AWS access keys for S3."
+    : "Paste a Google Cloud service account JSON document for GCS.";
+  dom.credentialAccessKeyField.hidden = !isAws;
+  dom.credentialSecretKeyField.hidden = !isAws;
+  dom.credentialServiceAccountField.hidden = isAws;
+
+  dom.credentialAccessKeyInput.placeholder = isAws ? "AKIA..." : "";
+  dom.credentialSecretKeyInput.placeholder = isAws ? "Stored securely after creation" : "";
+}
+
+function getCapabilityBadgeText(capability: ProviderCapabilityStatus): string {
+  switch (capability.status) {
+    case "unsupported": return "Unsupported";
+    case "permission-unavailable": return "Permission required";
+    case "config-unavailable": return "Setup required";
+    case "runtime-unavailable": return "Temporarily unavailable";
+    case "supported":
+    default:
+      return "Available";
+  }
+}
+
+function setLocationOptions(select: HTMLSelectElement, options: Array<{ value: string; label: string }>, currentValue: string) {
+  const normalizedCurrent = currentValue.trim();
+  select.innerHTML = "";
+  for (const optionDef of options) {
+    const option = document.createElement("option");
+    option.value = optionDef.value;
+    option.textContent = optionDef.label;
+    select.append(option);
+  }
+
+  if (options.some((option) => option.value === normalizedCurrent)) {
+    select.value = normalizedCurrent;
+    return;
+  }
+
+  if (normalizedCurrent) {
+    const option = document.createElement("option");
+    option.value = normalizedCurrent;
+    option.textContent = normalizedCurrent;
+    select.append(option);
+    select.value = normalizedCurrent;
+    return;
+  }
+
+  select.value = options[0]?.value ?? "";
+}
+
+function getProviderLocationOptions(definition: ProviderDefinition): Array<{ value: string; label: string }> {
+  if (definition.provider === "gcs") {
+    return [
+      { value: "", label: "Auto-detect from bucket" },
+      { value: "US", label: "US multi-region" },
+      { value: "EU", label: "EU multi-region" },
+      { value: "ASIA", label: "Asia multi-region" },
+      { value: "us-central1", label: "Iowa — us-central1" },
+      { value: "us-east1", label: "South Carolina — us-east1" },
+      { value: "us-east4", label: "Northern Virginia — us-east4" },
+      { value: "us-west1", label: "Oregon — us-west1" },
+      { value: "us-west2", label: "Los Angeles — us-west2" },
+      { value: "northamerica-northeast1", label: "Montréal — northamerica-northeast1" },
+      { value: "southamerica-east1", label: "São Paulo — southamerica-east1" },
+      { value: "europe-west1", label: "Belgium — europe-west1" },
+      { value: "europe-west2", label: "London — europe-west2" },
+      { value: "europe-west4", label: "Netherlands — europe-west4" },
+      { value: "europe-central2", label: "Warsaw — europe-central2" },
+      { value: "asia-east1", label: "Taiwan — asia-east1" },
+      { value: "asia-northeast1", label: "Tokyo — asia-northeast1" },
+      { value: "asia-southeast1", label: "Singapore — asia-southeast1" },
+      { value: "australia-southeast1", label: "Sydney — australia-southeast1" },
+    ];
+  }
+
+  return [
+    { value: "", label: "Auto-detect" },
+    { value: "us-east-1", label: "US East (N. Virginia) — us-east-1" },
+    { value: "us-east-2", label: "US East (Ohio) — us-east-2" },
+    { value: "us-west-1", label: "US West (N. California) — us-west-1" },
+    { value: "us-west-2", label: "US West (Oregon) — us-west-2" },
+    { value: "eu-west-1", label: "Europe (Ireland) — eu-west-1" },
+    { value: "eu-west-2", label: "Europe (London) — eu-west-2" },
+    { value: "eu-central-1", label: "Europe (Frankfurt) — eu-central-1" },
+    { value: "ap-southeast-1", label: "Asia Pacific (Singapore) — ap-southeast-1" },
+    { value: "ap-southeast-2", label: "Asia Pacific (Sydney) — ap-southeast-2" },
+    { value: "ap-northeast-1", label: "Asia Pacific (Tokyo) — ap-northeast-1" },
+    { value: "ca-central-1", label: "Canada (Central) — ca-central-1" },
+    { value: "sa-east-1", label: "South America (São Paulo) — sa-east-1" },
+  ];
 }
 
 function getCredentialValidationLabel(credential: CredentialSummary): string {
@@ -907,11 +1153,12 @@ function describeSelectedCredentialState(profile: StorageProfileDraft): string {
     return "Selected credential reference exists, but its stored secret is missing. Recreate or replace it.";
   }
 
-  return `Selected credential is stored securely. ${getCredentialTestSentence(profile.selectedCredential)}`;
+  return `Selected credential is stored securely for ${getProviderCredentialLabel(profile.selectedCredential.provider)}. ${getCredentialTestSentence(profile.selectedCredential)}`;
 }
 
 function buildCredentialTestContext(profile: StorageProfileDraft): CredentialTestContext {
   return {
+    provider: getEffectiveProfileProvider(profile),
     region: profile.region,
     bucket: profile.bucket,
   };
@@ -964,10 +1211,13 @@ function syncProfileCredentialState(
   }
 
   const availableCredential = credentials.find((credential) => credential.id === credentialProfileId) ?? null;
+  const fallbackProvider = profile.selectedCredential?.id === credentialProfileId
+    ? profile.selectedCredential.provider
+    : profile.provider;
   const selectedCredential = availableCredential
     ?? (profile.selectedCredential?.id === credentialProfileId
-      ? createUnavailableCredential(credentialProfileId, profile.selectedCredential.name)
-      : createUnavailableCredential(credentialProfileId));
+      ? createUnavailableCredential(credentialProfileId, fallbackProvider, profile.selectedCredential.name)
+      : createUnavailableCredential(credentialProfileId, fallbackProvider));
 
   return normalizeProfileDraft({
     ...profile,
@@ -997,6 +1247,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     activeLocationId: string | null;
     activeLocationViewMode: FileTreeMode;
     profile: StorageProfileDraft;
+    providerDefinitions: ProviderDefinition[];
     credentials: CredentialSummary[];
     syncLocations: SyncLocation[];
     status: SyncStatusWithLocations;
@@ -1008,6 +1259,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     activeLocationId: null,
     activeLocationViewMode: "live",
     profile: DEFAULT_PROFILE_DRAFT,
+    providerDefinitions: [],
     credentials: [],
     syncLocations: [],
     status: createInitialStatus(),
@@ -1073,6 +1325,21 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       : undefined;
   }
 
+  function findProviderDefinition(provider: Provider): ProviderDefinition {
+    return state.providerDefinitions.find((definition) => definition.provider === provider)
+      ?? (state.profile.providerDefinition?.provider === provider ? state.profile.providerDefinition : null)
+      ?? defaultProviderDefinition(provider);
+  }
+
+  function hydrateSyncLocationMetadata(location: SyncLocation): SyncLocation {
+    const providerDefinition = location.providerDefinition ?? findProviderDefinition(location.provider);
+    return {
+      ...location,
+      providerDefinition,
+      capabilities: location.capabilities ?? capabilitiesFromProviderDefinition(providerDefinition, location.provider),
+    };
+  }
+
   function getSavedActiveLocation() {
     return state.activeLocationId
       ? state.profile.syncLocations.find((location) => location.id === state.activeLocationId)
@@ -1093,11 +1360,18 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     return getViewSnapshot()?.entries ?? null;
   }
 
+  function serializeVersionCounts(versionCounts: Map<string, number> | undefined): string | undefined {
+    return versionCounts ? JSON.stringify(Array.from(versionCounts.entries())) : undefined;
+  }
+
   function setCurrentViewEntries(entries: FileEntry[], viewKey: string = getFileTreeViewKey()) {
+    const versionCounts = state.activeLocationViewMode === "live" ? activeVersionCounts : undefined;
     fileTreeSnapshots.set(viewKey, {
       viewKey,
       entries,
       entriesJson: JSON.stringify(entries),
+      versionCounts,
+      versionCountsJson: serializeVersionCounts(versionCounts),
     });
   }
 
@@ -1162,7 +1436,12 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     setFileTreeLoadingVisible(false);
   }
 
-  function renderFileTreeEntries(entries: FileEntry[], mode: FileTreeMode) {
+  function renderFileTreeEntries(
+    entries: FileEntry[],
+    mode: FileTreeMode,
+    versionCounts: Map<string, number> | undefined = mode === "live" ? activeVersionCounts : undefined,
+  ) {
+    const activeLocation = getActiveLocation();
     destroyFileTree();
     fileTreeHandle = renderFileTree({
       treeEl: dom.fileTree,
@@ -1180,8 +1459,21 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       onDelete: mode === "live" ? handleDelete : undefined,
       onRestore: mode === "bin" ? handleBinRestore : undefined,
       onStorageClass: mode === "live" ? handleStorageClassChange : undefined,
+      getStorageClassActionState: mode === "live"
+        ? (entry) => {
+          const archiveCapability = activeLocation
+            ? getLocationCapabilities(activeLocation).archiveStorage
+            : defaultProviderCapabilities("aws").archiveStorage;
+          return {
+            disabled: !isCapabilityAvailable(archiveCapability),
+            title: isCapabilityAvailable(archiveCapability)
+              ? `Change ${getArchiveActionLabel(activeLocation?.provider ?? "aws").toLowerCase()}`
+              : describeCapabilityAvailability(archiveCapability),
+          };
+        }
+        : undefined,
       onResolveConflict: mode === "live" ? handleResolveConflict : undefined,
-      versionCounts: mode === "live" ? activeVersionCounts : undefined,
+      versionCounts: mode === "live" ? versionCounts : undefined,
       onViewVersions: mode === "live" ? handleViewVersions : undefined,
     });
     renderBinToolbar();
@@ -1407,7 +1699,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   function getBinPurgeConfirmationMessage(location: SyncLocation, count: number): string {
     const itemLabel = count === 1 ? "selected bin entry" : `${count} selected bin entries`;
     return location.objectVersioningEnabled
-      ? `Purge ${itemLabel}? This permanently deletes the selected object versions from S3 version history. This cannot be undone.`
+      ? `Purge ${itemLabel}? This permanently deletes the selected object versions from ${describeVersionHistoryLabel(location.provider)}. This cannot be undone.`
       : `Purge ${itemLabel}? This permanently deletes them from the remote bin. This cannot be undone.`;
   }
 
@@ -1437,7 +1729,6 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   function openDialog(dialogId: DialogId) {
     closeAllDialogs();
     if (dialogId === "locations") {
-      renderLocationCredentialOptions();
       resetLocationForm();
     }
     state.activeDialog = dialogId;
@@ -1518,13 +1809,15 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     dom.credentialsList.innerHTML = "";
 
     const count = state.credentials.length;
+    const selectedCredentialProvider = normalizeProvider(dom.credentialProviderSelect.value);
     dom.credentialsCountBadge.textContent = `${count} saved`;
     dom.credentialsSupportBadge.textContent = client.supportsNativeProfilePersistence ? "Desktop app" : "Preview only";
     dom.credentialsSupportBadge.className = `badge ${client.supportsNativeProfilePersistence ? "success" : "default"}`;
     dom.credentialsSupportText.textContent = client.supportsNativeProfilePersistence
-      ? "Create a named credential once, then reuse it across sync locations without re-entering raw keys."
+      ? "Create provider-specific named credentials once, then reuse them across sync locations without re-entering secrets."
       : "Browser preview shows the credential workflow but does not create or store real credentials.";
     dom.createCredentialBtn.disabled = !client.supportsNativeProfilePersistence;
+    renderCredentialFormState(dom, selectedCredentialProvider);
 
     dom.credentialsListStatus.textContent = count > 0
       ? "Saved credentials show secure storage state and test state separately."
@@ -1547,9 +1840,11 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
       const hint = document.createElement("span");
       hint.className = "hint";
+      const providerLabel = getProviderLabel(credential.provider);
+      const summaryText = describeCredentialSummary(credential);
       hint.textContent = credential.id === state.profile.credentialProfileId
-        ? `Selected for this bucket · ${getCredentialStorageLabel(credential)} · ${getCredentialValidationLabel(credential)}`
-        : `${getCredentialStorageLabel(credential)} · ${getCredentialValidationLabel(credential)}`;
+        ? `${getSelectedCredentialContextLabel(state.profile)} · ${providerLabel} · ${getCredentialStorageLabel(credential)} · ${getCredentialValidationLabel(credential)}${summaryText ? ` · ${summaryText}` : ""}`
+        : `${providerLabel} · ${getCredentialStorageLabel(credential)} · ${getCredentialValidationLabel(credential)}${summaryText ? ` · ${summaryText}` : ""}`;
 
       meta.append(name, hint);
 
@@ -1717,10 +2012,11 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
     if (state.activeLocationViewMode === "bin" && state.activeLocationId) {
       const label = activeLocation?.label || activeLocation?.bucket || "selected location";
-      dom.statusPhaseInline.textContent = "Bin";
+      dom.statusPhaseInline.textContent = activeLocation ? getLocationBinLabel(activeLocation) : "Deleted";
       dom.statusPhaseInline.className = "badge danger";
-      dom.statusSummary.textContent = `Viewing ${label} Bin. Restore entries back into the live sync location.`;
-      dom.windowSubtitle.textContent = `Viewing ${label} Bin.`;
+      const binLabel = activeLocation ? getLocationBinLabel(activeLocation) : "Deleted";
+      dom.statusSummary.textContent = `Viewing ${label} ${binLabel}. Restore entries back into the live sync location.`;
+      dom.windowSubtitle.textContent = `Viewing ${label} ${binLabel}.`;
       renderStatusMetrics(getBinStatusMetrics());
     }
   }
@@ -1729,7 +2025,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     dom.fileTreeSection.classList.toggle("is-bin-view", state.activeLocationViewMode === "bin");
     renderBinToolbar();
     const emptyStateText = state.activeLocationViewMode === "bin"
-      ? "Select a sync location bin to browse deleted files."
+      ? "Select a deleted-items view to browse recoverable files."
       : "Select a sync location to browse files.";
     const emptyStateCard = dom.fileTreeEmptyState.querySelector<HTMLElement>(".empty-state-card");
     if (emptyStateCard) {
@@ -1739,10 +2035,105 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     }
   }
 
+  function getSelectedLocationProvider(): Provider {
+    const editingLocation = getEditingLocation();
+    if (editingLocation) {
+      return editingLocation.provider;
+    }
+
+    const credentialId = dom.locationCredentialSelect.value || null;
+    const credential = state.credentials.find((item) => item.id === credentialId);
+    return credential?.provider ?? normalizeProvider(dom.locationProviderSelect.value || getEffectiveProfileProvider(state.profile));
+  }
+
+  function getSelectedLocationCapabilities(): ProviderCapabilities {
+    const provider = getSelectedLocationProvider();
+    const editingLocation = getEditingLocation();
+
+    return editingLocation && editingLocation.provider === provider
+      ? getLocationCapabilities(editingLocation)
+      : capabilitiesFromProviderDefinition(
+        state.providerDefinitions.find((definition) => definition.provider === provider)
+        ?? state.profile.providerDefinition
+        ?? null,
+        provider,
+      );
+  }
+
+  function getSelectedLocationProviderDefinition(): ProviderDefinition {
+    const provider = getSelectedLocationProvider();
+    const editingLocation = getEditingLocation();
+
+    return editingLocation && editingLocation.provider === provider
+      ? getLocationProviderDefinition(editingLocation)
+      : state.providerDefinitions.find((definition) => definition.provider === provider)
+        ?? (state.profile.providerDefinition?.provider === provider ? state.profile.providerDefinition : null)
+        ?? defaultProviderDefinition(provider);
+  }
+
+  function renderLocationCapabilities(providerDefinition: ProviderDefinition, capabilities: ProviderCapabilities) {
+    dom.locationCapabilityVersioningLabel.textContent = providerDefinition.provider === "aws" ? "Object versioning" : "Object versioning";
+    dom.locationCapabilityRemoteBinLabel.textContent = "Remote bin";
+    dom.locationCapabilityArchiveLabel.textContent = getArchiveActionLabel(providerDefinition.provider);
+    dom.locationCapabilityVersioning.textContent = getCapabilityBadgeText(capabilities.objectVersioning);
+    dom.locationCapabilityRemoteBin.textContent = getCapabilityBadgeText(capabilities.remoteBin);
+    dom.locationCapabilityArchive.textContent = getCapabilityBadgeText(capabilities.archiveStorage);
+
+    const versioningReason = describeCapabilityAvailability(capabilities.objectVersioning);
+    const remoteBinReason = describeCapabilityAvailability(capabilities.remoteBin);
+    const archiveReason = describeCapabilityAvailability(capabilities.archiveStorage);
+    dom.locationCapabilityVersioning.title = versioningReason;
+    dom.locationCapabilityRemoteBin.title = remoteBinReason;
+    dom.locationCapabilityArchive.title = archiveReason;
+    dom.locationCapabilityHelp.textContent = [
+      describeCapabilityState("Object versioning", capabilities.objectVersioning),
+      describeCapabilityState("Remote bin", capabilities.remoteBin),
+      describeCapabilityState(getArchiveActionLabel(providerDefinition.provider), capabilities.archiveStorage),
+    ].join(" · ");
+    dom.locationProviderHelp.textContent = providerDefinition.provider === "aws"
+      ? "AWS sync locations use S3 regions and S3-specific features when the backend reports them as available."
+      : "GCS sync locations use bucket locations and GCS-native storage classes instead of AWS region semantics.";
+  }
+
+  function renderLocationProviderState() {
+    const providerDefinition = getSelectedLocationProviderDefinition();
+    const provider = providerDefinition.provider;
+    const capabilities = getSelectedLocationCapabilities();
+    const objectVersioningEnabled = isObjectVersioningEnabled();
+    const versioningAvailable = isCapabilityAvailable(capabilities.objectVersioning);
+    const remoteBinAvailable = isCapabilityAvailable(capabilities.remoteBin);
+
+    dom.locationRegionLabel.textContent = getProviderLocationLabel(provider);
+    dom.locationRegionSelect.title = getProviderLocationHelp(provider);
+    setLocationOptions(dom.locationRegionSelect, getProviderLocationOptions(providerDefinition), dom.locationRegionSelect.value);
+    renderLocationCapabilities(providerDefinition, capabilities);
+    const archiveUnavailable = !isCapabilityAvailable(capabilities.archiveStorage);
+    dom.locationCapabilitiesList.querySelector("#location-capability-archive")?.parentElement?.classList.toggle("is-disabled", archiveUnavailable);
+    dom.locationCapabilitiesList.querySelector("#location-capability-versioning")?.parentElement?.classList.toggle("is-disabled", !versioningAvailable);
+    dom.locationCapabilitiesList.querySelector("#location-capability-remote-bin")?.parentElement?.classList.toggle("is-disabled", !remoteBinAvailable);
+  }
+
   function renderProfileSummary() {
     renderCredentialsList();
     renderStatus();
     renderLocationCredentialOptions();
+    renderLocationProviderState();
+  }
+
+  function getEditingLocation(): SyncLocation | null {
+    const editingId = dom.locationEditingId.value.trim();
+    return editingId
+      ? state.syncLocations.find((location) => location.id === editingId) ?? null
+      : null;
+  }
+
+  function syncCreateLocationFormProviderFromProfile() {
+    if (dom.locationEditingId.value.trim()) {
+      return;
+    }
+
+    dom.locationProviderSelect.value = getEffectiveProfileProvider(state.profile);
+    dom.locationProviderInfo.hidden = true;
   }
 
   function writeSettingsToDom() {
@@ -1791,18 +2182,28 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   }
 
   function renderLocationRemoteBinState() {
+    const provider = getSelectedLocationProvider();
+    const capabilities = getSelectedLocationCapabilities();
     const objectVersioningEnabled = isObjectVersioningEnabled();
-    const enabled = objectVersioningEnabled ? false : dom.locationRemoteBinEnabledInput.checked;
+    const objectVersioningAvailable = isCapabilityAvailable(capabilities.objectVersioning);
+    const remoteBinAvailable = isCapabilityAvailable(capabilities.remoteBin);
+    const enabled = objectVersioningEnabled || !remoteBinAvailable ? false : dom.locationRemoteBinEnabledInput.checked;
     const retentionDays = parseRemoteBinRetentionDays(dom.locationRemoteBinRetentionInput.value);
-    if (objectVersioningEnabled) {
+    if (objectVersioningEnabled || !remoteBinAvailable) {
       dom.locationRemoteBinEnabledInput.checked = false;
     }
-    dom.locationRemoteBinEnabledInput.disabled = objectVersioningEnabled;
+    dom.locationRemoteBinEnabledInput.disabled = objectVersioningEnabled || !remoteBinAvailable;
     dom.locationRemoteBinRetentionInput.value = String(retentionDays);
-    dom.locationRemoteBinRetentionInput.disabled = objectVersioningEnabled || !enabled;
-    dom.locationRemoteBinHint.textContent = objectVersioningEnabled
-      ? "Object versioning is enabled for this sync location. Remote bin is unavailable in this mode; deleted objects will be recovered from S3 version history instead."
-      : describeRemoteBinBehavior(enabled, retentionDays);
+    dom.locationRemoteBinRetentionInput.disabled = objectVersioningEnabled || !remoteBinAvailable || !enabled;
+    dom.locationRemoteBinHint.textContent = !remoteBinAvailable
+      ? describeCapabilityAvailability(capabilities.remoteBin)
+      : objectVersioningEnabled
+        ? `Object versioning is enabled for this sync location. Remote bin is unavailable in this mode; deleted objects will be recovered from ${describeVersionHistoryLabel(provider)} instead.`
+        : describeRemoteBinBehavior(enabled, retentionDays);
+    setControlDisabledState(dom.locationVersioningCheckbox, !objectVersioningAvailable, describeCapabilityAvailability(capabilities.objectVersioning));
+    setControlDisabledState(dom.locationObjectVersioningBtn, !objectVersioningAvailable, describeCapabilityAvailability(capabilities.objectVersioning));
+    setControlDisabledState(dom.locationRemoteBinEnabledInput, objectVersioningEnabled || !remoteBinAvailable, describeCapabilityAvailability(capabilities.remoteBin));
+    setControlDisabledState(dom.locationRemoteBinRetentionInput, objectVersioningEnabled || !remoteBinAvailable || !enabled, describeCapabilityAvailability(capabilities.remoteBin));
   }
 
   async function refreshStatus() {
@@ -1815,10 +2216,25 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     renderDebugLogState();
   }
 
+  async function refreshProviderDefinitions() {
+    const definitions = await client.listProviderCapabilities();
+    state.providerDefinitions = definitions;
+    const currentProvider = state.profile.provider;
+    const currentDefinition = definitions.find((definition) => definition.provider === currentProvider) ?? defaultProviderDefinition(currentProvider);
+    state.profile = normalizeProfileDraft({
+      ...state.profile,
+      providerDefinition: currentDefinition,
+      capabilities: state.profile.capabilities ?? capabilitiesFromProviderDefinition(currentDefinition, currentProvider),
+      syncLocations: state.profile.syncLocations.map((location) => hydrateSyncLocationMetadata(location)),
+    });
+  }
+
   async function refreshCredentials() {
     state.credentials = await client.listCredentials();
     state.profile = syncProfileCredentialState(state.profile, state.credentials);
+    syncCreateLocationFormProviderFromProfile();
     renderProfileSummary();
+    renderLocationRemoteBinState();
   }
 
   function mergeSyncLocationsWithStoredProfile(listedLocations: SyncLocation[]): SyncLocation[] {
@@ -1826,7 +2242,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     const storedLocationIds = new Set(storedLocations.map((location) => location.id));
 
     if (storedLocationIds.size === 0 && !state.profile.activeLocationId) {
-      return listedLocations;
+      return listedLocations.map((location) => hydrateSyncLocationMetadata(location));
     }
 
     const listedLocationsById = new Map(listedLocations.map((location) => [location.id, location]));
@@ -1836,11 +2252,13 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
         return storedLocation;
       }
 
-      return {
+      return hydrateSyncLocationMetadata({
         ...listedLocation,
         objectVersioningEnabled: storedLocation.objectVersioningEnabled,
         remoteBin: storedLocation.remoteBin,
-      };
+        providerDefinition: listedLocation.providerDefinition ?? storedLocation.providerDefinition ?? defaultProviderDefinition(listedLocation.provider),
+        capabilities: listedLocation.capabilities ?? storedLocation.capabilities ?? getLocationCapabilities(listedLocation),
+      });
     });
   }
 
@@ -1849,18 +2267,24 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       ? syncLocations.some((location) => location.id === preferredActiveLocationId)
       : false;
 
-    state.syncLocations = syncLocations;
+    const hydratedSyncLocations = syncLocations.map((location) => hydrateSyncLocationMetadata(location));
+    state.syncLocations = hydratedSyncLocations;
     state.activeLocationId = syncLocations.length === 0
       ? null
       : activeLocationExists
         ? preferredActiveLocationId
-        : syncLocations[0].id;
+        : hydratedSyncLocations[0].id;
     if (state.activeLocationId === null) {
       state.activeLocationViewMode = "live";
+    } else {
+      const activeLocation = hydratedSyncLocations.find((location) => location.id === state.activeLocationId) ?? null;
+      if (state.activeLocationViewMode === "bin" && activeLocation && !canViewLocationBin(activeLocation)) {
+        state.activeLocationViewMode = "live";
+      }
     }
     state.profile = normalizeProfileDraft({
       ...state.profile,
-      syncLocations,
+      syncLocations: hydratedSyncLocations,
       activeLocationId: state.activeLocationId,
     });
   }
@@ -1880,15 +2304,22 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       liveOption.textContent = location.label || `${location.bucket}`;
       select.append(liveOption);
 
-      const binOption = document.createElement("option");
-      binOption.value = encodeLocationSelectValue(location.id, "bin");
-      binOption.textContent = `${location.label || location.bucket} Bin`;
-      select.append(binOption);
+      if (canViewLocationBin(location)) {
+        const binOption = document.createElement("option");
+        binOption.value = encodeLocationSelectValue(location.id, "bin");
+        binOption.textContent = `${location.label || location.bucket} ${getLocationBinLabel(location)}`;
+        select.append(binOption);
+      }
     }
 
-    select.value = state.activeLocationId
+    const desiredValue = state.activeLocationId
       ? encodeLocationSelectValue(state.activeLocationId, state.activeLocationViewMode)
       : "";
+    select.value = Array.from(select.options).some((option) => option.value === desiredValue)
+      ? desiredValue
+      : state.activeLocationId
+        ? encodeLocationSelectValue(state.activeLocationId, "live")
+        : "";
   }
 
   async function handleSaveSettings(btn: HTMLButtonElement, resultEl: HTMLElement) {
@@ -1919,11 +2350,23 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   }
 
   async function handleCreateCredential() {
-    const draft: CredentialDraft = {
-      name: dom.credentialNameInput.value.trim(),
-      accessKeyId: dom.credentialAccessKeyInput.value.trim(),
-      secretAccessKey: dom.credentialSecretKeyInput.value.trim(),
-    };
+    const provider = normalizeProvider(dom.credentialProviderSelect.value);
+    const name = dom.credentialNameInput.value.trim();
+    const draft: CredentialDraft = provider === "aws"
+      ? {
+        name,
+        provider: "aws",
+        accessKeyId: dom.credentialAccessKeyInput.value.trim(),
+        secretAccessKey: dom.credentialSecretKeyInput.value.trim(),
+      }
+      : {
+        name,
+        provider: "gcs",
+        credential: {
+          kind: "gcsServiceAccount",
+          serviceAccountJson: dom.credentialServiceAccountInput.value.trim(),
+        },
+      };
 
     if (!client.supportsNativeProfilePersistence) {
       const message = "Credential management is only available in the desktop app.";
@@ -1932,8 +2375,13 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       return;
     }
 
-    if (!draft.name || !draft.accessKeyId || !draft.secretAccessKey) {
-      const message = "Enter a name, access key ID, and secret access key to create a credential.";
+    const invalidAwsDraft = draft.provider === "aws" && (!draft.name || !draft.accessKeyId || !draft.secretAccessKey);
+    const invalidGcsDraft = draft.provider === "gcs"
+      && (!draft.name || !draft.credential.serviceAccountJson);
+    if (invalidAwsDraft || invalidGcsDraft) {
+      const message = draft.provider === "aws"
+        ? "Enter a name, access key ID, and secret access key to create an AWS credential."
+        : "Enter a name and paste the full service account JSON to create a GCS credential.";
       dom.credentialsResult.textContent = message;
       toast(message, "error");
       return;
@@ -1946,16 +2394,20 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       dom.credentialNameInput.value = "";
       dom.credentialAccessKeyInput.value = "";
       dom.credentialSecretKeyInput.value = "";
+      dom.credentialServiceAccountInput.value = "";
       await refreshCredentials();
       state.profile = syncProfileCredentialState(normalizeProfileDraft({
         ...state.profile,
+        provider: created.provider,
         credentialProfileId: created.id,
         selectedCredential: created,
       }), state.credentials);
+      syncCreateLocationFormProviderFromProfile();
       renderProfileSummary();
+      renderLocationRemoteBinState();
 
       const message = buildCredentialCreateMessage(created);
-      dom.credentialsResult.textContent = `${message} It is now selected for this bucket.`;
+      dom.credentialsResult.textContent = `${message} It is now selected for this setup.`;
       toast(`Created credential \"${created.name}\".`, "success");
       addActivity("success", `Created credential \"${created.name}\".`);
     } catch (error) {
@@ -1969,9 +2421,9 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     }
   }
 
-  function renderLocationCredentialOptions() {
+  function renderLocationCredentialOptions(preferredValue: string | null = dom.locationCredentialSelect.value || null) {
     const select = dom.locationCredentialSelect;
-    const currentValue = select.value;
+    const editingLocation = getEditingLocation();
     select.innerHTML = "";
 
     const defaultOption = document.createElement("option");
@@ -1980,20 +2432,29 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     select.append(defaultOption);
 
     for (const credential of state.credentials) {
+      if (editingLocation && credential.provider !== editingLocation.provider) {
+        continue;
+      }
       const option = document.createElement("option");
       option.value = credential.id;
-      option.textContent = credential.name;
+      option.textContent = `${credential.name} — ${getProviderLabel(credential.provider)}`;
       select.append(option);
     }
 
-    select.value = currentValue;
-    select.disabled = state.credentials.length === 0;
+    select.value = preferredValue && Array.from(select.options).some((option) => option.value === preferredValue)
+      ? preferredValue
+      : "";
+    select.disabled = select.options.length <= 1;
   }
 
   function resetLocationForm() {
     dom.locationEditingId.value = "";
     dom.locationFormTitle.textContent = "Create sync location";
     dom.locationLabelInput.value = "";
+    dom.locationProviderSelectField.hidden = true;
+    dom.locationProviderSelect.disabled = false;
+    dom.locationProviderSelect.value = getEffectiveProfileProvider(state.profile);
+    dom.locationProviderInfo.hidden = true;
     dom.locationLocalFolderInput.value = "";
     dom.locationRegionSelect.value = "";
     dom.locationBucketInput.value = "";
@@ -2006,6 +2467,8 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     dom.locationConflictStrategySelect.value = state.profile.conflictStrategy;
     dom.locationRemoteBinEnabledInput.checked = true;
     dom.locationRemoteBinRetentionInput.value = String(DEFAULT_REMOTE_BIN_RETENTION_DAYS);
+    renderLocationProviderState();
+    renderLocationCredentialOptions();
     renderLocationRemoteBinState();
     dom.cancelEditLocationBtn.hidden = true;
 
@@ -2016,15 +2479,25 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     applyIcons();
   }
 
+  function updateLocationProviderLabel(provider: Provider) {
+    dom.locationProviderLabel.textContent = state.providerDefinitions.find((definition) => definition.provider === provider)?.displayName ?? getProviderLabel(provider);
+    dom.locationProviderInfo.hidden = false;
+  }
+
   function populateLocationForm(location: SyncLocation) {
     dom.locationEditingId.value = location.id;
     dom.locationFormTitle.textContent = "Edit sync location";
     dom.locationLabelInput.value = location.label;
+    dom.locationProviderSelect.value = location.provider;
+    dom.locationProviderSelect.disabled = true;
+    dom.locationProviderSelectField.hidden = true;
+    updateLocationProviderLabel(location.provider);
+    dom.locationCredentialSelect.value = "";
     dom.locationLocalFolderInput.value = location.localFolder;
     dom.locationRegionSelect.value = location.region;
     dom.locationBucketInput.value = location.bucket;
-    dom.locationCredentialSelect.value = location.credentialProfileId ?? "";
     setObjectVersioningEnabled(location.objectVersioningEnabled);
+    renderLocationCredentialOptions(location.credentialProfileId);
     showVersioningButton();
     dom.locationEnabledInput.checked = location.enabled;
     dom.locationPollingInput.checked = location.remotePollingEnabled;
@@ -2032,6 +2505,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     dom.locationConflictStrategySelect.value = location.conflictStrategy;
     dom.locationRemoteBinEnabledInput.checked = location.remoteBin.enabled;
     dom.locationRemoteBinRetentionInput.value = String(location.remoteBin.retentionDays);
+    renderLocationProviderState();
     renderLocationRemoteBinState();
     dom.cancelEditLocationBtn.hidden = false;
 
@@ -2044,13 +2518,19 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
   function readLocationDraftFromForm(): SyncLocationDraft {
     const editingId = dom.locationEditingId.value.trim() || null;
+    const credentialId = dom.locationCredentialSelect.value || null;
+    const provider = getSelectedLocationProvider();
+    const providerDefinition = getSelectedLocationProviderDefinition();
+    const capabilities = getSelectedLocationCapabilities();
+
     return {
       id: editingId,
       label: dom.locationLabelInput.value.trim(),
+      provider,
       localFolder: dom.locationLocalFolderInput.value.trim(),
       region: dom.locationRegionSelect.value,
       bucket: dom.locationBucketInput.value.trim(),
-      credentialProfileId: dom.locationCredentialSelect.value || null,
+      credentialProfileId: credentialId,
       objectVersioningEnabled: isObjectVersioningEnabled(),
       enabled: dom.locationEnabledInput.checked,
       remotePollingEnabled: dom.locationPollingInput.checked,
@@ -2060,6 +2540,8 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
         enabled: isObjectVersioningEnabled() ? false : dom.locationRemoteBinEnabledInput.checked,
         retentionDays: parseRemoteBinRetentionDays(dom.locationRemoteBinRetentionInput.value),
       },
+      providerDefinition,
+      capabilities,
     };
   }
 
@@ -2086,7 +2568,12 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       hint.className = "hint";
       const folder = location.localFolder || "No folder";
       const bucket = location.bucket || "No bucket";
-      hint.textContent = `${folder} → ${bucket}`;
+      const locationLabel = location.region
+        ? `${getProviderLocationLabel(location.provider)} ${location.region}`
+        : location.provider === "gcs"
+          ? "bucket location auto-detect"
+          : "region auto-detect";
+      hint.textContent = `${folder} → ${bucket} · ${locationLabel}`;
 
       meta.append(name, hint);
 
@@ -2101,18 +2588,24 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       const remoteBinBadge = document.createElement("span");
       remoteBinBadge.className = `badge ${location.objectVersioningEnabled || location.remoteBin.enabled ? "success" : "default"}`;
       remoteBinBadge.textContent = location.objectVersioningEnabled
-        ? "object versioning"
+        ? (location.provider === "aws" ? "bucket versioning" : "object versioning")
         : location.remoteBin.enabled
           ? `remote bin ${location.remoteBin.retentionDays}d`
-          : "hard delete";
+          : canViewLocationBin(location)
+            ? "hard delete"
+            : "no deleted-items view";
       actions.append(remoteBinBadge);
+
+      const providerBadge = document.createElement("span");
+      providerBadge.className = "badge default";
+      providerBadge.textContent = location.provider === "aws" ? "AWS" : "GCS";
+      actions.append(providerBadge);
 
       const editButton = document.createElement("button");
       editButton.className = "secondary-btn slim-btn";
       editButton.type = "button";
       editButton.textContent = "Edit";
       editButton.addEventListener("click", () => {
-        renderLocationCredentialOptions();
         populateLocationForm(location);
       });
       actions.append(editButton);
@@ -2160,12 +2653,29 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   async function handleSaveLocation() {
     const draft = readLocationDraftFromForm();
     const isEditing = Boolean(draft.id);
+    const provider = draft.provider;
 
     if (!draft.localFolder || !draft.bucket) {
       const message = "Enter a local folder and bucket name to create a sync location.";
       dom.locationsResult.textContent = message;
       toast(message, "error");
       return;
+    }
+
+    if (draft.credentialProfileId) {
+      const selectedCredential = state.credentials.find((credential) => credential.id === draft.credentialProfileId) ?? null;
+      if (!selectedCredential) {
+        const message = "Choose a saved credential for the selected provider or leave the location unassigned for now.";
+        dom.locationsResult.textContent = message;
+        toast(message, "error");
+        return;
+      }
+      if (selectedCredential.provider !== provider) {
+        const message = `The selected credential does not match ${getProviderLabel(provider)}.`;
+        dom.locationsResult.textContent = message;
+        toast(message, "error");
+        return;
+      }
     }
 
     setButtonBusy(dom.saveLocationBtn, true);
@@ -2198,6 +2708,13 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
   async function handleVersioningToggle() {
     const editingId = dom.locationEditingId.value.trim();
+    const capabilities = getSelectedLocationCapabilities();
+    if (!isCapabilityAvailable(capabilities.objectVersioning)) {
+      const message = describeCapabilityAvailability(capabilities.objectVersioning);
+      dom.locationsResult.textContent = message;
+      toast(message, "info");
+      return;
+    }
     const newEnabled = !isObjectVersioningEnabled();
 
     if (!editingId) {
@@ -2401,12 +2918,12 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
         try {
           await client.deleteFile(activeLocation.id, path);
           const toastMessage = activeLocation.objectVersioningEnabled
-            ? "File deleted locally and marked deleted in S3 version history."
+            ? getVersionedDeleteToastMessage(activeLocation, "file")
             : activeLocation.remoteBin.enabled
               ? "File deleted locally and moved to the remote bin."
               : "File permanently deleted.";
           const activityMessage = activeLocation.objectVersioningEnabled
-            ? "Deleted file locally and added S3 delete marker"
+            ? getVersionedDeleteActivityMessage(activeLocation, "file")
             : activeLocation.remoteBin.enabled
               ? "Deleted file locally and moved remote object to remote bin"
               : "Permanently deleted file";
@@ -2443,12 +2960,12 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
         try {
           await client.deleteFolder(activeLocation.id, path);
           const toastMessage = activeLocation.objectVersioningEnabled
-            ? "Folder deleted locally and marked deleted in S3 version history."
+            ? getVersionedDeleteToastMessage(activeLocation, "folder")
             : activeLocation.remoteBin.enabled
               ? "Folder deleted locally and moved to the remote bin."
               : "Folder permanently deleted.";
           const activityMessage = activeLocation.objectVersioningEnabled
-            ? "Deleted folder locally and added S3 delete markers"
+            ? getVersionedDeleteActivityMessage(activeLocation, "folder")
             : activeLocation.remoteBin.enabled
               ? "Deleted folder locally and moved remote subtree to remote bin"
               : "Permanently deleted folder";
@@ -2646,17 +3163,68 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   }
 
   async function handleStorageClassChange(path: string, currentStorageClass: string | null) {
-    const isGlacier =
+    const activeLocation = getActiveLocation();
+    if (!activeLocation) {
+      toast("No active sync location selected.", "error");
+      return;
+    }
+
+    const archiveCapability = getLocationCapabilities(activeLocation).archiveStorage;
+    if (!isCapabilityAvailable(archiveCapability)) {
+      const message = describeCapabilityAvailability(archiveCapability);
+      toast(message, "info");
+      addActivity("info", message, path);
+      return;
+    }
+
+    const provider = activeLocation.provider ?? "aws";
+
+    const isColdStorage =
       currentStorageClass === "GLACIER_IR" ||
       currentStorageClass === "DEEP_ARCHIVE" ||
-      currentStorageClass === "GLACIER";
+      currentStorageClass === "GLACIER" ||
+      currentStorageClass === "NEARLINE" ||
+      currentStorageClass === "COLDLINE" ||
+      currentStorageClass === "ARCHIVE";
 
-    if (isGlacier) {
-      // Currently in Glacier — offer to restore to Standard
+    const coldConfig = provider === "gcs"
+      ? {
+          restoreTitle: "Restore to Standard?",
+          restoreMessage: `"${path}" is currently in ${currentStorageClass} storage. Restore it to Standard storage?`,
+          restoreAccept: "Restore to Standard",
+          restoreToast: "File restored to Standard storage.",
+          restoreActivity: "Restored file to Standard storage",
+          restoreErrorLabel: "restore file",
+          archiveTitle: "Move to Coldline storage?",
+          archiveMessage: `"${path}" will be moved to Google Cloud Storage Coldline. The local copy will not be available after this transition.`,
+          archiveAccept: "Move to Coldline",
+          archiveTarget: "COLDLINE" as const,
+          archiveToast: "File moved to Coldline storage.",
+          archiveActivity: "Moved file to Coldline storage",
+          archiveErrorLabel: "move file to Coldline",
+        }
+      : {
+          restoreTitle: "Restore from Glacier?",
+          restoreMessage: `"${path}" is currently in Glacier storage. Restore it to Standard storage? This will make the file available for syncing again.`,
+          restoreAccept: "Restore to Standard",
+          restoreToast: "File restored to Standard storage.",
+          restoreActivity: "Restored file from Glacier",
+          restoreErrorLabel: "restore file",
+          archiveTitle: "Move to Glacier storage?",
+          archiveMessage: `"${path}" will be moved to Amazon S3 Glacier Instant Retrieval. The local copy will not be available after this transition. The file will remain accessible on-demand from Glacier.`,
+          archiveAccept: "Move to Glacier",
+          archiveTarget: "GLACIER_IR" as const,
+          archiveToast: "File moved to Glacier storage.",
+          archiveActivity: "Moved file to Glacier storage",
+          archiveErrorLabel: "move file to Glacier",
+        };
+
+    if (isColdStorage) {
+      // Currently in cold storage — offer to restore to Standard
       await asyncConfirm.open({
-        title: "Restore from Glacier?",
-        message: `"${path}" is currently in Glacier storage. Restore it to Standard storage? This will make the file available for syncing again.`,
-        acceptLabel: "Restore to Standard",
+        title: coldConfig.restoreTitle,
+        message: coldConfig.restoreMessage,
+        acceptLabel: coldConfig.restoreAccept,
         rejectLabel: "Cancel",
         onAccept: async () => {
           if (!state.activeLocationId) {
@@ -2666,23 +3234,23 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
           try {
             await client.changeStorageClass(state.activeLocationId, path, "STANDARD");
-            toast("File restored to Standard storage.", "success");
-            addActivity("info", "Restored file from Glacier", path);
+            toast(coldConfig.restoreToast, "success");
+            addActivity("info", coldConfig.restoreActivity, path);
             await refreshLocationViews(state.activeLocationId, { clearCache: true });
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            toast(`Failed to restore file: ${message}`, "error");
-            addActivity("error", "Failed to restore file from Glacier", String(error));
+            toast(`Failed to ${coldConfig.restoreErrorLabel}: ${message}`, "error");
+            addActivity("error", `Failed to ${coldConfig.restoreErrorLabel}`, String(error));
             throw createHandledAsyncConfirmError(message);
           }
         },
       });
     } else {
-      // Currently in Standard (or unknown) — offer to move to Glacier
+      // Currently in Standard (or unknown) — offer to move to cold storage
       await asyncConfirm.open({
-        title: "Move to Glacier storage?",
-        message: `"${path}" will be moved to Amazon S3 Glacier Instant Retrieval. The local copy will not be available after this transition. The file will remain accessible on-demand from Glacier.`,
-        acceptLabel: "Move to Glacier",
+        title: coldConfig.archiveTitle,
+        message: coldConfig.archiveMessage,
+        acceptLabel: coldConfig.archiveAccept,
         rejectLabel: "Cancel",
         variant: "danger",
         onAccept: async () => {
@@ -2692,14 +3260,14 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
           }
 
           try {
-            await client.changeStorageClass(state.activeLocationId, path, "GLACIER_IR");
-            toast("File moved to Glacier storage.", "success");
-            addActivity("info", "Moved file to Glacier storage", path);
+            await client.changeStorageClass(state.activeLocationId, path, coldConfig.archiveTarget);
+            toast(coldConfig.archiveToast, "success");
+            addActivity("info", coldConfig.archiveActivity, path);
             await refreshLocationViews(state.activeLocationId, { clearCache: true });
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            toast(`Failed to move file to Glacier: ${message}`, "error");
-            addActivity("error", "Failed to move file to Glacier", String(error));
+            toast(`Failed to ${coldConfig.archiveErrorLabel}: ${message}`, "error");
+            addActivity("error", `Failed to ${coldConfig.archiveErrorLabel}`, String(error));
             throw createHandledAsyncConfirmError(message);
           }
         },
@@ -3231,7 +3799,12 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     dom.fileVersionsDrawerEmpty.hidden = true;
     dom.fileVersionsDrawerList.innerHTML = "";
 
-    openDrawer({ drawer: dom.fileVersionsDrawer, closeOnBackdrop: true, closeOnEscape: true });
+    openDrawer({
+      drawer: dom.fileVersionsDrawer,
+      backdrop: dom.fileVersionsDrawerBackdrop,
+      closeOnBackdrop: true,
+      closeOnEscape: true,
+    });
 
     try {
       const versions = await client.listFileVersions(locationId, entry.path);
@@ -3246,7 +3819,10 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   }
 
   dom.fileVersionsDrawerClose.addEventListener("click", () => {
-    closeDrawer({ drawer: dom.fileVersionsDrawer });
+    closeDrawer({
+      drawer: dom.fileVersionsDrawer,
+      backdrop: dom.fileVersionsDrawerBackdrop,
+    });
   });
 
   async function refreshFileTree() {
@@ -3295,19 +3871,31 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
         return;
       }
 
-      activeVersionCounts = isVersioningEnabled
+      const nextVersionCounts = isVersioningEnabled
         ? new Map(versionCountEntries.map((e) => [e.path, e.count]))
         : undefined;
+      const nextVersionCountsJson = serializeVersionCounts(nextVersionCounts);
+      activeVersionCounts = nextVersionCounts;
 
       const entriesJson = JSON.stringify(entries);
       const cachedSnapshot = getViewSnapshot(viewKey);
-      if (cachedSnapshot?.entriesJson === entriesJson && fileTreeHandle) {
+      if (
+        cachedSnapshot?.entriesJson === entriesJson
+        && cachedSnapshot.versionCountsJson === nextVersionCountsJson
+        && fileTreeHandle
+      ) {
         renderStatus();
         return;
       }
 
-      fileTreeSnapshots.set(viewKey, { viewKey, entries, entriesJson });
-      renderFileTreeEntries(entries, mode);
+      fileTreeSnapshots.set(viewKey, {
+        viewKey,
+        entries,
+        entriesJson,
+        versionCounts: nextVersionCounts,
+        versionCountsJson: nextVersionCountsJson,
+      });
+      renderFileTreeEntries(entries, mode, nextVersionCounts);
       renderStatus();
     } finally {
       endFileTreeLoading(requestSequence);
@@ -3319,25 +3907,48 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     const selection = decodeLocationSelectValue(dom.activeLocationSelect.value);
     clearBinSelection();
     state.activeLocationId = selection.locationId;
-    state.activeLocationViewMode = selection.mode;
+    const selectedLocation = selection.locationId
+      ? state.syncLocations.find((location) => location.id === selection.locationId) ?? null
+      : null;
+    state.activeLocationViewMode = selection.mode === "bin" && selectedLocation && !canViewLocationBin(selectedLocation)
+      ? "live"
+      : selection.mode;
     state.profile = { ...state.profile, activeLocationId: state.activeLocationId };
     void persistence.saveSettings(toStoredProfile(state.profile));
     renderProfileSummary();
     renderFileTreeViewState();
     const cachedSnapshot = getViewSnapshot();
     if (cachedSnapshot) {
-      renderFileTreeEntries(cachedSnapshot.entries, state.activeLocationViewMode);
+      renderFileTreeEntries(cachedSnapshot.entries, state.activeLocationViewMode, cachedSnapshot.versionCounts);
       renderStatus();
     }
     void refreshFileTree();
   });
 
   dom.createCredentialBtn.addEventListener("click", () => void handleCreateCredential());
+  dom.credentialProviderSelect.addEventListener("change", () => {
+    renderCredentialFormState(dom, normalizeProvider(dom.credentialProviderSelect.value));
+  });
   dom.restoreSelectedBtn.addEventListener("click", () => void handleBulkBinRestore());
   dom.purgeSelectedBtn.addEventListener("click", () => void handleBulkBinPurge());
   dom.savePollingBtn.addEventListener("click", () => void handleSaveSettings(dom.savePollingBtn, dom.pollingResult));
   dom.saveDebugBtn.addEventListener("click", () => void handleSaveSettings(dom.saveDebugBtn, dom.debugResult));
   dom.saveConflictBtn.addEventListener("click", () => void handleSaveSettings(dom.saveConflictBtn, dom.conflictResult));
+  dom.locationProviderSelect.addEventListener("change", () => {
+    renderLocationProviderState();
+    renderLocationRemoteBinState();
+  });
+  dom.locationCredentialSelect.addEventListener("change", () => {
+    const credentialId = dom.locationCredentialSelect.value;
+    const credential = state.credentials.find((c) => c.id === credentialId);
+    if (credential) {
+      dom.locationProviderSelect.value = credential.provider;
+    } else if (!dom.locationEditingId.value.trim()) {
+      dom.locationProviderInfo.hidden = true;
+    }
+    renderLocationProviderState();
+    renderLocationRemoteBinState();
+  });
   dom.saveLocationBtn.addEventListener("click", () => void handleSaveLocation());
   dom.cancelEditLocationBtn.addEventListener("click", () => {
     resetLocationForm();
@@ -3367,6 +3978,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     root: dom.nav,
     onSelect: (id) => {
       switch (id) {
+        case "nav-home": closeAllDialogs(); break;
         case "nav-credentials": openDialog("credentials"); break;
         case "nav-locations": openDialog("locations"); break;
         case "nav-activity": openDialog("activity"); break;
@@ -3416,6 +4028,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   writeSettingsToDom();
   renderLocationRemoteBinState();
   renderFileTreeViewState();
+  await refreshProviderDefinitions();
   await refreshCredentials();
   await refreshStatus();
   await refreshDebugLogState();
@@ -3429,7 +4042,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   dom.debugResult.textContent = settingsInitMsg;
   dom.conflictResult.textContent = settingsInitMsg;
   dom.credentialsResult.textContent = client.supportsNativeProfilePersistence
-    ? "Create named credentials here. The UI will show whether each one was saved and tested."
+    ? "Create named AWS or GCS credentials here. The UI will show whether each one was saved and tested."
     : "Credential management is shown here for preview, but real credentials are desktop-only.";
   if (!dom.locationsResult.textContent?.trim()) {
     dom.locationsResult.textContent = client.supportsNativeProfilePersistence
@@ -3438,7 +4051,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   }
 
   addActivity("info", client.supportsNativeProfilePersistence
-    ? "Ready to connect a folder, bucket, and named credential."
+    ? "Ready to connect a folder, remote bucket, and named credential."
     : "Browser preview loaded. Credential management and sync stay desktop-only here.");
 
   return () => {

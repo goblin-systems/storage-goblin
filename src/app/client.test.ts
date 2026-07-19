@@ -37,6 +37,7 @@ function legacyNativeProfile(): Partial<StoredStorageProfile> & { syncPairs: Non
       {
         id: "loc-1",
         label: "Docs",
+        provider: "aws",
         localFolder: "C:/sync/docs",
         region: "us-east-1",
         bucket: "demo-bucket",
@@ -77,7 +78,7 @@ describe("storage goblin client", () => {
       localFolder: "C:/sync",
       bucket: "demo-bucket",
       credentialProfileId: "cred-1",
-      selectedCredential: { id: "cred-1", name: "Primary", ready: true, validationStatus: "untested", lastTestedAt: null, lastTestMessage: null },
+      selectedCredential: { id: "cred-1", name: "Primary", provider: "aws", ready: true, validationStatus: "untested", lastTestedAt: null, lastTestMessage: null },
       selectedCredentialAvailable: true,
       credentialsStoredSecurely: true,
     });
@@ -86,7 +87,7 @@ describe("storage goblin client", () => {
       localFolder: "C:/sync",
       bucket: "demo-bucket",
       credentialProfileId: "cred-1",
-      selectedCredential: { id: "cred-1", name: "Primary", ready: true, validationStatus: "untested", lastTestedAt: null, lastTestMessage: null },
+      selectedCredential: { id: "cred-1", name: "Primary", provider: "aws", ready: true, validationStatus: "untested", lastTestedAt: null, lastTestMessage: null },
       selectedCredentialAvailable: false,
       credentialsStoredSecurely: false,
     });
@@ -122,7 +123,7 @@ describe("storage goblin client", () => {
       pollIntervalSeconds: 90,
       activityDebugModeEnabled: true,
       credentialProfileId: "cred-1",
-      selectedCredential: { id: "cred-1", name: "Primary", ready: true, validationStatus: "untested", lastTestedAt: null, lastTestMessage: null },
+      selectedCredential: { id: "cred-1", name: "Primary", provider: "aws", ready: true, validationStatus: "untested", lastTestedAt: null, lastTestMessage: null },
       selectedCredentialAvailable: true,
       credentialsStoredSecurely: true,
     });
@@ -134,7 +135,7 @@ describe("storage goblin client", () => {
       pollIntervalSeconds: 90,
       activityDebugModeEnabled: true,
       credentialProfileId: "cred-1",
-      selectedCredential: { id: "cred-1", name: "Primary", ready: true, validationStatus: "untested", lastTestedAt: null, lastTestMessage: null },
+      selectedCredential: { id: "cred-1", name: "Primary", provider: "aws", ready: true, validationStatus: "untested", lastTestedAt: null, lastTestMessage: null },
       selectedCredentialAvailable: false,
       credentialsStoredSecurely: false,
     });
@@ -163,6 +164,7 @@ describe("storage goblin client", () => {
     await expect(client.testCredential({
       credentialId: "cred-1",
       context: {
+        provider: "aws",
         region: "",
         bucket: "demo-bucket",
       },
@@ -200,6 +202,7 @@ describe("storage goblin client", () => {
     const draft: SyncLocationDraft = {
       id: "loc-1",
       label: "Docs",
+      provider: "aws",
       localFolder: "C:/sync/docs",
       region: "us-east-1",
       bucket: "demo",
@@ -334,6 +337,7 @@ describe("storage goblin client", () => {
         {
           id: "loc-1",
           label: "Docs",
+          provider: "aws",
           localFolder: "C:/sync/docs",
           region: "us-east-1",
           bucket: "demo-bucket",
@@ -369,6 +373,7 @@ describe("storage goblin client", () => {
     const draft: SyncLocationDraft = {
       id: "loc-1",
       label: "Docs",
+      provider: "aws",
       localFolder: "C:/sync/docs",
       region: "us-east-1",
       bucket: "demo-bucket",
@@ -401,5 +406,157 @@ describe("storage goblin client", () => {
 
     invokeMock.mockResolvedValue({ ...legacyProfile });
     await expect(client.removeSyncLocation("loc-1")).resolves.toMatchObject({ syncLocations: expectedSyncLocations });
+  });
+
+  it("normalizes legacy gcp credential providers from native responses", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    invokeMock.mockResolvedValueOnce([
+      {
+        id: "cred-gcs-1",
+        name: "GCS",
+        provider: "gcp",
+        ready: true,
+        validationStatus: "untested",
+        lastTestedAt: null,
+        lastTestMessage: null,
+        summary: {
+          clientEmail: "sync@example-project.iam.gserviceaccount.com",
+          projectId: "example-project",
+        },
+      },
+    ]);
+
+    const client = createStorageGoblinClient();
+    await expect(client.listCredentials()).resolves.toEqual([
+      expect.objectContaining({
+        id: "cred-gcs-1",
+        provider: "gcs",
+        summary: {
+          clientEmail: "sync@example-project.iam.gserviceaccount.com",
+          projectId: "example-project",
+        },
+      }),
+    ]);
+  });
+
+  it("normalizes AWS credential summaries from native responses", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    invokeMock.mockResolvedValueOnce([
+      {
+        id: "cred-aws-1",
+        name: "AWS",
+        provider: "aws",
+        ready: true,
+        validationStatus: "untested",
+        lastTestedAt: null,
+        lastTestMessage: null,
+        summary: {
+          accessKeyIdPreview: "AKIA12345678",
+        },
+      },
+    ]);
+
+    const client = createStorageGoblinClient();
+    await expect(client.listCredentials()).resolves.toEqual([
+      expect.objectContaining({
+        id: "cred-aws-1",
+        provider: "aws",
+        summary: {
+          accessKeyIdPreview: "••••5678",
+        },
+      }),
+    ]);
+  });
+
+  it("passes nested GCS credential payloads through to the native command", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    invokeMock.mockResolvedValueOnce({
+      id: "cred-gcs-1",
+      name: "GCS",
+      provider: "gcs",
+      ready: true,
+      validationStatus: "untested",
+      lastTestedAt: null,
+      lastTestMessage: null,
+    });
+
+    const client = createStorageGoblinClient();
+    await client.createCredential({
+      name: "GCS",
+      provider: "gcs",
+      credential: {
+        kind: "gcsServiceAccount",
+        serviceAccountJson: '{"type":"service_account"}',
+      },
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("create_credential_command", {
+      draft: {
+        name: "GCS",
+        provider: "gcs",
+        credential: {
+          kind: "gcsServiceAccount",
+          serviceAccountJson: '{"type":"service_account"}',
+        },
+      },
+    });
+  });
+
+  it("loads provider capability metadata from the native runtime", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    invokeMock.mockResolvedValueOnce([
+      {
+        provider: "gcs",
+        displayName: "Google Cloud Storage",
+        aliases: ["gcp", "google-cloud-storage", "google cloud storage"],
+        credentialKind: "gcsServiceAccount",
+        supportsBucketCreation: true,
+        supportsObjectVersioning: true,
+        supportsRemoteBin: true,
+        supportsStorageClass: true,
+        supportsFileVersions: true,
+        supportsBucketLifecycle: true,
+        supportsManualCredentials: true,
+        supportsNativeValidation: true,
+      },
+    ]);
+
+    const client = createStorageGoblinClient();
+    await expect(client.listProviderCapabilities()).resolves.toEqual([
+      expect.objectContaining({
+        provider: "gcs",
+        displayName: "Google Cloud Storage",
+        credentialKind: "gcs-service-account",
+      }),
+    ]);
+  });
+
+  it("uses provider-neutral connection validation command while preserving legacy alias", async () => {
+    tauriWindow.__TAURI_INTERNALS__ = {};
+    invokeMock.mockResolvedValue({
+      ok: true,
+      checkedAt: "2026-04-26T12:00:00.000Z",
+      message: "Validated.",
+      provider: "gcs",
+      capabilities: {
+        objectVersioning: { status: "supported", message: null },
+        remoteBin: { status: "supported", message: null },
+        archiveStorage: { status: "supported", message: null },
+      },
+    });
+
+    const client = createStorageGoblinClient();
+    const profile: StoredStorageProfile = {
+      ...DEFAULT_STORED_PROFILE,
+      provider: "gcs",
+      localFolder: "C:/sync",
+      bucket: "demo-bucket",
+    };
+
+    await client.validateConnection(profile);
+    await client.validateS3Connection(profile);
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "validate_storage_connection", { input: profile });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "validate_storage_connection", { input: profile });
   });
 });

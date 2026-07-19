@@ -16,6 +16,7 @@ import type {
   InventoryComparisonSummary,
   VersionComparisonDetails,
   NativeActivityEvent,
+  ProviderDefinition,
   StoredStorageProfile,
   StorageProfileDraft,
   SyncLocation,
@@ -24,6 +25,7 @@ import type {
   SyncStatus,
   VersionCountEntry,
 } from "./types";
+import { normalizeCredentialSummaryRecord, normalizeProvider, normalizeProviderDefinition } from "./types";
 
 declare global {
   interface Window {
@@ -49,6 +51,7 @@ function serializeSyncLocationDraft(draft: SyncLocationDraft): Omit<SyncLocation
   return {
     id: draft.id,
     label: draft.label,
+    provider: draft.provider,
     localFolder: draft.localFolder,
     region: draft.region,
     bucket: draft.bucket,
@@ -187,6 +190,7 @@ export interface StorageGoblinClient {
   readonly supportsNativeProfilePersistence: boolean;
   chooseLocalFolder(): Promise<string | null>;
   connectAndSync(profile: StorageProfileDraft): Promise<SyncStatus>;
+  validateConnection(profile: StorageProfileDraft): Promise<ConnectionValidationResult>;
   validateS3Connection(profile: StorageProfileDraft): Promise<ConnectionValidationResult>;
   listCredentials(): Promise<CredentialSummary[]>;
   createCredential(draft: CredentialDraft): Promise<CredentialSummary>;
@@ -205,6 +209,7 @@ export interface StorageGoblinClient {
   listenSyncStatus(listener: StatusListener): Promise<() => void>;
   listenNativeActivity(listener: ActivityListener): Promise<() => void>;
   getActivityDebugLogState(): Promise<ActivityDebugLogState>;
+  listProviderCapabilities(): Promise<ProviderDefinition[]>;
   openActivityDebugLogFolder(): Promise<void>;
   listSyncLocations(): Promise<SyncLocation[]>;
   listFileEntries(locationId: string): Promise<FileEntry[]>;
@@ -254,26 +259,44 @@ export function createStorageGoblinClient(): StorageGoblinClient {
       }
       return invokeCommand<SyncStatus>("connect_and_sync", { profile });
     },
-    async validateS3Connection(profile) {
+    async validateConnection(profile) {
       if (!native) return mockValidateConnection(profile);
-      return invokeCommand<ConnectionValidationResult>("validate_s3_connection", { input: profile });
+      return invokeCommand<ConnectionValidationResult>("validate_storage_connection", { input: profile });
+    },
+    async validateS3Connection(profile) {
+      return this.validateConnection(profile);
     },
     async listCredentials() {
       if (!native) return [];
-      return invokeCommand<CredentialSummary[]>("list_credentials_command");
+      const credentials = await invokeCommand<unknown[]>("list_credentials_command");
+      return credentials
+        .map((credential) => normalizeCredentialSummaryRecord(credential))
+        .filter((credential): credential is CredentialSummary => credential !== null);
     },
     async createCredential(draft) {
       if (!native) {
         return {
           id: `browser-${Date.now()}`,
           name: draft.name.trim(),
+          provider: normalizeProvider(draft.provider),
           ready: false,
           validationStatus: "untested",
           lastTestedAt: null,
           lastTestMessage: null,
+          summary: null,
         };
       }
-      return invokeCommand<CredentialSummary>("create_credential_command", { draft });
+      return normalizeCredentialSummaryRecord(await invokeCommand<CredentialSummary>("create_credential_command", { draft }))
+        ?? {
+          id: "",
+          name: draft.name.trim(),
+          provider: normalizeProvider(draft.provider),
+          ready: false,
+          validationStatus: "untested",
+          lastTestedAt: null,
+          lastTestMessage: null,
+          summary: null,
+        };
     },
     async testCredential(request) {
       if (!native) {
@@ -281,10 +304,12 @@ export function createStorageGoblinClient(): StorageGoblinClient {
           credential: {
             id: request.credentialId,
             name: "Browser preview credential",
+            provider: normalizeProvider(request.context.provider),
             ready: false,
             validationStatus: "untested",
             lastTestedAt: null,
             lastTestMessage: null,
+            summary: null,
           },
           ok: false,
           checkedAt: nowIsoString(),
@@ -294,7 +319,11 @@ export function createStorageGoblinClient(): StorageGoblinClient {
           permissions: null,
         };
       }
-      return invokeCommand<CredentialTestResult>("test_credential_command", { request });
+      const result = await invokeCommand<CredentialTestResult>("test_credential_command", { request });
+      return {
+        ...result,
+        credential: normalizeCredentialSummaryRecord(result.credential) ?? result.credential,
+      };
     },
     async deleteCredential(credentialId) {
       if (!native) {
@@ -444,6 +473,13 @@ export function createStorageGoblinClient(): StorageGoblinClient {
       }
       return invokeCommand<ActivityDebugLogState>("get_activity_debug_log_state");
     },
+    async listProviderCapabilities() {
+      if (!native) return [];
+      const definitions = await invokeCommand<unknown[]>("list_provider_capabilities_command");
+      return definitions
+        .map((definition) => normalizeProviderDefinition(definition))
+        .filter((definition): definition is ProviderDefinition => definition !== null);
+    },
     async openActivityDebugLogFolder() {
       if (!native) return;
       await invokeCommand<void>("open_activity_debug_log_folder");
@@ -453,7 +489,17 @@ export function createStorageGoblinClient(): StorageGoblinClient {
         const profile = loadStoredProfileFromBrowserStorage();
         return profile.syncLocations ?? [];
       }
-      return invokeCommand<SyncLocation[]>("list_sync_locations");
+      const locations = await invokeCommand<SyncLocation[]>("list_sync_locations");
+      if (!Array.isArray(locations)) {
+        return [];
+      }
+      return locations.map((location) => ({
+        ...location,
+        provider: normalizeProvider(location.provider),
+        providerDefinition: normalizeProviderDefinition((location as unknown as Record<string, unknown>).providerDefinition)
+          ?? normalizeProviderDefinition((location as unknown as Record<string, unknown>).provider_definition)
+          ?? null,
+      }));
     },
     async listFileEntries(locationId) {
       if (!native) return [];

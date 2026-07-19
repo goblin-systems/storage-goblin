@@ -32,6 +32,11 @@
           <div class="nav-item">
             <button class="nav-trigger" type="button">View <i data-lucide="chevron-down"></i></button>
             <div class="nav-dropdown">
+              <button class="nav-option" type="button" data-nav-id="nav-home">
+                <span class="nav-option-icon"><i data-lucide="home"></i></span>
+                <span class="nav-option-label">Home</span>
+              </button>
+              <div class="nav-divider"></div>
               <div class="nav-option nav-option--has-sub">
                 <span class="nav-option-icon"><i data-lucide="palette"></i></span>
                 <span class="nav-option-label">Theme</span>
@@ -185,19 +190,31 @@
                   <h2>Create credential</h2>
                   <span id="credentials-support-badge" class="badge default">Desktop app</span>
                 </div>
-                <p id="credentials-support-text" class="hint">Create a named credential once, then reuse it from the Connection dialog without re-entering raw keys there.</p>
+                <p id="credentials-support-text" class="hint">Create a named credential once, then reuse it across sync locations without re-entering secrets.</p>
                 <div class="form-grid">
                   <label class="field-block form-span-2">
                     <span>Name</span>
                     <input id="credential-name-input" type="text" placeholder="Primary bucket access" autocomplete="off" />
                   </label>
                   <label class="field-block form-span-2">
+                    <span>Provider</span>
+                    <select id="credential-provider-select">
+                      <option value="aws">AWS S3</option>
+                      <option value="gcs">Google Cloud Storage (GCS)</option>
+                    </select>
+                  </label>
+                  <p id="credential-provider-help" class="hint form-span-2">Use AWS access keys for S3.</p>
+                  <label id="credential-access-key-field" class="field-block form-span-2">
                     <span>Access key ID</span>
                     <input id="credential-access-key-input" type="text" placeholder="AKIA..." autocomplete="off" />
                   </label>
-                  <label class="field-block form-span-2">
+                  <label id="credential-secret-key-field" class="field-block form-span-2">
                     <span>Secret access key</span>
                     <input id="credential-secret-key-input" type="password" placeholder="Stored securely after creation" autocomplete="off" />
+                  </label>
+                  <label id="credential-service-account-field" class="field-block form-span-2" hidden>
+                    <span>Service account JSON</span>
+                    <textarea id="credential-service-account-input" rows="8" placeholder='Paste the full service account JSON document' spellcheck="false"></textarea>
                   </label>
                 </div>
                 <div class="stack-actions primary-action-row">
@@ -375,12 +392,28 @@
                     <span>Label</span>
                     <input id="location-label-input" type="text" placeholder="My photos backup" autocomplete="off" />
                   </label>
+                  <label id="location-provider-select-field" class="field-block form-span-2" hidden>
+                    <span>Provider</span>
+                    <select id="location-provider-select" hidden aria-hidden="true" tabindex="-1">
+                      <option value="aws">AWS S3</option>
+                      <option value="gcs">Google Cloud Storage (GCS)</option>
+                    </select>
+                  </label>
+                  <div id="location-provider-info" class="form-span-2 hint" hidden>
+                     Provider: <span id="location-provider-label">AWS S3</span> (locked after creation)
+                  </div>
                   <label class="field-block form-span-2">
                     <span>Local folder</span>
                     <input id="location-local-folder-input" type="text" placeholder="C:\Users\you\Photos" />
                   </label>
+                  <label class="field-block form-span-2">
+                    <span>Credential</span>
+                    <select id="location-credential-select">
+                      <option value="">Choose a credential</option>
+                    </select>
+                  </label>
                   <label class="field-block">
-                    <span>Region</span>
+                    <span id="location-region-label">Region</span>
                     <select id="location-region-select">
                       <option value="">Auto-detect</option>
                       <option value="us-east-1">US East (N. Virginia) — us-east-1</option>
@@ -418,12 +451,13 @@
                     <span>Bucket</span>
                     <input id="location-bucket-input" type="text" placeholder="my-bucket" />
                   </label>
-                  <label class="field-block form-span-2">
-                    <span>Credential</span>
-                    <select id="location-credential-select">
-                      <option value="">Choose a credential</option>
-                    </select>
-                  </label>
+                  <p id="location-provider-help" class="hint form-span-2">Choose AWS to use S3 features such as Glacier and object versioning.</p>
+                  <ul id="location-capabilities-list" class="compact-list status-list form-span-2">
+                    <li><span id="location-capability-versioning-label">Object versioning</span><strong id="location-capability-versioning">Available</strong></li>
+                    <li><span id="location-capability-remote-bin-label">Remote bin</span><strong id="location-capability-remote-bin">Available</strong></li>
+                    <li><span id="location-capability-archive-label">Archive storage</span><strong id="location-capability-archive">Available</strong></li>
+                  </ul>
+                  <p id="location-capability-help" class="hint form-span-2">Provider capabilities are loaded from the backend and shown here before saving.</p>
                   <input id="location-object-versioning-enabled-input" type="hidden" value="false" />
                   <label id="location-versioning-checkbox-wrap" class="checkbox-label form-span-2">
                     <input id="location-versioning-checkbox" type="checkbox" />
@@ -466,7 +500,7 @@
                     <small class="hint">Default is 7 days for new sync locations.</small>
                   </label>
                 </div>
-                <p id="location-remote-bin-hint" class="hint">Deleting a file removes the local copy immediately and moves the remote object into the remote bin for this sync location.</p>
+                 <p id="location-remote-bin-hint" class="hint">Deleting a file removes the local copy immediately and moves the remote object into the remote bin for this sync location.</p>
                 <input id="location-editing-id" type="hidden" value="" />
                 <div class="stack-actions primary-action-row">
                   <button id="location-browse-folder-btn" class="secondary-btn slim-btn" type="button">
@@ -487,11 +521,13 @@
             </div>
           </div>
         </section>
+        <div id="screen-settings" hidden></div>
         </div>
       </section>
 
       <div id="app-toast" class="app-toast" role="status" aria-live="polite"></div>
 
+      <div id="drawer-file-versions-backdrop" class="drawer-backdrop" aria-hidden="true" hidden></div>
       <div id="drawer-file-versions" class="drawer drawer-right" aria-hidden="true" hidden>
         <div class="drawer-header">
           <h3>Version History</h3>
@@ -516,28 +552,28 @@
           <ul id="drawer-file-versions-list" class="list"></ul>
           <div id="drawer-file-versions-compare-panel" hidden></div>
         </div>
-        <section id="screen-about" class="modal-backdrop storage-modal" hidden>
-          <div class="modal-card storage-modal-card modal-card--sm" role="dialog" aria-modal="true" aria-labelledby="screen-about-title">
-            <div class="modal-header">
-              <h3 id="screen-about-title">About Storage Goblin</h3>
-              <button class="icon-btn modal-close-btn modal-btn-reject" type="button" aria-label="Close about dialog">
-                <i data-lucide="x"></i>
-              </button>
-            </div>
-            <div class="settings-section storage-modal-section">
-              <div class="form-grid" style="text-align: center; padding: 2rem 0;">
-                <i data-lucide="package-open" style="width: 48px; height: 48px; margin: 0 auto; display: block; color: var(--color-primary);"></i>
-                <h2 style="margin-top: 1rem;">Storage Goblin</h2>
-                <p class="hint">A visual S3 sync tool using Goblin Design System.</p>
-                <div style="margin-top: 1rem;">
-                  <span class="badge default">v0.1.0</span>
-                </div>
+      </div>
+
+      <section id="screen-about" class="modal-backdrop storage-modal" hidden>
+        <div class="modal-card storage-modal-card modal-card--sm" role="dialog" aria-modal="true" aria-labelledby="screen-about-title">
+          <div class="modal-header">
+            <h3 id="screen-about-title">About Storage Goblin</h3>
+            <button class="icon-btn modal-close-btn modal-btn-reject" type="button" aria-label="Close about dialog">
+              <i data-lucide="x"></i>
+            </button>
+          </div>
+          <div class="settings-section storage-modal-section">
+            <div class="form-grid" style="text-align: center; padding: 2rem 0;">
+              <i data-lucide="package-open" style="width: 48px; height: 48px; margin: 0 auto; display: block; color: var(--color-primary);"></i>
+              <h2 style="margin-top: 1rem;">Storage Goblin</h2>
+              <p class="hint">A visual S3 sync tool using Goblin Design System.</p>
+              <div style="margin-top: 1rem;">
+                <span class="badge default">v0.1.0</span>
               </div>
             </div>
           </div>
-        </section>
-
-      </div>
+        </div>
+      </section>
     </main>
   </body>
 </html>

@@ -7,6 +7,7 @@ import type { FileEntry } from "./file-tree";
 type ModalBackdrop = HTMLElement & { __onClose?: () => void };
 
 const {
+  closeDrawerMock,
   closeModalMock,
   changeStorageClassMock,
   confirmModalMock,
@@ -17,6 +18,7 @@ const {
   deleteCredentialMock,
   getSyncStatusMock,
   listCredentialsMock,
+  listFileVersionsMock,
   loadProfileMock,
   listSyncLocationsMock,
   addSyncLocationMock,
@@ -32,13 +34,16 @@ const {
   openPathMock,
   resolveConflictMock,
   bindCheckboxTreeMock,
+  listVersionCountsMock,
   openActivityDebugLogFolderMock,
+  listProviderCapabilitiesMock,
   openModalMock,
   saveProfileSettingsMock,
   showToastMock,
   testCredentialMock,
   toggleLocalCopyMock,
 } = vi.hoisted(() => ({
+  closeDrawerMock: vi.fn(),
   changeStorageClassMock: vi.fn(),
   confirmModalMock: vi.fn().mockResolvedValue(true),
   openModalMock: vi.fn(({ backdrop, onClose }: { backdrop: ModalBackdrop; onClose?: () => void }) => {
@@ -59,6 +64,7 @@ const {
   deleteCredentialMock: vi.fn(),
   getSyncStatusMock: vi.fn(),
   listCredentialsMock: vi.fn(),
+  listFileVersionsMock: vi.fn(),
   loadProfileMock: vi.fn(),
   listSyncLocationsMock: vi.fn(),
   addSyncLocationMock: vi.fn(),
@@ -74,10 +80,12 @@ const {
   openPathMock: vi.fn(),
   resolveConflictMock: vi.fn(),
   openActivityDebugLogFolderMock: vi.fn(),
+  listProviderCapabilitiesMock: vi.fn(),
   saveProfileSettingsMock: vi.fn(),
   showToastMock: vi.fn(),
   testCredentialMock: vi.fn(),
   toggleLocalCopyMock: vi.fn(),
+  listVersionCountsMock: vi.fn(),
   bindCheckboxTreeMock: vi.fn(() => ({
     expand: vi.fn(),
     collapse: vi.fn(),
@@ -111,7 +119,7 @@ vi.mock("@goblin-systems/goblin-design-system", () => ({
     }
     return element as T;
   },
-  closeDrawer: vi.fn(),
+  closeDrawer: closeDrawerMock,
   closeModal: closeModalMock,
   confirmModal: confirmModalMock,
   openDrawer: vi.fn(),
@@ -125,6 +133,7 @@ vi.mock("./client", () => ({
     supportsNativeProfilePersistence: true,
     chooseLocalFolder: chooseLocalFolderMock,
     connectAndSync: vi.fn(),
+    validateConnection: vi.fn(),
     validateS3Connection: vi.fn(),
     listCredentials: listCredentialsMock,
     createCredential: createCredentialMock,
@@ -147,6 +156,7 @@ vi.mock("./client", () => ({
       logFilePath: null,
       logDirectoryPath: null,
     }),
+    listProviderCapabilities: listProviderCapabilitiesMock,
     openActivityDebugLogFolder: openActivityDebugLogFolderMock,
     listSyncLocations: listSyncLocationsMock,
     listFileEntries: listFileEntriesMock,
@@ -165,8 +175,8 @@ vi.mock("./client", () => ({
     updateSyncLocation: updateSyncLocationMock,
     removeSyncLocation: removeSyncLocationMock,
     changeStorageClass: changeStorageClassMock,
-    listFileVersions: vi.fn().mockResolvedValue([]),
-    listVersionCounts: vi.fn().mockResolvedValue([]),
+    listFileVersions: listFileVersionsMock,
+    listVersionCounts: listVersionCountsMock,
     restoreFileVersion: vi.fn().mockResolvedValue(undefined),
     setSyncLocationVersioning: vi.fn().mockResolvedValue({}),
   }),
@@ -184,15 +194,69 @@ function baseCredential(id = "cred-1", name = "Primary"): CredentialSummary {
   return {
     id,
     name,
+    provider: "aws",
     ready: true,
     validationStatus: "untested",
     lastTestedAt: null,
     lastTestMessage: null,
+    summary: {
+      accessKeyIdPreview: "••••A123",
+    },
   };
+}
+
+function baseGcsCredential(id = "cred-gcs-1", name = "GCS Primary"): CredentialSummary {
+  return {
+    id,
+    name,
+    provider: "gcs",
+    ready: true,
+    validationStatus: "untested",
+    lastTestedAt: null,
+    lastTestMessage: null,
+    summary: {
+      clientEmail: "sync@example-project.iam.gserviceaccount.com",
+      projectId: "example-project",
+    },
+  };
+}
+
+function defaultProviderCapabilitiesPayload() {
+  return [
+    {
+      provider: "aws",
+      displayName: "Amazon S3",
+      aliases: ["s3"],
+      credentialKind: "awsAccessKey",
+      supportsBucketCreation: true,
+      supportsObjectVersioning: true,
+      supportsRemoteBin: true,
+      supportsStorageClass: true,
+      supportsFileVersions: true,
+      supportsBucketLifecycle: true,
+      supportsManualCredentials: true,
+      supportsNativeValidation: true,
+    },
+    {
+      provider: "gcs",
+      displayName: "Google Cloud Storage",
+      aliases: ["gcp", "google-cloud-storage", "google cloud storage"],
+      credentialKind: "gcsServiceAccount",
+      supportsBucketCreation: true,
+      supportsObjectVersioning: true,
+      supportsRemoteBin: true,
+      supportsStorageClass: true,
+      supportsFileVersions: true,
+      supportsBucketLifecycle: true,
+      supportsManualCredentials: true,
+      supportsNativeValidation: true,
+    },
+  ];
 }
 
 function baseStoredProfile(overrides: Partial<StoredStorageProfile> = {}): StoredStorageProfile {
   return {
+    provider: "aws",
     localFolder: "",
     region: "",
     bucket: "",
@@ -214,6 +278,7 @@ function baseSyncLocation(id: string, label: string, overrides: Partial<SyncLoca
   return {
     id,
     label,
+    provider: "aws",
     localFolder: `C:/${label.toLowerCase().replace(/\s+/g, "-")}`,
     region: "us-east-1",
     bucket: `${id}-bucket`,
@@ -363,6 +428,10 @@ function listItemByText(selector: string, text: string): HTMLElement {
   return item as HTMLElement;
 }
 
+function selectOptionValues(select: HTMLSelectElement): string[] {
+  return Array.from(select.options).map((option) => option.value);
+}
+
 function getAsyncConfirmModal(): HTMLElement | null {
   return document.querySelector<HTMLElement>(".storage-async-confirm-modal");
 }
@@ -411,17 +480,20 @@ describe("bootstrapStorageGoblin", () => {
     openActivityDebugLogFolderMock.mockReset().mockResolvedValue(undefined);
     showToastMock.mockReset();
     loadProfileMock.mockReset().mockResolvedValue(baseStoredProfile());
+    listProviderCapabilitiesMock.mockReset().mockResolvedValue(defaultProviderCapabilitiesPayload());
     saveProfileSettingsMock.mockReset().mockResolvedValue({});
     toggleLocalCopyMock.mockReset().mockResolvedValue(undefined);
     deleteFileMock.mockReset().mockResolvedValue(undefined);
     deleteFolderMock.mockReset().mockResolvedValue(undefined);
     getSyncStatusMock.mockReset().mockResolvedValue(baseUnconfiguredStatus());
     listCredentialsMock.mockReset().mockResolvedValue([baseCredential()]);
+    listFileVersionsMock.mockReset().mockResolvedValue([]);
     createCredentialMock.mockReset().mockResolvedValue(baseCredential("cred-2", "Archive"));
     testCredentialMock.mockReset().mockImplementation(async ({ credentialId }: { credentialId: string }) => ({
       credential: {
         id: credentialId,
         name: credentialId === "cred-2" ? "Archive" : "Primary",
+        provider: "aws",
         ready: true,
         validationStatus: "passed",
         lastTestedAt: "2026-04-04T12:05:00.000Z",
@@ -464,6 +536,8 @@ describe("bootstrapStorageGoblin", () => {
     removeSyncLocationMock.mockReset().mockResolvedValue({ syncLocations: [] });
     changeStorageClassMock.mockReset().mockResolvedValue(undefined);
     confirmModalMock.mockReset().mockResolvedValue(true);
+    listVersionCountsMock.mockReset().mockResolvedValue([]);
+    closeDrawerMock.mockReset();
   });
 
   afterEach(() => {
@@ -513,6 +587,7 @@ describe("bootstrapStorageGoblin", () => {
 
     expect(createCredentialMock).toHaveBeenCalledWith({
       name: "Archive",
+      provider: "aws",
       accessKeyId: "AKIA123",
       secretAccessKey: "secret",
     });
@@ -521,6 +596,49 @@ describe("bootstrapStorageGoblin", () => {
     expect((document.getElementById("credential-secret-key-input") as HTMLInputElement).value).toBe("");
     expect(document.getElementById("credentials-result")?.textContent).toContain("Saved credential \"Archive\" securely.");
     expect(document.getElementById("credentials-result")?.textContent).toContain("It was not tested yet.");
+  });
+
+  it("renders a GCS-specific credential flow without AWS placeholders", async () => {
+    listCredentialsMock.mockResolvedValueOnce([]);
+
+    cleanup = await bootstrapStorageGoblin();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-credentials']")?.click();
+    const providerSelect = document.getElementById("credential-provider-select") as HTMLSelectElement;
+    providerSelect.value = "gcs";
+    providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect((document.getElementById("credential-access-key-field") as HTMLElement).hidden).toBe(true);
+    expect((document.getElementById("credential-secret-key-field") as HTMLElement).hidden).toBe(true);
+    expect((document.getElementById("credential-service-account-field") as HTMLElement).hidden).toBe(false);
+    expect((document.getElementById("credential-provider-help") as HTMLElement).textContent).toContain("service account JSON");
+    expect((document.getElementById("credential-access-key-input") as HTMLInputElement).placeholder).not.toContain("AKIA");
+  });
+
+  it("creates GCS credentials with service account JSON", async () => {
+    listCredentialsMock.mockResolvedValueOnce([]).mockResolvedValueOnce([baseGcsCredential("cred-gcs-1", "GCS Archive")]);
+    createCredentialMock.mockResolvedValueOnce(baseGcsCredential("cred-gcs-1", "GCS Archive"));
+
+    cleanup = await bootstrapStorageGoblin();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-credentials']")?.click();
+    (document.getElementById("credential-name-input") as HTMLInputElement).value = "GCS Archive";
+    const providerSelect = document.getElementById("credential-provider-select") as HTMLSelectElement;
+    providerSelect.value = "gcs";
+    providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    (document.getElementById("credential-service-account-input") as HTMLTextAreaElement).value = '{"type":"service_account","client_email":"sync@example-project.iam.gserviceaccount.com"}';
+
+    document.getElementById("create-credential-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushTasks();
+
+    expect(createCredentialMock).toHaveBeenCalledWith({
+      name: "GCS Archive",
+      provider: "gcs",
+      credential: {
+        kind: "gcsServiceAccount",
+        serviceAccountJson: '{"type":"service_account","client_email":"sync@example-project.iam.gserviceaccount.com"}',
+      },
+    });
   });
 
   it("surfaces tested-on-create credentials when bucket context exists", async () => {
@@ -564,6 +682,7 @@ describe("bootstrapStorageGoblin", () => {
     expect(testCredentialMock).toHaveBeenCalledWith({
       credentialId: "cred-1",
       context: {
+        provider: "aws",
         region: "",
         bucket: "",
       },
@@ -684,6 +803,7 @@ describe("bootstrapStorageGoblin", () => {
     expect(addSyncLocationMock).toHaveBeenCalledWith(expect.objectContaining({
       id: null,
       label: "My photos",
+      provider: "aws",
       localFolder: "C:/photos",
       bucket: "photo-bucket",
       region: "us-east-1",
@@ -695,6 +815,339 @@ describe("bootstrapStorageGoblin", () => {
     }));
     expect(document.getElementById("locations-result")?.textContent).toContain('Created sync location "My photos"');
     expect(document.getElementById("locations-count-badge")?.textContent).toBe("1 sync location");
+  });
+
+  it("hides provider selection on create and keeps provider locked on edit", async () => {
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos", { provider: "gcs" })]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
+    expect((document.getElementById("location-provider-select-field") as HTMLElement).hidden).toBe(true);
+    expect((document.getElementById("location-provider-info") as HTMLElement).hidden).toBe(true);
+
+    listItemByText("#locations-list li", "My photos")
+      .querySelectorAll<HTMLButtonElement>("button")
+      .forEach((button) => {
+        if (button.textContent === "Edit") {
+          button.click();
+        }
+      });
+
+    expect((document.getElementById("location-provider-select-field") as HTMLElement).hidden).toBe(true);
+    expect((document.getElementById("location-provider-info") as HTMLElement).hidden).toBe(false);
+    expect((document.getElementById("location-provider-label") as HTMLElement).textContent).toContain("Google Cloud Storage");
+  });
+
+  it("infers location provider from the selected credential when creating a location", async () => {
+    listCredentialsMock.mockResolvedValueOnce([baseCredential("cred-aws", "AWS Primary"), baseGcsCredential("cred-gcs", "GCS Primary")]);
+    addSyncLocationMock.mockResolvedValueOnce({ syncLocations: [baseSyncLocation("loc-1", "Assets", { provider: "gcs", credentialProfileId: "cred-gcs" })] });
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
+    const credentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    expect(selectOptionValues(credentialSelect)).toEqual(["", "cred-aws", "cred-gcs"]);
+
+    (document.getElementById("location-label-input") as HTMLInputElement).value = "Assets";
+    (document.getElementById("location-local-folder-input") as HTMLInputElement).value = "C:/assets";
+    (document.getElementById("location-bucket-input") as HTMLInputElement).value = "assets-bucket";
+    credentialSelect.value = "cred-gcs";
+    credentialSelect.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(document.getElementById("location-region-label")?.textContent).toBe("Bucket location");
+    expect(document.getElementById("location-provider-help")?.textContent).toContain("GCS sync locations");
+
+    document.getElementById("save-location-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushTasks();
+
+    expect(addSyncLocationMock).toHaveBeenCalledWith(expect.objectContaining({
+      provider: "gcs",
+      credentialProfileId: "cred-gcs",
+    }));
+  });
+
+  it("shows newly created GCS credentials in the location picker without a manual provider toggle", async () => {
+    const createdGcsCredential = baseGcsCredential("cred-gcs-archive", "GCS Archive");
+    listCredentialsMock
+      .mockResolvedValueOnce([baseCredential("cred-aws", "AWS Primary")])
+      .mockResolvedValueOnce([baseCredential("cred-aws", "AWS Primary"), createdGcsCredential]);
+    createCredentialMock.mockResolvedValueOnce(createdGcsCredential);
+
+    cleanup = await bootstrapStorageGoblin();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-credentials']")?.click();
+    (document.getElementById("credential-name-input") as HTMLInputElement).value = "GCS Archive";
+    const credentialProviderSelect = document.getElementById("credential-provider-select") as HTMLSelectElement;
+    credentialProviderSelect.value = "gcs";
+    credentialProviderSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    (document.getElementById("credential-service-account-input") as HTMLTextAreaElement).value = '{"type":"service_account","client_email":"sync@example-project.iam.gserviceaccount.com"}';
+
+    document.getElementById("create-credential-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushTasks();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
+
+    const locationCredentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    expect(selectOptionValues(locationCredentialSelect)).toEqual(["", "cred-aws", "cred-gcs-archive"]);
+    locationCredentialSelect.value = "cred-gcs-archive";
+    locationCredentialSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(document.getElementById("location-region-label")?.textContent).toBe("Bucket location");
+  });
+
+  it("rerenders the active create-location picker after GCS credential refresh from stale AWS form state", async () => {
+    const createdGcsCredential = baseGcsCredential("cred-gcs-live", "GCS Live");
+    listCredentialsMock
+      .mockResolvedValueOnce([baseCredential("cred-aws", "AWS Primary")])
+      .mockResolvedValueOnce([baseCredential("cred-aws", "AWS Primary"), createdGcsCredential]);
+    createCredentialMock.mockResolvedValueOnce(createdGcsCredential);
+
+    cleanup = await bootstrapStorageGoblin();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
+    const locationCredentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    expect(selectOptionValues(locationCredentialSelect)).toEqual(["", "cred-aws"]);
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-credentials']")?.click();
+    (document.getElementById("credential-name-input") as HTMLInputElement).value = "GCS Live";
+    const credentialProviderSelect = document.getElementById("credential-provider-select") as HTMLSelectElement;
+    credentialProviderSelect.value = "gcs";
+    credentialProviderSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    (document.getElementById("credential-service-account-input") as HTMLTextAreaElement).value = '{"type":"service_account","client_email":"sync@example-project.iam.gserviceaccount.com"}';
+
+    document.getElementById("create-credential-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushTasks();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
+
+    expect(selectOptionValues(locationCredentialSelect)).toEqual(["", "cred-aws", "cred-gcs-live"]);
+    locationCredentialSelect.value = "cred-gcs-live";
+    locationCredentialSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(document.getElementById("location-region-label")?.textContent).toBe("Bucket location");
+  });
+
+  it("uses the effective default provider for create-form hints before a credential is chosen", async () => {
+    loadProfileMock.mockResolvedValueOnce(baseStoredProfile({
+      provider: "aws",
+      credentialProfileId: "cred-gcs-selected",
+      selectedCredential: baseGcsCredential("cred-gcs-selected", "Selected GCS"),
+      selectedCredentialAvailable: true,
+      credentialsStoredSecurely: true,
+    }));
+    listCredentialsMock.mockResolvedValueOnce([
+      baseCredential("cred-aws", "AWS Primary"),
+      baseGcsCredential("cred-gcs-selected", "Selected GCS"),
+    ]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
+
+    const credentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    expect(selectOptionValues(credentialSelect)).toEqual(["", "cred-aws", "cred-gcs-selected"]);
+    expect(document.getElementById("location-region-label")?.textContent).toBe("Bucket location");
+  });
+
+  it("keeps create-location default provider hints on GCS after credential refresh when profile provider is still AWS", async () => {
+    loadProfileMock.mockResolvedValueOnce(baseStoredProfile({
+      provider: "aws",
+      credentialProfileId: "cred-gcs-selected",
+      selectedCredential: baseGcsCredential("cred-gcs-selected", "Selected GCS"),
+      selectedCredentialAvailable: true,
+      credentialsStoredSecurely: true,
+    }));
+    listCredentialsMock
+      .mockResolvedValueOnce([baseGcsCredential("cred-gcs-selected", "Selected GCS")])
+      .mockResolvedValueOnce([baseGcsCredential("cred-gcs-selected", "Selected GCS")]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
+    const credentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+
+    expect(selectOptionValues(credentialSelect)).toEqual(["", "cred-gcs-selected"]);
+    expect(document.getElementById("location-region-label")?.textContent).toBe("Bucket location");
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-credentials']")?.click();
+    await flushTasks();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
+
+    expect(selectOptionValues(credentialSelect)).toEqual(["", "cred-gcs-selected"]);
+    expect(document.getElementById("location-region-label")?.textContent).toBe("Bucket location");
+  });
+
+  it("keeps GCS credentials available when editing a GCS location after prior AWS form state", async () => {
+    const awsCredential = baseCredential("cred-aws", "AWS Primary");
+    const gcsCredential = baseGcsCredential("cred-gcs", "GCS Primary");
+    listCredentialsMock.mockResolvedValueOnce([awsCredential, gcsCredential]);
+    listSyncLocationsMock.mockResolvedValueOnce([
+      baseSyncLocation("loc-gcs", "Assets", {
+        provider: "gcs",
+        bucket: "assets-bucket",
+        region: "US",
+        credentialProfileId: "cred-gcs",
+      }),
+    ]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
+
+    const credentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    expect(selectOptionValues(credentialSelect)).toEqual(["", "cred-aws", "cred-gcs"]);
+
+    listItemByText("#locations-list li", "Assets")
+      .querySelectorAll<HTMLButtonElement>("button")
+      .forEach((button) => {
+        if (button.textContent === "Edit") {
+          button.click();
+        }
+      });
+
+    expect((document.getElementById("location-provider-label") as HTMLElement).textContent).toContain("Google Cloud Storage");
+    expect(selectOptionValues(credentialSelect)).toEqual(["", "cred-gcs"]);
+    expect(credentialSelect.value).toBe("cred-gcs");
+  });
+
+  it("uses provider-specific bucket location language for GCS setup", async () => {
+    listCredentialsMock.mockResolvedValueOnce([baseCredential("cred-aws", "AWS Primary"), baseGcsCredential("cred-gcs", "GCS Primary")]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
+    const credentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    credentialSelect.value = "cred-gcs";
+    credentialSelect.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(document.getElementById("location-region-label")?.textContent).toBe("Bucket location");
+    expect(Array.from((document.getElementById("location-region-select") as HTMLSelectElement).options).map((option) => option.textContent)).toContain("US multi-region");
+    expect(Array.from((document.getElementById("location-region-select") as HTMLSelectElement).options).map((option) => option.textContent)).not.toContain("US East (N. Virginia) — us-east-1");
+    expect(document.getElementById("location-provider-help")?.textContent).toContain("bucket locations");
+  });
+
+  it("derives saved location capability state from backend provider metadata when location payload omits it", async () => {
+    listProviderCapabilitiesMock.mockResolvedValueOnce([
+      {
+        provider: "aws",
+        displayName: "Amazon S3",
+        aliases: ["s3"],
+        credentialKind: "awsAccessKey",
+        supportsBucketCreation: true,
+        supportsObjectVersioning: true,
+        supportsRemoteBin: true,
+        supportsStorageClass: true,
+        supportsFileVersions: true,
+        supportsBucketLifecycle: true,
+        supportsManualCredentials: true,
+        supportsNativeValidation: true,
+      },
+      {
+        provider: "gcs",
+        displayName: "Google Cloud Storage",
+        aliases: ["gcp", "google-cloud-storage", "google cloud storage"],
+        credentialKind: "gcsServiceAccount",
+        supportsBucketCreation: true,
+        supportsObjectVersioning: true,
+        supportsRemoteBin: true,
+        supportsStorageClass: true,
+        supportsFileVersions: true,
+        supportsBucketLifecycle: true,
+        supportsManualCredentials: true,
+        supportsNativeValidation: true,
+      },
+    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "Assets", { provider: "gcs" })]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
+    listItemByText("#locations-list li", "Assets")
+      .querySelectorAll<HTMLButtonElement>("button")
+      .forEach((button) => {
+        if (button.textContent === "Edit") {
+          button.click();
+        }
+      });
+
+    expect(document.getElementById("location-capability-versioning")?.textContent).toBe("Available");
+    expect(document.getElementById("location-capability-archive")?.textContent).toBe("Available");
+    expect(document.getElementById("location-provider-label")?.textContent).toContain("Google Cloud Storage");
+  });
+
+  it("renders provider-aware credential summary details in the credentials list", async () => {
+    listCredentialsMock.mockResolvedValueOnce([
+      baseCredential("cred-aws", "AWS Primary"),
+      baseGcsCredential("cred-gcs", "GCS Primary"),
+    ]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-credentials']")?.click();
+
+    expect(listItemByText("#credentials-list li", "AWS Primary").textContent).toContain("••••A123");
+    expect(listItemByText("#credentials-list li", "GCS Primary").textContent).toContain("sync@example-project.iam.gserviceaccount.com");
+  });
+
+  it("shows GCS remote bin as an available provider capability", async () => {
+    listCredentialsMock.mockResolvedValueOnce([baseGcsCredential("cred-gcs", "GCS Primary")]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
+    const credentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    credentialSelect.value = "cred-gcs";
+    credentialSelect.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(document.getElementById("location-capability-archive")?.textContent).toBe("Available");
+    expect((document.getElementById("location-capability-archive")?.parentElement as HTMLElement).classList.contains("is-disabled")).toBe(false);
+
+    expect(document.getElementById("location-capability-remote-bin")?.textContent).toBe("Available");
+    expect((document.getElementById("location-capability-remote-bin")?.parentElement as HTMLElement).classList.contains("is-disabled")).toBe(false);
+
+    const capabilityHelp = document.getElementById("location-capability-help");
+    expect(capabilityHelp?.textContent).toContain("Remote bin: available");
+  });
+
+  it("distinguishes config and runtime unavailable capability states", async () => {
+    listSyncLocationsMock.mockResolvedValueOnce([
+      baseSyncLocation("loc-1", "My photos", {
+        provider: "gcs",
+        capabilities: {
+          objectVersioning: { status: "config-unavailable", message: "Enable object versioning in the bucket first." },
+          remoteBin: { status: "supported", message: null },
+          archiveStorage: { status: "runtime-unavailable", message: "Archive controls are temporarily unavailable." },
+        },
+      }),
+    ]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
+    listItemByText("#locations-list li", "My photos")
+      .querySelectorAll<HTMLButtonElement>("button")
+      .forEach((button) => {
+        if (button.textContent === "Edit") {
+          button.click();
+        }
+      });
+
+    expect(document.getElementById("location-capability-versioning")?.textContent).toBe("Setup required");
+    expect(document.getElementById("location-capability-archive")?.textContent).toBe("Temporarily unavailable");
+    expect((document.getElementById("location-versioning-btn-wrap") as HTMLElement).hidden).toBe(false);
+    expect((document.getElementById("location-object-versioning-btn") as HTMLButtonElement).disabled).toBe(true);
+    expect(document.getElementById("location-capability-help")?.textContent).toContain("setup required");
+    expect(document.getElementById("location-capability-help")?.textContent).toContain("temporarily unavailable");
   });
 
   it("exposes all conflict strategies in settings and sync location forms", async () => {
@@ -719,7 +1172,7 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     (document.getElementById("conflict-strategy-select") as HTMLSelectElement).value = "prefer-remote";
-    document.getElementById("save-settings-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document.getElementById("save-conflict-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();
 
     expect(saveProfileSettingsMock).toHaveBeenCalledWith(expect.objectContaining({
@@ -737,7 +1190,7 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     (document.getElementById("conflict-strategy-select") as HTMLSelectElement).value = "prefer-remote";
-    document.getElementById("save-settings-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document.getElementById("save-conflict-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
@@ -816,6 +1269,53 @@ describe("bootstrapStorageGoblin", () => {
     expect(enabledInput.disabled).toBe(true);
     expect(retentionInput.disabled).toBe(true);
     expect(hint?.textContent).toContain("Remote bin is unavailable in this mode");
+  });
+
+  it("shows GCS remote bin controls in create flow when a GCS credential is selected", async () => {
+    listCredentialsMock.mockResolvedValueOnce([baseCredential("cred-aws", "AWS Primary"), baseGcsCredential("cred-gcs", "GCS Primary")]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
+    const credentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    credentialSelect.value = "cred-gcs";
+    credentialSelect.dispatchEvent(new Event("change", { bubbles: true }));
+
+    const enabledInput = document.getElementById("location-remote-bin-enabled-input") as HTMLInputElement;
+    const retentionInput = document.getElementById("location-remote-bin-retention-input") as HTMLInputElement;
+    const hint = document.getElementById("location-remote-bin-hint");
+
+    expect(document.getElementById("location-capability-remote-bin")?.textContent).toBe("Available");
+    expect(enabledInput.checked).toBe(true);
+    expect(enabledInput.disabled).toBe(false);
+    expect(retentionInput.disabled).toBe(false);
+    expect(hint?.textContent).toContain("moves the remote object into the remote bin for 7 days");
+  });
+
+  it("keeps GCS remote bin mutually exclusive with object versioning in create flow", async () => {
+    listCredentialsMock.mockResolvedValueOnce([baseGcsCredential("cred-gcs", "GCS Primary")]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
+    const credentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    credentialSelect.value = "cred-gcs";
+    credentialSelect.dispatchEvent(new Event("change", { bubbles: true }));
+
+    const enabledInput = document.getElementById("location-remote-bin-enabled-input") as HTMLInputElement;
+    const retentionInput = document.getElementById("location-remote-bin-retention-input") as HTMLInputElement;
+    const versioningCheckbox = document.getElementById("location-versioning-checkbox") as HTMLInputElement;
+    const hint = document.getElementById("location-remote-bin-hint");
+
+    versioningCheckbox.checked = true;
+    versioningCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(enabledInput.checked).toBe(false);
+    expect(enabledInput.disabled).toBe(true);
+    expect(retentionInput.disabled).toBe(true);
+    expect(hint?.textContent).toContain("object version history");
   });
 
   it("round-trips object versioning and disables remote bin in saved drafts", async () => {
@@ -938,6 +1438,7 @@ describe("bootstrapStorageGoblin", () => {
       {
         id: "loc-1",
         label: "My photos",
+        provider: "aws",
         localFolder: "C:/photos",
         region: "us-east-1",
         bucket: "photo-bucket",
@@ -951,6 +1452,7 @@ describe("bootstrapStorageGoblin", () => {
       {
         id: "loc-2",
         label: "Documents",
+        provider: "aws",
         localFolder: "C:/docs",
         region: "eu-west-1",
         bucket: "doc-bucket",
@@ -1062,6 +1564,7 @@ describe("bootstrapStorageGoblin", () => {
     expect(updateSyncLocationMock).toHaveBeenCalledWith(expect.objectContaining({
       id: "loc-1",
       label: "Updated photos",
+      provider: "aws",
       localFolder: "D:/photos-archive",
       bucket: "archive-bucket",
       region: "eu-west-1",
@@ -1183,6 +1686,41 @@ describe("bootstrapStorageGoblin", () => {
       (badge) => badge.textContent === "selected",
     )).toBe(false);
     expect(listItemByText("#credentials-list li", "Primary").textContent).not.toContain("Selected for this bucket");
+  });
+
+  it("preserves GCS provider identity for unavailable selected credential fallbacks", async () => {
+    loadProfileMock.mockResolvedValueOnce(baseStoredProfile({
+      provider: "aws",
+      bucket: "gcs-bucket",
+      region: "US",
+      credentialProfileId: "cred-gcs-missing",
+      selectedCredential: baseGcsCredential("cred-gcs-missing", "Missing GCS"),
+      selectedCredentialAvailable: true,
+      credentialsStoredSecurely: true,
+    }));
+    listCredentialsMock.mockResolvedValueOnce([baseCredential("cred-aws", "AWS Primary")]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    document.querySelector<HTMLElement>("[data-nav-id='nav-credentials']")?.click();
+    listItemByText("#credentials-list li", "AWS Primary")
+      .querySelectorAll<HTMLButtonElement>("button")
+      .forEach((button) => {
+        if (button.textContent === "Test") {
+          button.click();
+        }
+      });
+    await flushTasks();
+
+    expect(testCredentialMock).toHaveBeenCalledWith({
+      credentialId: "cred-aws",
+      context: {
+        provider: "gcs",
+        region: "US",
+        bucket: "gcs-bucket",
+      },
+    });
   });
 
   it("renders selected location status instead of aggregate status", async () => {
@@ -1544,6 +2082,63 @@ describe("bootstrapStorageGoblin", () => {
       { value: "live:loc-2", text: "Documents" },
       { value: "bin:loc-2", text: "Documents Bin" },
     ]);
+  });
+
+  it("shows deleted-items views for GCS locations when remote bin is supported", async () => {
+    listSyncLocationsMock.mockResolvedValueOnce([
+      baseSyncLocation("loc-gcs", "Assets", {
+        provider: "gcs",
+        objectVersioningEnabled: false,
+        remoteBin: { enabled: true, retentionDays: 7 },
+        capabilities: {
+          objectVersioning: { status: "supported", message: null },
+          remoteBin: { status: "supported", message: null },
+          archiveStorage: { status: "supported", message: null },
+        },
+      }),
+    ]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    const select = document.getElementById("active-location-select") as HTMLSelectElement;
+    const options = Array.from(select.options).map((option) => ({ value: option.value, text: option.textContent }));
+
+    expect(options).toEqual([
+      { value: "", text: "Select a sync location" },
+      { value: "live:loc-gcs", text: "Assets" },
+      { value: "bin:loc-gcs", text: "Assets Bin" },
+    ]);
+  });
+
+  it("uses a deleted label for version-history-backed GCS locations in the dropdown and status", async () => {
+    listSyncLocationsMock.mockResolvedValueOnce([
+      baseSyncLocation("loc-gcs", "Assets", {
+        provider: "gcs",
+        objectVersioningEnabled: true,
+        remoteBin: { enabled: false, retentionDays: 7 },
+      }),
+    ]);
+    listFileEntriesMock.mockResolvedValueOnce([]);
+    listBinEntriesMock.mockResolvedValueOnce([]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    const select = document.getElementById("active-location-select") as HTMLSelectElement;
+    const options = Array.from(select.options).map((option) => ({ value: option.value, text: option.textContent }));
+    expect(options).toEqual([
+      { value: "", text: "Select a sync location" },
+      { value: "live:loc-gcs", text: "Assets" },
+      { value: "bin:loc-gcs", text: "Assets Deleted" },
+    ]);
+
+    select.value = "bin:loc-gcs";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushTasks();
+
+    expect(document.getElementById("status-phase-inline")?.textContent).toBe("Deleted");
+    expect(document.getElementById("status-summary")?.textContent).toContain("Viewing Assets Deleted.");
   });
 
   it("loads bin entries and shows restore actions when bin view is selected", async () => {
@@ -1911,6 +2506,65 @@ describe("bootstrapStorageGoblin", () => {
     expect(document.getElementById("status-overview-remote")?.textContent).toBe("3");
     expect(document.getElementById("status-overview-in-sync")?.textContent).toBe("1");
     expect(document.getElementById("status-overview-not-in-sync")?.textContent).toBe("2");
+  });
+
+  it("keeps versioning badges and history actions when switching to bin and back", async () => {
+    listSyncLocationsMock.mockResolvedValueOnce([
+      baseSyncLocation("loc-1", "My photos", { objectVersioningEnabled: true }),
+    ]);
+    listFileEntriesMock
+      .mockResolvedValueOnce([
+        fileEntry({ path: "photos/a.jpg", status: "synced", hasLocalCopy: true }),
+      ])
+      .mockResolvedValueOnce([
+        fileEntry({ path: "photos/a.jpg", status: "synced", hasLocalCopy: true }),
+      ]);
+    listBinEntriesMock.mockResolvedValueOnce([]);
+    listVersionCountsMock
+      .mockResolvedValueOnce([{ path: "photos/a.jpg", count: 3 }])
+      .mockResolvedValueOnce([{ path: "photos/a.jpg", count: 3 }]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    expect(document.querySelector('.tree-item[data-value="photos/a.jpg"] .tree-version-badge')?.textContent).toBe("3 versions");
+    expect(document.querySelector('.tree-item[data-value="photos/a.jpg"] .tree-versions-btn')).not.toBeNull();
+
+    const select = document.getElementById("active-location-select") as HTMLSelectElement;
+    select.value = "bin:loc-1";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushTasks();
+
+    select.value = "live:loc-1";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushTasks();
+
+    expect(document.querySelector('.tree-item[data-value="photos/a.jpg"] .tree-version-badge')?.textContent).toBe("3 versions");
+    expect(document.querySelector('.tree-item[data-value="photos/a.jpg"] .tree-versions-btn')).not.toBeNull();
+  });
+
+  it("closes the version history drawer with its explicit backdrop", async () => {
+    listSyncLocationsMock.mockResolvedValueOnce([
+      baseSyncLocation("loc-1", "My photos", { objectVersioningEnabled: true }),
+    ]);
+    listFileEntriesMock.mockResolvedValueOnce([
+      fileEntry({ path: "photos/a.jpg", status: "synced", hasLocalCopy: true }),
+    ]);
+    listVersionCountsMock.mockResolvedValueOnce([{ path: "photos/a.jpg", count: 2 }]);
+    listFileVersionsMock.mockResolvedValueOnce([]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/a.jpg"] .tree-versions-btn')?.click();
+    await flushTasks();
+
+    document.getElementById("drawer-file-versions-close")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(closeDrawerMock).toHaveBeenCalledWith(expect.objectContaining({
+      drawer: document.getElementById("drawer-file-versions"),
+      backdrop: document.getElementById("drawer-file-versions-backdrop"),
+    }));
   });
 
   it("does not count cold-storage-only mismatches as live Changes when no work is pending", async () => {
@@ -3008,6 +3662,39 @@ describe("bootstrapStorageGoblin", () => {
 
     expect(getAsyncConfirmModal()?.textContent).toContain(
       '"photos/img001.jpg" will be removed from local storage immediately. The remote object will be deleted using S3 object versioning so it can be restored from version history.',
+    );
+  });
+
+  it("uses provider-neutral versioned delete copy for GCS locations", async () => {
+    listSyncLocationsMock.mockResolvedValueOnce([
+      baseSyncLocation("loc-1", "Assets", {
+        provider: "gcs",
+        objectVersioningEnabled: true,
+        remoteBin: { enabled: false, retentionDays: 7 },
+      }),
+    ]);
+    listFileEntriesMock.mockResolvedValueOnce([
+      fileEntry({ path: "docs/report.pdf" }),
+    ]);
+
+    cleanup = await bootstrapStorageGoblin();
+    await flushTasks();
+
+    document.querySelector<HTMLButtonElement>('.tree-item[data-value="docs/report.pdf"] .tree-delete-btn')?.click();
+    await flushTasks();
+
+    expect(getAsyncConfirmModal()?.textContent).toContain(
+      '"docs/report.pdf" will be removed from local storage immediately. The remote object will be deleted using object version history so it can be restored later.',
+    );
+
+    getAsyncConfirmAcceptButton().click();
+    await flushTasks();
+
+    expect(showToastMock).toHaveBeenCalledWith(
+      "File deleted locally and marked deleted in object version history.",
+      "success",
+      2200,
+      "app-toast",
     );
   });
 

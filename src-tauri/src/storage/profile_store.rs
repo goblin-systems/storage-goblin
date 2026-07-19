@@ -6,8 +6,10 @@ use uuid::Uuid;
 
 use super::{
     app_storage_path,
-    credentials_store::{CredentialSummary, StoredCredentials},
-    s3_adapter::S3ConnectionConfig,
+    credentials_store::{CredentialPayloadInput, CredentialSummary, StoredCredentials},
+    default_provider,
+    object_store::StorageConnectionConfig,
+    provider::{normalize_provider, ProviderCapabilities},
     LOCAL_INDEX_FILE_NAME, PROFILE_FILE_NAME, REMOTE_INDEX_FILE_NAME,
 };
 
@@ -63,11 +65,15 @@ pub struct ConnectionValidationResult {
     pub ok: bool,
     pub message: String,
     pub checked_at: String,
+    pub provider: String,
+    pub capabilities: ProviderCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionValidationInput {
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub local_folder: String,
     pub region: String,
     pub bucket: String,
@@ -82,6 +88,8 @@ pub struct ConnectionValidationInput {
     #[serde(default)]
     pub remote_bin: RemoteBinConfig,
     pub activity_debug_mode_enabled: bool,
+    #[serde(default)]
+    pub credential: Option<CredentialPayloadInput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -94,6 +102,8 @@ pub struct SelectedCredentialState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct StoredProfile {
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub local_folder: String,
     pub region: String,
     pub bucket: String,
@@ -118,6 +128,7 @@ pub struct StoredProfile {
 impl Default for StoredProfile {
     fn default() -> Self {
         Self {
+            provider: default_provider(),
             local_folder: String::new(),
             region: String::new(),
             bucket: String::new(),
@@ -140,6 +151,8 @@ impl Default for StoredProfile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct PersistedProfile {
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub local_folder: String,
     pub region: String,
     pub bucket: String,
@@ -163,6 +176,7 @@ struct PersistedProfile {
 impl Default for PersistedProfile {
     fn default() -> Self {
         Self {
+            provider: default_provider(),
             local_folder: String::new(),
             region: String::new(),
             bucket: String::new(),
@@ -183,6 +197,8 @@ impl Default for PersistedProfile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileDraft {
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub local_folder: String,
     pub region: String,
     pub bucket: String,
@@ -190,6 +206,8 @@ pub struct ProfileDraft {
     pub access_key_id: String,
     #[serde(default)]
     pub secret_access_key: String,
+    #[serde(default)]
+    pub credential: Option<CredentialPayloadInput>,
     pub credential_profile_id: Option<String>,
     pub remote_polling_enabled: bool,
     pub poll_interval_seconds: u32,
@@ -201,6 +219,7 @@ pub struct ProfileDraft {
 
 impl StoredProfile {
     pub fn normalized(mut self) -> Self {
+        self.provider = normalize_provider(&self.provider);
         self.local_folder = self.local_folder.trim().to_string();
         self.region = self.region.trim().to_string();
         self.bucket = self.bucket.trim().to_string();
@@ -253,12 +272,12 @@ impl StoredProfile {
 }
 
 impl ConnectionValidationInput {
-    pub fn to_s3_config(&self, credentials: &StoredCredentials) -> S3ConnectionConfig {
-        S3ConnectionConfig {
+    pub fn to_storage_config(&self, credentials: &StoredCredentials) -> StorageConnectionConfig {
+        StorageConnectionConfig {
+            provider: credentials.provider.clone(),
             region: self.region.trim().to_string(),
             bucket: self.bucket.trim().to_string(),
-            access_key_id: credentials.access_key_id.trim().to_string(),
-            secret_access_key: credentials.secret_access_key.trim().to_string(),
+            credentials: credentials.clone(),
         }
     }
 }
@@ -266,6 +285,7 @@ impl ConnectionValidationInput {
 impl From<ProfileDraft> for StoredProfile {
     fn from(value: ProfileDraft) -> Self {
         Self {
+            provider: value.provider,
             local_folder: value.local_folder.trim().to_string(),
             region: value.region.trim().to_string(),
             bucket: value.bucket.trim().to_string(),
@@ -295,6 +315,7 @@ impl From<PersistedProfile> for StoredProfile {
             .map(|pair| pair.normalized())
             .collect();
         Self {
+            provider: value.provider,
             local_folder: value.local_folder,
             region: value.region,
             bucket: value.bucket,
@@ -326,6 +347,7 @@ impl From<PersistedProfile> for StoredProfile {
 impl From<&StoredProfile> for PersistedProfile {
     fn from(value: &StoredProfile) -> Self {
         Self {
+            provider: value.provider.clone(),
             local_folder: value.local_folder.clone(),
             region: value.region.clone(),
             bucket: value.bucket.clone(),
@@ -411,6 +433,8 @@ fn validate_unsupported_legacy_profile_shape(raw: &str) -> Result<(), String> {
 pub struct SyncPair {
     pub id: String,
     pub label: String,
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub local_folder: String,
     pub region: String,
     pub bucket: String,
@@ -430,6 +454,7 @@ impl Default for SyncPair {
         Self {
             id: Uuid::new_v4().to_string(),
             label: String::new(),
+            provider: default_provider(),
             local_folder: String::new(),
             region: String::new(),
             bucket: String::new(),
@@ -451,6 +476,7 @@ impl SyncPair {
             self.id = Uuid::new_v4().to_string();
         }
         self.label = self.label.trim().to_string();
+        self.provider = normalize_provider(&self.provider);
         self.local_folder = self.local_folder.trim().to_string();
         self.region = self.region.trim().to_string();
         self.bucket = self.bucket.trim().to_string();
@@ -474,6 +500,8 @@ pub fn is_pair_configured(pair: &SyncPair) -> bool {
 pub struct PersistedSyncPair {
     pub id: String,
     pub label: String,
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub local_folder: String,
     pub region: String,
     pub bucket: String,
@@ -495,6 +523,7 @@ impl From<&SyncPair> for PersistedSyncPair {
         Self {
             id: value.id.clone(),
             label: value.label.clone(),
+            provider: value.provider.clone(),
             local_folder: value.local_folder.clone(),
             region: value.region.clone(),
             bucket: value.bucket.clone(),
@@ -515,6 +544,7 @@ impl From<PersistedSyncPair> for SyncPair {
         Self {
             id: value.id,
             label: value.label,
+            provider: value.provider,
             local_folder: value.local_folder,
             region: value.region,
             bucket: value.bucket,
@@ -539,6 +569,8 @@ impl From<PersistedSyncPair> for SyncPair {
 pub struct SyncPairDraft {
     pub id: Option<String>,
     pub label: String,
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub local_folder: String,
     pub region: String,
     pub bucket: String,
@@ -570,6 +602,7 @@ fn migrate_flat_fields_to_sync_pairs(profile: &mut StoredProfile) -> bool {
     let pair = SyncPair {
         id: Uuid::new_v4().to_string(),
         label,
+        provider: profile.provider.clone(),
         local_folder: profile.local_folder.clone(),
         region: profile.region.clone(),
         bucket: profile.bucket.clone(),
@@ -597,15 +630,18 @@ mod tests {
         CONFLICT_STRATEGY_PRESERVE_BOTH,
     };
     use crate::storage::credentials_store::CredentialSummary;
+    use crate::storage::provider::GCS_PROVIDER;
 
     #[test]
     fn normalizes_profile_draft_and_preserves_selected_credential_reference() {
         let stored = StoredProfile::from(ProfileDraft {
+            provider: "aws".into(),
             local_folder: "  C:/sync  ".into(),
             region: " us-east-1 ".into(),
             bucket: " demo-bucket ".into(),
             access_key_id: "AKIA123".into(),
             secret_access_key: "secret".into(),
+            credential: None,
             credential_profile_id: Some(" cred-1 ".into()),
             remote_polling_enabled: false,
             poll_interval_seconds: 1,
@@ -685,10 +721,12 @@ mod tests {
             selected_credential: Some(CredentialSummary {
                 id: "cred-1".into(),
                 name: "Primary".into(),
+                provider: "aws".into(),
                 ready: false,
                 validation_status: Default::default(),
                 last_tested_at: None,
                 last_test_message: None,
+                summary: None,
             }),
             selected_credential_available: true,
         });
@@ -738,6 +776,7 @@ mod tests {
         let pair = SyncPair {
             id: " abc-123 ".into(),
             label: "  My Pair  ".into(),
+            provider: "gcp".into(),
             local_folder: "  C:/data  ".into(),
             region: " eu-west-1 ".into(),
             bucket: " my-bucket ".into(),
@@ -756,6 +795,7 @@ mod tests {
 
         assert_eq!(pair.id, "abc-123");
         assert_eq!(pair.label, "My Pair");
+        assert_eq!(pair.provider, "gcs");
         assert_eq!(pair.local_folder, "C:/data");
         assert_eq!(pair.region, "eu-west-1");
         assert_eq!(pair.bucket, "my-bucket");
@@ -822,6 +862,7 @@ mod tests {
         let original = SyncPair {
             id: "pair-1".into(),
             label: "Test".into(),
+            provider: "aws".into(),
             local_folder: "C:/data".into(),
             region: "us-east-1".into(),
             bucket: "my-bucket".into(),
@@ -860,6 +901,7 @@ mod tests {
     #[test]
     fn migration_creates_pair_from_flat_fields_when_sync_pairs_empty() {
         let mut profile = StoredProfile {
+            provider: "gcp".into(),
             local_folder: "C:/sync".into(),
             region: "us-east-1".into(),
             bucket: "demo-bucket".into(),
@@ -881,6 +923,7 @@ mod tests {
         let pair = &profile.sync_pairs[0];
         assert!(!pair.id.is_empty());
         assert_eq!(pair.label, "demo-bucket");
+        assert_eq!(pair.provider, GCS_PROVIDER);
         assert_eq!(pair.local_folder, "C:/sync");
         assert_eq!(pair.region, "us-east-1");
         assert_eq!(pair.bucket, "demo-bucket");
@@ -900,6 +943,7 @@ mod tests {
     #[test]
     fn migration_uses_bucket_as_label() {
         let mut profile = StoredProfile {
+            provider: "google-cloud-storage".into(),
             local_folder: "C:/sync".into(),
             bucket: "my-bucket".into(),
             ..StoredProfile::default()
@@ -910,6 +954,7 @@ mod tests {
 
         assert_eq!(profile.sync_pairs.len(), 1);
         assert_eq!(profile.sync_pairs[0].label, "my-bucket");
+        assert_eq!(profile.sync_pairs[0].provider, GCS_PROVIDER);
     }
 
     #[test]
@@ -947,6 +992,7 @@ mod tests {
         let pair = SyncPair {
             id: "pair-1".into(),
             label: "Test".into(),
+            provider: "aws".into(),
             local_folder: "C:/data".into(),
             region: "us-east-1".into(),
             bucket: "my-bucket".into(),
@@ -1218,6 +1264,27 @@ mod tests {
         let error = validate_bucket_pair_invariant(&profile)
             .expect_err("object versioning and remote bin must be mutually exclusive");
         assert!(error.contains("cannot enable object versioning and remote bin"));
+    }
+
+    #[test]
+    fn bucket_pair_invariant_allows_gcs_remote_bin_when_versioning_is_disabled() {
+        let profile = StoredProfile {
+            sync_pairs: vec![SyncPair {
+                id: "pair-1".into(),
+                label: "Docs".into(),
+                provider: "gcp".into(),
+                bucket: "bucket-a".into(),
+                remote_bin: RemoteBinConfig {
+                    enabled: true,
+                    retention_days: 7,
+                },
+                ..SyncPair::default()
+            }],
+            ..StoredProfile::default()
+        }
+        .normalized();
+
+        assert!(validate_bucket_pair_invariant(&profile).is_ok());
     }
 
     #[test]
@@ -1520,7 +1587,6 @@ pub fn validate_bucket_pair_invariant(_profile: &StoredProfile) -> Result<(), St
             ));
         }
     }
-
     Ok(())
 }
 

@@ -18,24 +18,30 @@ use super::{
     credentials_store::{
         create_credential, delete_credential as delete_stored_credential,
         ensure_legacy_credentials_migrated, get_credential_summary, list_credentials,
-        load_credentials_by_id, parse_credential_input, record_credential_validation,
+        load_credentials_by_id, parse_credential_input_with_payload, record_credential_validation,
         upsert_credential, CredentialDraft, CredentialInputState, CredentialSummary,
         CredentialValidationStatus, StoredCredentials,
     },
+    default_provider,
     local_index::{
         read_local_index_snapshot, read_local_index_snapshot_for_pair, scan_local_folder,
         write_local_index_snapshot, write_local_index_snapshot_for_pair, LocalIndexSnapshot,
     },
-    now_iso,
+    now_iso, object_store,
     profile_store::{
         is_pair_configured, is_profile_configured, read_profile_from_disk, write_profile_to_disk,
         ConnectionValidationInput, ConnectionValidationResult, ProfileDraft,
         SelectedCredentialState, StoredProfile, SyncPair, SyncPairDraft,
     },
+    provider::{
+        normalize_provider, provider_capabilities, runtime_provider_capabilities,
+        supported_providers, GCS_PROVIDER,
+    },
     remote_bin::{
-        bin_prefix_contains_bin_key, deleted_directory_key, deleted_object_key, namespace_prefix,
-        original_relative_path_from_bin_key_for_pair, pair_bin_prefix, reconcile_lifecycle_rules,
-        LifecycleRulesChange,
+        bin_prefix_contains_bin_key, deleted_directory_key, deleted_object_key,
+        managed_lifecycle_rule_plan, namespace_prefix,
+        original_relative_path_from_bin_key_for_pair, pair_bin_prefix,
+        ManagedLifecycleRulePlan, DEFAULT_REMOTE_BIN_PAIR_ID,
     },
     remote_index::{
         directory_relative_paths_from_key, directory_relative_paths_from_relative_path,
@@ -45,6 +51,7 @@ use super::{
         RemoteObjectEntry,
     },
     s3_adapter,
+    sanitizer::sanitize_sensitive_text,
     sync_db::{
         load_planned_download_queue, load_planned_download_queue_for_pair,
         load_planned_upload_queue, load_planned_upload_queue_for_pair, load_planner_summary,
@@ -117,6 +124,8 @@ pub struct DeleteCredentialResult {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CredentialTestContext {
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub region: String,
     pub bucket: String,
 }
@@ -137,7 +146,9 @@ pub struct CredentialTestResult {
     pub message: String,
     pub bucket_count: usize,
     pub buckets: Vec<String>,
-    pub permissions: Option<s3_adapter::PermissionProbeSummary>,
+    pub permissions: Option<object_store::PermissionProbeSummary>,
+    pub provider: String,
+    pub capabilities: super::provider::ProviderCapabilities,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -416,95 +427,47 @@ async fn list_remote_inventory(
     profile: &StoredProfile,
     credentials: &StoredCredentials,
 ) -> Result<RemoteIndexSnapshot, String> {
-    let config = s3_adapter::S3ConnectionConfig {
-        region: profile.region.clone(),
-        bucket: profile.bucket.clone(),
-        access_key_id: credentials.access_key_id.clone(),
-        secret_access_key: credentials.secret_access_key.clone(),
-    };
-    let client = s3_adapter::build_client(&config).await?;
-    let mut continuation_token: Option<String> = None;
+    let client =
+        object_store::build_client(&storage_config_for_profile(profile, credentials)).await?;
     let mut entries = BTreeMap::new();
     let mut object_count = 0_u64;
     let mut total_bytes = 0_u64;
     let excluded_prefixes = vec![pair_bin_prefix("default")];
 
-    loop {
-        let mut request = client.list_objects_v2().bucket(&profile.bucket);
+    let objects = object_store::list_objects(&client, &profile.bucket, None)
+        .await
+        .map_err(|error| format!("failed to list remote inventory: {error}"))?;
 
-        if let Some(token) = continuation_token.as_deref() {
-            request = request.continuation_token(token);
+    for object in objects {
+        let key = object.key;
+
+        if should_exclude_remote_key(&key, &excluded_prefixes) {
+            continue;
         }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|error| format!("failed to list remote S3 inventory: {error}"))?;
+        let relative_path = relative_path_from_key(&key);
+        let last_modified_at = object.last_modified_at;
+        let etag = object.etag;
+        let storage_class = object.storage_class;
 
-        for object in response.contents() {
-            let Some(key) = object.key() else {
-                continue;
-            };
-
-            if should_exclude_remote_key(key, &excluded_prefixes) {
-                continue;
+        if key.ends_with('/') {
+            let directory_path = relative_path.trim_matches('/');
+            if !directory_path.is_empty() {
+                entries.insert(
+                    directory_path.to_string(),
+                    RemoteObjectEntry {
+                        key: key.clone(),
+                        relative_path: directory_path.to_string(),
+                        kind: "directory".into(),
+                        size: 0,
+                        last_modified_at,
+                        etag,
+                        storage_class: None,
+                    },
+                );
             }
 
-            let relative_path = relative_path_from_key(key);
-            let last_modified_at = object.last_modified().map(|value| value.to_string());
-            let etag = object.e_tag().map(|value| value.to_string());
-            let storage_class = object.storage_class().map(|sc| sc.as_str().to_string());
-
-            if key.ends_with('/') {
-                let directory_path = relative_path.trim_matches('/');
-                if !directory_path.is_empty() {
-                    entries.insert(
-                        directory_path.to_string(),
-                        RemoteObjectEntry {
-                            key: key.to_string(),
-                            relative_path: directory_path.to_string(),
-                            kind: "directory".into(),
-                            size: 0,
-                            last_modified_at,
-                            etag,
-                            storage_class: None,
-                        },
-                    );
-                }
-
-                for directory_path in directory_relative_paths_from_relative_path(&relative_path) {
-                    entries
-                        .entry(directory_path.clone())
-                        .or_insert_with(|| RemoteObjectEntry {
-                            key: s3_adapter::directory_key(&directory_path),
-                            relative_path: directory_path,
-                            kind: "directory".into(),
-                            size: 0,
-                            last_modified_at: None,
-                            etag: None,
-                            storage_class: None,
-                        });
-                }
-                continue;
-            }
-
-            let size = object.size().unwrap_or_default().max(0) as u64;
-            object_count += 1;
-            total_bytes += size;
-            entries.insert(
-                relative_path.clone(),
-                RemoteObjectEntry {
-                    key: key.to_string(),
-                    relative_path,
-                    kind: "file".into(),
-                    size,
-                    last_modified_at,
-                    etag,
-                    storage_class,
-                },
-            );
-
-            for directory_path in directory_relative_paths_from_key(key) {
+            for directory_path in directory_relative_paths_from_relative_path(&relative_path) {
                 entries
                     .entry(directory_path.clone())
                     .or_insert_with(|| RemoteObjectEntry {
@@ -517,12 +480,37 @@ async fn list_remote_inventory(
                         storage_class: None,
                     });
             }
+            continue;
         }
 
-        if response.is_truncated().unwrap_or(false) {
-            continuation_token = response.next_continuation_token().map(ToString::to_string);
-        } else {
-            break;
+        let size = object.size;
+        object_count += 1;
+        total_bytes += size;
+        entries.insert(
+            relative_path.clone(),
+            RemoteObjectEntry {
+                key: key.clone(),
+                relative_path,
+                kind: "file".into(),
+                size,
+                last_modified_at,
+                etag,
+                storage_class,
+            },
+        );
+
+        for directory_path in directory_relative_paths_from_key(&key) {
+            entries
+                .entry(directory_path.clone())
+                .or_insert_with(|| RemoteObjectEntry {
+                    key: s3_adapter::directory_key(&directory_path),
+                    relative_path: directory_path,
+                    kind: "directory".into(),
+                    size: 0,
+                    last_modified_at: None,
+                    etag: None,
+                    storage_class: None,
+                });
         }
     }
 
@@ -709,7 +697,7 @@ fn sync_anchor_from_download(
 }
 
 enum PairTransferExecutor {
-    Real(aws_sdk_s3::Client),
+    Real(object_store::ObjectStoreClient),
     #[cfg(test)]
     Mock,
 }
@@ -730,6 +718,7 @@ fn planned_transfer_test_hooks() -> &'static std::sync::Mutex<Option<PlannedTran
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn set_planned_transfer_test_hooks(hooks: PlannedTransferTestHooks) {
     *planned_transfer_test_hooks()
         .lock()
@@ -737,6 +726,7 @@ fn set_planned_transfer_test_hooks(hooks: PlannedTransferTestHooks) {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn clear_planned_transfer_test_hooks() {
     *planned_transfer_test_hooks()
         .lock()
@@ -787,7 +777,7 @@ async fn build_pair_transfer_executor(
     }
 
     Ok(PairTransferExecutor::Real(
-        s3_adapter::build_client(&s3_config_for_pair(pair, credentials)).await?,
+        object_store::build_client(&storage_config_for_pair(pair, credentials)).await?,
     ))
 }
 
@@ -802,7 +792,7 @@ async fn perform_planned_upload_for_pair(
 ) -> Result<RemoteIndexSnapshot, String> {
     match executor {
         PairTransferExecutor::Real(client) => {
-            s3_adapter::upload_file(
+            object_store::upload_file(
                 client,
                 &pair.bucket,
                 key,
@@ -833,7 +823,7 @@ async fn perform_planned_download_for_pair(
 ) -> Result<(), String> {
     match executor {
         PairTransferExecutor::Real(client) => {
-            s3_adapter::download_file(client, &pair.bucket, key, local_path).await
+            object_store::download_file(client, &pair.bucket, key, local_path).await
         }
         #[cfg(test)]
         PairTransferExecutor::Mock => mock_download_file(_path, local_path),
@@ -1046,7 +1036,13 @@ fn resolve_refresh_credentials(
     profile: &StoredProfile,
     input: &ConnectionValidationInput,
 ) -> Result<StoredCredentials, String> {
-    match parse_credential_input(&input.access_key_id, &input.secret_access_key)? {
+    match parse_credential_input_with_payload(
+        &input.provider,
+        input.credential.as_ref(),
+        &input.access_key_id,
+        &input.secret_access_key,
+        "",
+    )? {
         CredentialInputState::Provided(credentials) => Ok(credentials),
         CredentialInputState::Blank => {
             let selected_id = input
@@ -1108,16 +1104,43 @@ fn resolve_selected_credential_state<R: Runtime>(
     })
 }
 
-fn format_validation_success_message(summary: &s3_adapter::S3ValidationSummary) -> String {
+fn format_storage_validation_success_message(summary: &object_store::ValidationSummary) -> String {
     format!(
         "Validated access to bucket '{}' and sampled {} remote object(s).",
         summary.bucket, summary.object_count_sampled
     )
 }
 
+fn provider_supports_runtime_object_versioning(provider: &str) -> bool {
+    runtime_provider_capabilities(provider)
+        .object_versioning
+        .status
+        == "supported"
+}
+
+fn provider_runtime_object_versioning_message(provider: &str) -> String {
+    let normalized = normalize_provider(provider);
+    let runtime = runtime_provider_capabilities(&normalized);
+    runtime.object_versioning.message.unwrap_or_else(|| {
+        format!(
+            "Provider '{}' does not support object versioning.",
+            normalized
+        )
+    })
+}
+
+fn sync_location_runtime_object_versioning_message(pair: &SyncPair) -> String {
+    format!(
+        "Sync location '{}' cannot use object versioning right now. {}",
+        pair.label,
+        provider_runtime_object_versioning_message(&pair.provider)
+    )
+}
+
 impl CredentialTestContext {
     fn normalized(&self) -> Self {
         Self {
+            provider: normalize_provider(&self.provider),
             region: self.region.trim().to_string(),
             bucket: self.bucket.trim().to_string(),
         }
@@ -1130,17 +1153,19 @@ impl CredentialTestContext {
     fn to_credential_test_config(
         &self,
         credentials: &StoredCredentials,
-    ) -> s3_adapter::S3CredentialTestConfig {
-        s3_adapter::S3CredentialTestConfig {
+    ) -> object_store::StorageCredentialTestConfig {
+        object_store::StorageCredentialTestConfig {
+            provider: credentials.provider.clone(),
             region: self.region.clone(),
-            access_key_id: credentials.access_key_id.clone(),
-            secret_access_key: credentials.secret_access_key.clone(),
+            credentials: credentials.clone(),
+            bucket: self.has_bucket().then(|| self.bucket.clone()),
         }
     }
 }
 
 fn credential_test_context_from_profile(profile: &StoredProfile) -> CredentialTestContext {
     CredentialTestContext {
+        provider: profile.provider.clone(),
         region: profile.region.trim().to_string(),
         bucket: profile.bucket.trim().to_string(),
     }
@@ -1158,7 +1183,30 @@ fn resolve_credential_test_context<R: Runtime>(
     Ok(credential_test_context_from_profile(&profile))
 }
 
-fn format_permission_probe_summary(probes: &[s3_adapter::PermissionProbeResult]) -> String {
+fn should_defer_create_time_credential_test(
+    credential: &CredentialSummary,
+    context: &CredentialTestContext,
+) -> bool {
+    normalize_provider(&credential.provider) == GCS_PROVIDER && !context.has_bucket()
+}
+
+async fn create_credential_with_optional_initial_validation<R: Runtime>(
+    app: &AppHandle<R>,
+    draft: CredentialDraft,
+) -> Result<CredentialSummary, String> {
+    let created = create_credential(app, draft)?;
+
+    let context = resolve_credential_test_context(app, None)?;
+    if should_defer_create_time_credential_test(&created, &context) {
+        return Ok(created);
+    }
+
+    Ok(test_credential_against_context(app, &created.id, &context)
+        .await?
+        .credential)
+}
+
+fn format_permission_probe_summary(probes: &[object_store::PermissionProbeResult]) -> String {
     let labels: Vec<String> = probes
         .iter()
         .filter(|p| p.name != "head_bucket")
@@ -1185,8 +1233,8 @@ fn format_permission_probe_summary(probes: &[s3_adapter::PermissionProbeResult])
     }
 }
 
-async fn test_credential_against_context(
-    app: &AppHandle,
+async fn test_credential_against_context<R: Runtime>(
+    app: &AppHandle<R>,
     credential_id: &str,
     context: &CredentialTestContext,
 ) -> Result<CredentialTestResult, String> {
@@ -1207,12 +1255,26 @@ async fn test_credential_against_context(
 
     // Phase 1: ListBuckets
     let (list_ok, checked_at, base_message, bucket_count, buckets) =
-        match s3_adapter::validate_credentials(&test_config).await {
+        match object_store::validate_credentials(&test_config).await {
             Ok(summary) => {
-                let message = format!(
-                    "Credential is valid. Can access {} bucket(s).",
-                    summary.bucket_count
-                );
+                let message = if summary.bucket_scoped {
+                    let bucket = summary.buckets.first().cloned().or_else(|| {
+                        let bucket = context.bucket.trim();
+                        (!bucket.is_empty()).then(|| bucket.to_string())
+                    });
+                    match bucket {
+                        Some(bucket) => format!(
+                            "Credential is valid for configured bucket '{}'. Project-wide bucket listing is unavailable for these credentials.",
+                            bucket
+                        ),
+                        None => "Credential is valid. Project-wide bucket listing is unavailable until a bucket is configured for validation.".into(),
+                    }
+                } else {
+                    format!(
+                        "Credential is valid. Can access {} bucket(s).",
+                        summary.bucket_count
+                    )
+                };
                 (
                     true,
                     summary.checked_at,
@@ -1226,7 +1288,7 @@ async fn test_credential_against_context(
 
     // Phase 2: Permission probes (when bucket configured)
     let permissions = if context.has_bucket() {
-        Some(s3_adapter::probe_bucket_permissions(&test_config, &context.bucket).await)
+        Some(object_store::probe_bucket_permissions(&test_config, &context.bucket).await)
     } else {
         None
     };
@@ -1255,9 +1317,11 @@ async fn test_credential_against_context(
         credential_id,
         validation_status,
         &checked_at,
-        Some(&validation_message),
+        Some(&sanitize_sensitive_text(&validation_message)),
     )?
     .ok_or_else(|| "The selected credential no longer exists.".to_string())?;
+
+    let provider = normalize_provider(&credentials.provider);
 
     Ok(CredentialTestResult {
         credential,
@@ -1267,6 +1331,8 @@ async fn test_credential_against_context(
         bucket_count,
         buckets,
         permissions,
+        provider: provider.clone(),
+        capabilities: provider_capabilities(&provider),
     })
 }
 
@@ -1292,12 +1358,19 @@ fn resolve_setup_credentials<R: Runtime>(
         .map(ToOwned::to_owned)
         .or_else(|| existing_profile.credential_profile_id.clone());
 
-    match parse_credential_input(&profile.access_key_id, &profile.secret_access_key)? {
+    match parse_credential_input_with_payload(
+        &profile.provider,
+        profile.credential.as_ref(),
+        &profile.access_key_id,
+        &profile.secret_access_key,
+        "",
+    )? {
         CredentialInputState::Provided(credentials) => {
             let summary = upsert_credential(
                 app,
                 requested_credential_id.as_deref(),
                 &resolve_profile_credential_name(existing_profile),
+                &profile.provider,
                 &credentials,
             )?;
             Ok((credentials, summary))
@@ -1374,12 +1447,12 @@ fn store_profile_settings<R: Runtime>(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RemoteBinLifecycleTarget {
+    provider: String,
     bucket: String,
     region: String,
     credential_profile_id: Option<String>,
-    enabled: bool,
-    retention_days: u32,
-    source_label: String,
+    source_labels: Vec<String>,
+    managed_rules: Vec<ManagedLifecycleRulePlan>,
 }
 
 fn target_for_profile(profile: &StoredProfile) -> Option<RemoteBinLifecycleTarget> {
@@ -1388,12 +1461,19 @@ fn target_for_profile(profile: &StoredProfile) -> Option<RemoteBinLifecycleTarge
     }
 
     Some(RemoteBinLifecycleTarget {
+        provider: profile.provider.clone(),
         bucket: profile.bucket.clone(),
         region: profile.region.clone(),
         credential_profile_id: profile.credential_profile_id.clone(),
-        enabled: profile.remote_bin.enabled,
-        retention_days: profile.remote_bin.retention_days,
-        source_label: "profile".into(),
+        source_labels: vec!["profile".into()],
+        managed_rules: if profile.remote_bin.enabled {
+            vec![managed_lifecycle_rule_plan(
+                DEFAULT_REMOTE_BIN_PAIR_ID,
+                profile.remote_bin.retention_days,
+            )]
+        } else {
+            vec![]
+        },
     })
 }
 
@@ -1403,12 +1483,16 @@ fn target_for_pair(pair: &SyncPair) -> Option<RemoteBinLifecycleTarget> {
     }
 
     Some(RemoteBinLifecycleTarget {
+        provider: pair.provider.clone(),
         bucket: pair.bucket.clone(),
         region: pair.region.clone(),
         credential_profile_id: pair.credential_profile_id.clone(),
-        enabled: pair.remote_bin.enabled,
-        retention_days: pair.remote_bin.retention_days,
-        source_label: format!("sync pair '{}'", pair.label),
+        source_labels: vec![format!("sync pair '{}'", pair.label)],
+        managed_rules: if pair.remote_bin.enabled {
+            vec![managed_lifecycle_rule_plan(&pair.id, pair.remote_bin.retention_days)]
+        } else {
+            vec![]
+        },
     })
 }
 
@@ -1419,17 +1503,57 @@ fn remote_bin_targets_by_bucket(
 
     if profile.sync_pairs.is_empty() {
         if let Some(target) = target_for_profile(profile) {
-            targets.insert(target.bucket.clone(), target);
+            merge_remote_bin_target(&mut targets, target);
         }
     } else {
         for pair in &profile.sync_pairs {
             if let Some(target) = target_for_pair(pair) {
-                targets.insert(target.bucket.clone(), target);
+                merge_remote_bin_target(&mut targets, target);
             }
         }
     }
 
     targets
+}
+
+fn merge_remote_bin_target(
+    targets: &mut BTreeMap<String, RemoteBinLifecycleTarget>,
+    target: RemoteBinLifecycleTarget,
+) {
+    let target_key = bucket_key_for_target(&target);
+    match targets.get_mut(&target_key) {
+        Some(existing) => {
+            existing.source_labels.extend(target.source_labels);
+            existing.managed_rules.extend(target.managed_rules);
+            if existing.credential_profile_id.is_none() {
+                existing.credential_profile_id = target.credential_profile_id;
+            }
+            existing.managed_rules.sort();
+            existing.managed_rules.dedup();
+            existing.source_labels.sort();
+            existing.source_labels.dedup();
+        }
+        None => {
+            targets.insert(target_key, target);
+        }
+    }
+}
+
+fn bucket_key_for_target(target: &RemoteBinLifecycleTarget) -> String {
+    format!(
+        "{}\n{}\n{}",
+        normalize_provider(&target.provider),
+        target.bucket,
+        target.region
+    )
+}
+
+fn target_source_label(target: &RemoteBinLifecycleTarget) -> String {
+    match target.source_labels.as_slice() {
+        [] => "remote-bin target".into(),
+        [only] => only.clone(),
+        many => many.join(", "),
+    }
 }
 
 fn planned_remote_bin_reconciliation(
@@ -1446,22 +1570,20 @@ fn planned_remote_bin_reconciliation(
 
     buckets
         .into_iter()
-        .filter_map(
-            |bucket| match (current_targets.get(&bucket), next_targets.get(&bucket)) {
-                (_, Some(target)) if target.enabled => Some(target.clone()),
-                (Some(current_target), Some(next_target)) if current_target.enabled => {
-                    let mut disabled_target = next_target.clone();
-                    disabled_target.enabled = false;
-                    Some(disabled_target)
-                }
-                (Some(current_target), None) if current_target.enabled => {
-                    let mut disabled_target = current_target.clone();
-                    disabled_target.enabled = false;
-                    Some(disabled_target)
-                }
-                _ => None,
-            },
-        )
+        .filter_map(|bucket| match (current_targets.get(&bucket), next_targets.get(&bucket)) {
+            (_, Some(target)) if !target.managed_rules.is_empty() => Some(target.clone()),
+            (Some(current_target), Some(next_target)) if !current_target.managed_rules.is_empty() => {
+                let mut disabled_target = next_target.clone();
+                disabled_target.managed_rules.clear();
+                Some(disabled_target)
+            }
+            (Some(current_target), None) if !current_target.managed_rules.is_empty() => {
+                let mut disabled_target = current_target.clone();
+                disabled_target.managed_rules.clear();
+                Some(disabled_target)
+            }
+            _ => None,
+        })
         .collect()
 }
 
@@ -1495,7 +1617,7 @@ where
     Reconcile: FnMut(&RemoteBinLifecycleTarget) -> Result<(), String>,
     Write: FnOnce(&StoredProfile) -> Result<(), String>,
 {
-    for target in targets {
+    for target in filter_remote_bin_reconciliation_targets(targets) {
         reconcile_bucket(&target)?;
     }
 
@@ -1510,73 +1632,63 @@ fn load_credentials_for_remote_bin_target<R: Runtime>(
     let credential_id = target.credential_profile_id.as_deref().ok_or_else(|| {
         format!(
             "A saved credential is required to reconcile remote bin lifecycle for {} on bucket '{}'.",
-            target.source_label, target.bucket
+            target_source_label(target), target.bucket
         )
     })?;
 
     load_credentials_by_id(app, credential_id)?.ok_or_else(|| {
         format!(
             "Credential '{}' for {} is unavailable.",
-            credential_id, target.source_label
+            credential_id, target_source_label(target)
         )
     })
+}
+
+fn provider_supports_remote_bin_lifecycle_reconciliation(provider: &str) -> bool {
+    object_store::supports_remote_bin_lifecycle_reconciliation(provider)
+}
+
+fn remote_bin_lifecycle_reconciliation_unsupported_message(
+    target: &RemoteBinLifecycleTarget,
+) -> String {
+    format!(
+        "Provider '{}' does not support remote-bin lifecycle reconciliation for {} on bucket '{}'.",
+        normalize_provider(&target.provider),
+        target_source_label(target),
+        target.bucket
+    )
+}
+
+fn filter_remote_bin_reconciliation_targets(
+    targets: Vec<RemoteBinLifecycleTarget>,
+) -> Vec<RemoteBinLifecycleTarget> {
+    targets
+        .into_iter()
+        .filter(|target| provider_supports_remote_bin_lifecycle_reconciliation(&target.provider))
+        .collect()
 }
 
 async fn reconcile_remote_bin_lifecycle_target<R: Runtime>(
     app: &AppHandle<R>,
     target: &RemoteBinLifecycleTarget,
 ) -> Result<(), String> {
-    let credentials = load_credentials_for_remote_bin_target(app, target)?;
-    let config = s3_adapter::S3ConnectionConfig {
-        region: target.region.clone(),
-        bucket: target.bucket.clone(),
-        access_key_id: credentials.access_key_id,
-        secret_access_key: credentials.secret_access_key,
-    };
-    let client = s3_adapter::build_client(&config).await?;
-    let lifecycle_state =
-        s3_adapter::get_bucket_lifecycle_configuration(&client, &target.bucket).await?;
-
-    if target.enabled && s3_adapter::bucket_versioning_enabled(&client, &target.bucket).await? {
-        return Err(format!(
-            "Remote bin requires bucket versioning to be disabled for bucket '{}'.",
-            target.bucket
+    if !provider_supports_remote_bin_lifecycle_reconciliation(&target.provider) {
+        return Err(remote_bin_lifecycle_reconciliation_unsupported_message(
+            target,
         ));
     }
 
-    let change = reconcile_lifecycle_rules(
-        lifecycle_state
-            .configuration
-            .as_ref()
-            .map(|configuration| configuration.rules()),
-        target.enabled,
-        target.retention_days,
-    );
+    let credentials = load_credentials_for_remote_bin_target(app, target)?;
+    let client = object_store::build_client(&object_store::StorageConnectionConfig {
+        provider: target.provider.clone(),
+        region: target.region.clone(),
+        bucket: target.bucket.clone(),
+        credentials,
+    })
+    .await?;
 
-    match change {
-        LifecycleRulesChange::None => Ok(()),
-        LifecycleRulesChange::Replace(rules) => {
-            let configuration = aws_sdk_s3::types::BucketLifecycleConfiguration::builder()
-                .set_rules(Some(rules))
-                .build()
-                .map_err(|error| {
-                    format!(
-                        "failed to build lifecycle configuration for bucket '{}': {error}",
-                        target.bucket
-                    )
-                })?;
-            s3_adapter::put_bucket_lifecycle_configuration(
-                &client,
-                &target.bucket,
-                configuration,
-                lifecycle_state.transition_default_minimum_object_size,
-            )
-            .await
-        }
-        LifecycleRulesChange::DeleteBucketLifecycle => {
-            s3_adapter::delete_bucket_lifecycle(&client, &target.bucket).await
-        }
-    }
+    object_store::reconcile_remote_bin_lifecycle(&client, &target.bucket, &target.managed_rules)
+        .await
 }
 
 async fn apply_sync_location_versioning<R: Runtime>(
@@ -1585,8 +1697,11 @@ async fn apply_sync_location_versioning<R: Runtime>(
     enabled: bool,
 ) -> Result<(), String> {
     let credentials = resolve_credentials_for_pair(app, pair)?;
-    let client = s3_adapter::build_client(&s3_config_for_pair(pair, &credentials)).await?;
-    s3_adapter::set_bucket_versioning(&client, &pair.bucket, enabled).await
+    if !provider_supports_runtime_object_versioning(&pair.provider) {
+        return Err(sync_location_runtime_object_versioning_message(&pair));
+    }
+    let client = object_store::build_client(&storage_config_for_pair(pair, &credentials)).await?;
+    object_store::set_bucket_versioning(&client, &pair.bucket, enabled).await
 }
 
 async fn reconcile_pair_object_versioning<R: Runtime>(
@@ -1594,14 +1709,16 @@ async fn reconcile_pair_object_versioning<R: Runtime>(
     pair: &SyncPair,
 ) -> Result<(), String> {
     let credentials = resolve_credentials_for_pair(app, pair)?;
-    let client = s3_adapter::build_client(&s3_config_for_pair(pair, &credentials)).await?;
-    let currently_enabled =
-        s3_adapter::bucket_versioning_enabled(&client, &pair.bucket).await?;
+    if !provider_supports_runtime_object_versioning(&pair.provider) {
+        return Err(sync_location_runtime_object_versioning_message(&pair));
+    }
+    let client = object_store::build_client(&storage_config_for_pair(pair, &credentials)).await?;
+    let currently_enabled = object_store::bucket_versioning_enabled(&client, &pair.bucket).await?;
 
     if pair.object_versioning_enabled && !currently_enabled {
-        s3_adapter::set_bucket_versioning(&client, &pair.bucket, true).await?;
+        object_store::set_bucket_versioning(&client, &pair.bucket, true).await?;
     } else if !pair.object_versioning_enabled && currently_enabled {
-        s3_adapter::set_bucket_versioning(&client, &pair.bucket, false).await?;
+        object_store::set_bucket_versioning(&client, &pair.bucket, false).await?;
     }
 
     Ok(())
@@ -1626,15 +1743,15 @@ where
     )
 }
 
-fn s3_config_for_profile(
+fn storage_config_for_profile(
     profile: &StoredProfile,
     credentials: &StoredCredentials,
-) -> s3_adapter::S3ConnectionConfig {
-    s3_adapter::S3ConnectionConfig {
+) -> object_store::StorageConnectionConfig {
+    object_store::StorageConnectionConfig {
+        provider: credentials.provider.clone(),
         region: profile.region.clone(),
         bucket: profile.bucket.clone(),
-        access_key_id: credentials.access_key_id.clone(),
-        secret_access_key: credentials.secret_access_key.clone(),
+        credentials: credentials.clone(),
     }
 }
 
@@ -1654,7 +1771,8 @@ async fn execute_planned_upload_queue(
     );
     let credentials = resolve_execution_credentials(app, profile, session_credentials)?;
     let queue_items = load_planned_upload_queue(app, profile)?;
-    let client = s3_adapter::build_client(&s3_config_for_profile(profile, &credentials)).await?;
+    let client =
+        object_store::build_client(&storage_config_for_profile(profile, &credentials)).await?;
     let uploads_ran = !queue_items.is_empty();
     let mut execution_error: Option<String> = None;
 
@@ -1681,7 +1799,7 @@ async fn execute_planned_upload_queue(
             );
 
             match run_with_timeout(
-                s3_adapter::create_directory_placeholder(&client, &profile.bucket, &key),
+                object_store::create_directory_placeholder(&client, &profile.bucket, &key),
                 PLANNED_UPLOAD_TIMEOUT,
                 || {
                     format!(
@@ -1895,7 +2013,7 @@ async fn execute_planned_upload_queue(
         );
 
         match run_with_timeout(
-            s3_adapter::upload_file(
+            object_store::upload_file(
                 &client,
                 &profile.bucket,
                 &key,
@@ -2037,7 +2155,8 @@ async fn execute_planned_download_queue(
     );
     let credentials = resolve_execution_credentials(app, profile, session_credentials)?;
     let queue_items = load_planned_download_queue(app, profile)?;
-    let client = s3_adapter::build_client(&s3_config_for_profile(profile, &credentials)).await?;
+    let client =
+        object_store::build_client(&storage_config_for_profile(profile, &credentials)).await?;
     let downloads_ran = !queue_items.is_empty();
     let mut execution_error: Option<String> = None;
 
@@ -2133,7 +2252,7 @@ async fn execute_planned_download_queue(
         );
 
         match run_with_timeout(
-            s3_adapter::download_file(&client, &profile.bucket, &key, &local_path),
+            object_store::download_file(&client, &profile.bucket, &key, &local_path),
             PLANNED_DOWNLOAD_TIMEOUT,
             || {
                 format!(
@@ -2868,11 +2987,45 @@ pub async fn validate_s3_connection(
     app: AppHandle,
     input: ConnectionValidationInput,
 ) -> Result<ConnectionValidationResult, String> {
+    validate_storage_connection(app, input).await
+}
+
+#[tauri::command]
+pub async fn validate_storage_connection(
+    app: AppHandle,
+    input: ConnectionValidationInput,
+) -> Result<ConnectionValidationResult, String> {
     let profile = saved_profile_with_credentials_state(&app)?;
     let credentials = resolve_refresh_credentials(&app, &profile, &input)?;
-    if input.object_versioning_enabled {
-        let client = s3_adapter::build_client(&input.to_s3_config(&credentials)).await?;
-        if !s3_adapter::bucket_versioning_enabled(&client, &input.bucket).await? {
+    let provider = normalize_provider(&credentials.provider);
+    let capabilities = provider_capabilities(&provider);
+
+    if input.object_versioning_enabled && !provider_supports_runtime_object_versioning(&provider) {
+        return Ok(ConnectionValidationResult {
+            ok: false,
+            checked_at: now_iso(),
+            message: provider_runtime_object_versioning_message(&provider),
+            provider,
+            capabilities,
+        });
+    }
+
+    if input.remote_bin.enabled && !capabilities.supports_remote_bin {
+        return Ok(ConnectionValidationResult {
+            ok: false,
+            checked_at: now_iso(),
+            message: format!(
+                "Provider '{}' does not support remote bin in the native backend.",
+                provider
+            ),
+            provider,
+            capabilities,
+        });
+    }
+
+    if input.object_versioning_enabled && provider != GCS_PROVIDER {
+        let client = object_store::build_client(&input.to_storage_config(&credentials)).await?;
+        if !object_store::bucket_versioning_enabled(&client, &input.bucket).await? {
             return Ok(ConnectionValidationResult {
                 ok: false,
                 checked_at: now_iso(),
@@ -2880,16 +3033,21 @@ pub async fn validate_s3_connection(
                     "Bucket '{}' must have versioning enabled before object versioning can be used.",
                     input.bucket
                 ),
+                provider,
+                capabilities,
             });
         }
     }
-    let summary = s3_adapter::validate_connection(&input.to_s3_config(&credentials)).await?;
-    let message = format_validation_success_message(&summary);
+
+    let summary = object_store::validate_connection(&input.to_storage_config(&credentials)).await?;
+    let message = format_storage_validation_success_message(&summary);
 
     Ok(ConnectionValidationResult {
         ok: true,
         checked_at: summary.checked_at,
         message,
+        provider,
+        capabilities,
     })
 }
 
@@ -2904,12 +3062,12 @@ pub async fn create_credential_command(
     app: AppHandle,
     draft: CredentialDraft,
 ) -> Result<CredentialSummary, String> {
-    let created = create_credential(&app, draft)?;
+    create_credential_with_optional_initial_validation(&app, draft).await
+}
 
-    let context = resolve_credential_test_context(&app, None)?;
-    Ok(test_credential_against_context(&app, &created.id, &context)
-        .await?
-        .credential)
+#[tauri::command]
+pub fn list_provider_capabilities_command() -> Vec<super::provider::ProviderCapabilities> {
+    supported_providers()
 }
 
 #[tauri::command]
@@ -3047,6 +3205,7 @@ pub fn load_profile(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn load_profile_impl<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, SyncState>,
@@ -3179,6 +3338,7 @@ pub fn save_profile_settings(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn save_profile_settings_impl<R: Runtime>(
     app: AppHandle<R>,
     _state: State<'_, SyncState>,
@@ -3209,7 +3369,8 @@ pub async fn connect_and_sync(
         )),
     );
 
-    s3_adapter::ensure_bucket_exists(&s3_config_for_profile(&stored_profile, &credentials)).await?;
+    object_store::ensure_bucket_exists(&storage_config_for_profile(&stored_profile, &credentials))
+        .await?;
     emit_success_activity(
         &app,
         &debug_state,
@@ -4128,15 +4289,29 @@ pub async fn execute_planned_uploads(
 // Per-pair helpers (private — not exposed as Tauri commands)
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn s3_config_for_pair(
     pair: &SyncPair,
     credentials: &StoredCredentials,
 ) -> s3_adapter::S3ConnectionConfig {
     s3_adapter::S3ConnectionConfig {
+        provider: credentials.provider.clone(),
         region: pair.region.clone(),
         bucket: pair.bucket.clone(),
         access_key_id: credentials.access_key_id.clone(),
         secret_access_key: credentials.secret_access_key.clone(),
+    }
+}
+
+fn storage_config_for_pair(
+    pair: &SyncPair,
+    credentials: &StoredCredentials,
+) -> object_store::StorageConnectionConfig {
+    object_store::StorageConnectionConfig {
+        provider: credentials.provider.clone(),
+        region: pair.region.clone(),
+        bucket: pair.bucket.clone(),
+        credentials: credentials.clone(),
     }
 }
 
@@ -4497,92 +4672,51 @@ async fn list_remote_inventory_for_pair(
     pair: &SyncPair,
     credentials: &StoredCredentials,
 ) -> Result<RemoteIndexSnapshot, String> {
-    let config = s3_config_for_pair(pair, credentials);
-    let client = s3_adapter::build_client(&config).await?;
-    let mut continuation_token: Option<String> = None;
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
     let mut entries = BTreeMap::new();
     let mut object_count = 0_u64;
     let mut total_bytes = 0_u64;
     let excluded_prefixes = vec![pair_bin_prefix(&pair.id)];
 
-    loop {
-        let mut request = client.list_objects_v2().bucket(&pair.bucket);
-
-        if let Some(token) = continuation_token.as_deref() {
-            request = request.continuation_token(token);
-        }
-
-        let response = request.send().await.map_err(|error| {
+    let objects = object_store::list_objects(&client, &pair.bucket, None)
+        .await
+        .map_err(|error| {
             format!(
-                "failed to list remote S3 inventory for pair '{}': {error}",
+                "failed to list remote inventory for pair '{}': {error}",
                 pair.label
             )
         })?;
 
-        for object in response.contents() {
-            let Some(key) = object.key() else {
-                continue;
-            };
+    for object in objects {
+        let key = object.key;
 
-            if should_exclude_remote_key(key, &excluded_prefixes) {
-                continue;
+        if should_exclude_remote_key(&key, &excluded_prefixes) {
+            continue;
+        }
+
+        let relative_path = relative_path_from_key(&key);
+        let last_modified_at = object.last_modified_at;
+        let etag = object.etag;
+        let storage_class = object.storage_class;
+
+        if key.ends_with('/') {
+            let directory_path = relative_path.trim_matches('/');
+            if !directory_path.is_empty() {
+                entries.insert(
+                    directory_path.to_string(),
+                    RemoteObjectEntry {
+                        key: key.clone(),
+                        relative_path: directory_path.to_string(),
+                        kind: "directory".into(),
+                        size: 0,
+                        last_modified_at,
+                        etag,
+                        storage_class: None,
+                    },
+                );
             }
 
-            let relative_path = relative_path_from_key(key);
-            let last_modified_at = object.last_modified().map(|value| value.to_string());
-            let etag = object.e_tag().map(|value| value.to_string());
-            let storage_class = object.storage_class().map(|sc| sc.as_str().to_string());
-
-            if key.ends_with('/') {
-                let directory_path = relative_path.trim_matches('/');
-                if !directory_path.is_empty() {
-                    entries.insert(
-                        directory_path.to_string(),
-                        RemoteObjectEntry {
-                            key: key.to_string(),
-                            relative_path: directory_path.to_string(),
-                            kind: "directory".into(),
-                            size: 0,
-                            last_modified_at,
-                            etag,
-                            storage_class: None,
-                        },
-                    );
-                }
-
-                for directory_path in directory_relative_paths_from_relative_path(&relative_path) {
-                    entries
-                        .entry(directory_path.clone())
-                        .or_insert_with(|| RemoteObjectEntry {
-                            key: s3_adapter::directory_key(&directory_path),
-                            relative_path: directory_path,
-                            kind: "directory".into(),
-                            size: 0,
-                            last_modified_at: None,
-                            etag: None,
-                            storage_class: None,
-                        });
-                }
-                continue;
-            }
-
-            let size = object.size().unwrap_or_default().max(0) as u64;
-            object_count += 1;
-            total_bytes += size;
-            entries.insert(
-                relative_path.clone(),
-                RemoteObjectEntry {
-                    key: key.to_string(),
-                    relative_path,
-                    kind: "file".into(),
-                    size,
-                    last_modified_at,
-                    etag,
-                    storage_class,
-                },
-            );
-
-            for directory_path in directory_relative_paths_from_key(key) {
+            for directory_path in directory_relative_paths_from_relative_path(&relative_path) {
                 entries
                     .entry(directory_path.clone())
                     .or_insert_with(|| RemoteObjectEntry {
@@ -4595,12 +4729,37 @@ async fn list_remote_inventory_for_pair(
                         storage_class: None,
                     });
             }
+            continue;
         }
 
-        if response.is_truncated().unwrap_or(false) {
-            continuation_token = response.next_continuation_token().map(ToString::to_string);
-        } else {
-            break;
+        let size = object.size;
+        object_count += 1;
+        total_bytes += size;
+        entries.insert(
+            relative_path.clone(),
+            RemoteObjectEntry {
+                key: key.clone(),
+                relative_path,
+                kind: "file".into(),
+                size,
+                last_modified_at,
+                etag,
+                storage_class,
+            },
+        );
+
+        for directory_path in directory_relative_paths_from_key(&key) {
+            entries
+                .entry(directory_path.clone())
+                .or_insert_with(|| RemoteObjectEntry {
+                    key: s3_adapter::directory_key(&directory_path),
+                    relative_path: directory_path,
+                    kind: "directory".into(),
+                    size: 0,
+                    last_modified_at: None,
+                    etag: None,
+                    storage_class: None,
+                });
         }
     }
 
@@ -4687,7 +4846,7 @@ async fn execute_planned_upload_queue_for_pair<R: Runtime>(
             match match &executor {
                 PairTransferExecutor::Real(client) => {
                     run_with_timeout(
-                        s3_adapter::create_directory_placeholder(client, &pair.bucket, &key),
+                        object_store::create_directory_placeholder(client, &pair.bucket, &key),
                         PLANNED_UPLOAD_TIMEOUT,
                         || {
                             format!(
@@ -5812,6 +5971,7 @@ fn add_sync_pair_impl(app: AppHandle, draft: SyncPairDraft) -> Result<StoredProf
     let pair = SyncPair {
         id: Uuid::new_v4().to_string(),
         label: draft.label,
+        provider: draft.provider,
         local_folder: draft.local_folder,
         region: draft.region,
         bucket: draft.bucket,
@@ -5847,6 +6007,7 @@ fn add_sync_pair_impl<R: Runtime>(
     let pair = SyncPair {
         id: Uuid::new_v4().to_string(),
         label: draft.label,
+        provider: draft.provider,
         local_folder: draft.local_folder,
         region: draft.region,
         bucket: draft.bucket,
@@ -5897,6 +6058,7 @@ fn update_sync_pair_impl(app: AppHandle, draft: SyncPairDraft) -> Result<StoredP
     let updated = SyncPair {
         id: pair_id.to_string(),
         label: draft.label,
+        provider: draft.provider,
         local_folder: draft.local_folder,
         region: draft.region,
         bucket: draft.bucket,
@@ -5942,6 +6104,7 @@ fn update_sync_pair_impl<R: Runtime>(
     let updated = SyncPair {
         id: pair_id.to_string(),
         label: draft.label,
+        provider: draft.provider,
         local_folder: draft.local_folder,
         region: draft.region,
         bucket: draft.bucket,
@@ -6083,17 +6246,34 @@ fn sync_pair_for_location(profile: &StoredProfile, location_id: &str) -> Result<
         .ok_or_else(|| format!("Sync pair '{location_id}' not found."))
 }
 
+#[allow(unreachable_code)]
 fn reveal_in_file_manager(path: &Path, highlight_file: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut cmd = std::process::Command::new("explorer");
+    {
+        let mut command = std::process::Command::new("explorer");
         if highlight_file {
-            cmd.arg("/select,").arg(path);
+            let target = path.canonicalize().map_err(|error| {
+                format!(
+                    "failed to canonicalize '{}' for reveal: {error}",
+                    path.display()
+                )
+            })?;
+            let mut args = std::ffi::OsString::from("/select,");
+            args.push(&target);
+            command.arg(args);
         } else {
-            cmd.arg(path);
+            command.arg(path);
         }
-        cmd
-    };
+
+        command.spawn().map_err(|error| {
+            format!(
+                "failed to reveal '{}' in the file manager: {error}",
+                path.display()
+            )
+        })?;
+
+        return Ok(());
+    }
 
     #[cfg(target_os = "macos")]
     let mut command = {
@@ -6118,6 +6298,7 @@ fn reveal_in_file_manager(path: &Path, highlight_file: bool) -> Result<(), Strin
         cmd
     };
 
+    #[cfg(any(target_os = "macos", all(unix, not(target_os = "macos"))))]
     command.spawn().map_err(|error| {
         format!(
             "failed to reveal '{}' in the file manager: {error}",
@@ -6129,10 +6310,14 @@ fn reveal_in_file_manager(path: &Path, highlight_file: bool) -> Result<(), Strin
 }
 
 fn open_path_with_default_app(path: &Path) -> Result<(), String> {
+    // Use `explorer <path>` rather than `cmd /C start`: cmd.exe re-parses its
+    // command line, so a path containing shell metacharacters (`&`, `^`, `%`)
+    // could execute. `explorer` receives the path as a single argument and
+    // opens it with its default handler without a shell round-trip.
     #[cfg(target_os = "windows")]
     let mut command = {
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.arg("/C").arg("start").arg("").arg(path);
+        let mut cmd = std::process::Command::new("explorer");
+        cmd.arg(path);
         cmd
     };
 
@@ -6399,8 +6584,8 @@ async fn download_remote_file_for_pair(
         return mock_download_file(_path, destination_path);
     }
 
-    let client = s3_adapter::build_client(&s3_config_for_pair(pair, credentials)).await?;
-    s3_adapter::download_file(&client, &pair.bucket, key, destination_path).await
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
+    object_store::download_file(&client, &pair.bucket, key, destination_path).await
 }
 
 async fn upload_local_file_for_pair_and_refresh_remote(
@@ -6416,8 +6601,8 @@ async fn upload_local_file_for_pair_and_refresh_remote(
         return mock_upload_refresh_snapshot(_path);
     }
 
-    let client = s3_adapter::build_client(&s3_config_for_pair(pair, credentials)).await?;
-    s3_adapter::upload_file(
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
+    object_store::upload_file(
         &client,
         &pair.bucket,
         key,
@@ -6770,7 +6955,7 @@ fn validate_remote_restore_destination(
 async fn validate_restore_destination(
     pair: &SyncPair,
     credentials: &StoredCredentials,
-    client: &aws_sdk_s3::Client,
+    client: &object_store::ObjectStoreClient,
     destination_path: &str,
 ) -> Result<(), String> {
     validate_local_restore_destination(&pair.local_folder, destination_path)?;
@@ -6778,7 +6963,7 @@ async fn validate_restore_destination(
     let exact_file_key = s3_adapter::object_key(destination_path);
     let exact_directory_key = s3_adapter::directory_key(destination_path);
 
-    if s3_adapter::object_exists(client, &pair.bucket, &exact_file_key).await? {
+    if object_store::object_exists(client, &pair.bucket, &exact_file_key).await? {
         return Err(format!(
             "Cannot restore to '{}' because remote destination key already exists.",
             destination_path
@@ -6787,7 +6972,7 @@ async fn validate_restore_destination(
 
     if !exact_directory_key.is_empty()
         && exact_directory_key != exact_file_key
-        && s3_adapter::object_exists(client, &pair.bucket, &exact_directory_key).await?
+        && object_store::object_exists(client, &pair.bucket, &exact_directory_key).await?
     {
         return Err(format!(
             "Cannot restore to '{}' because remote directory placeholder already exists.",
@@ -7122,14 +7307,17 @@ async fn list_versioned_bin_inventory_for_pair(
     pair: &SyncPair,
     credentials: &StoredCredentials,
 ) -> Result<Vec<VersionedBinEntry>, String> {
-    let client = s3_adapter::build_client(&s3_config_for_pair(pair, credentials)).await?;
+    if !provider_supports_runtime_object_versioning(&pair.provider) {
+        return Err(sync_location_runtime_object_versioning_message(&pair));
+    }
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
     let mut key_marker: Option<String> = None;
     let mut version_id_marker: Option<String> = None;
     let mut deleted: BTreeMap<String, VersionedBinEntry> = BTreeMap::new();
     let mut live_keys = BTreeSet::new();
 
     loop {
-        let page = s3_adapter::list_object_versions_page(
+        let page = object_store::list_object_versions_page(
             &client,
             &pair.bucket,
             key_marker.as_deref(),
@@ -7206,13 +7394,13 @@ async fn list_versioned_object_history_for_prefix(
     credentials: &StoredCredentials,
     prefix: &str,
 ) -> Result<Vec<(String, String)>, String> {
-    let client = s3_adapter::build_client(&s3_config_for_pair(pair, credentials)).await?;
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
     let mut key_marker: Option<String> = None;
     let mut version_id_marker: Option<String> = None;
     let mut versions = Vec::new();
 
     loop {
-        let page = s3_adapter::list_object_versions_page_with_prefix(
+        let page = object_store::list_object_versions_page_with_prefix(
             &client,
             &pair.bucket,
             Some(prefix),
@@ -7265,7 +7453,7 @@ async fn restore_versioned_bin_entries(
         ordered_requests.push((request.clone(), matches));
     }
 
-    let client = s3_adapter::build_client(&s3_config_for_pair(pair, credentials)).await?;
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
     for path in &grouped_paths {
         validate_restore_destination(pair, credentials, &client, path).await?;
     }
@@ -7280,8 +7468,13 @@ async fn restore_versioned_bin_entries(
     for (request, entries) in ordered_requests {
         let mut affected_count = 0usize;
         for entry in entries {
-            s3_adapter::delete_object_version(&client, &pair.bucket, &entry.key, &entry.version_id)
-                .await?;
+            object_store::delete_object_version(
+                &client,
+                &pair.bucket,
+                &entry.key,
+                &entry.version_id,
+            )
+            .await?;
             affected_count += 1;
         }
 
@@ -7305,7 +7498,7 @@ async fn restore_remote_bin_entries(
 ) -> Result<Vec<BinEntryMutationResult>, String> {
     validate_bin_batch_requests(requests, "restore")?;
     let available_entries = list_remote_bin_inventory_for_pair(pair, credentials).await?;
-    let client = s3_adapter::build_client(&s3_config_for_pair(pair, credentials)).await?;
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
     let remote_snapshot = list_remote_inventory_for_pair(pair, credentials).await?;
 
     let mut ordered_requests: Vec<(BinEntryRequest, Vec<RemoteObjectEntry>)> = Vec::new();
@@ -7326,7 +7519,7 @@ async fn restore_remote_bin_entries(
         let mut affected_count = 0usize;
         for entry in entries {
             let destination_key = destination_key_for_bin_restore(&entry.key, &entry.relative_path);
-            s3_adapter::move_object(&client, &pair.bucket, &entry.key, &destination_key, None)
+            object_store::move_object(&client, &pair.bucket, &entry.key, &destination_key, None)
                 .await?;
             affected_count += 1;
         }
@@ -7351,7 +7544,7 @@ async fn purge_versioned_bin_entries(
 ) -> Result<Vec<BinEntryMutationResult>, String> {
     validate_bin_batch_requests(requests, "purge")?;
     let available_entries = list_versioned_bin_inventory_for_pair(pair, credentials).await?;
-    let client = s3_adapter::build_client(&s3_config_for_pair(pair, credentials)).await?;
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
     let mut results = Vec::with_capacity(requests.len());
 
     for request in requests {
@@ -7377,7 +7570,7 @@ async fn purge_versioned_bin_entries(
         };
 
         for (key, version_id) in history {
-            s3_adapter::delete_object_version(&client, &pair.bucket, &key, &version_id).await?;
+            object_store::delete_object_version(&client, &pair.bucket, &key, &version_id).await?;
             affected_count += 1;
         }
 
@@ -7401,7 +7594,7 @@ async fn purge_remote_bin_entries(
 ) -> Result<Vec<BinEntryMutationResult>, String> {
     validate_bin_batch_requests(requests, "purge")?;
     let available_entries = list_remote_bin_inventory_for_pair(pair, credentials).await?;
-    let client = s3_adapter::build_client(&s3_config_for_pair(pair, credentials)).await?;
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
     let mut results = Vec::with_capacity(requests.len());
 
     for request in requests {
@@ -7409,7 +7602,7 @@ async fn purge_remote_bin_entries(
         let mut affected_count = 0usize;
 
         for entry in matches {
-            s3_adapter::delete_object(&client, &pair.bucket, &entry.key).await?;
+            object_store::delete_object(&client, &pair.bucket, &entry.key).await?;
             affected_count += 1;
         }
 
@@ -7472,63 +7665,36 @@ async fn list_remote_bin_inventory_for_pair(
     pair: &SyncPair,
     credentials: &StoredCredentials,
 ) -> Result<Vec<RemoteObjectEntry>, String> {
-    let client = s3_adapter::build_client(&s3_config_for_pair(pair, credentials)).await?;
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
     let mut entries: BTreeMap<String, RemoteObjectEntry> = BTreeMap::new();
     let prefixes = [pair_bin_prefix(&pair.id), namespace_prefix()];
 
     for prefix in prefixes {
-        let mut continuation_token: Option<String> = None;
-
-        loop {
-            let mut request = client
-                .list_objects_v2()
-                .bucket(&pair.bucket)
-                .prefix(&prefix);
-
-            if let Some(token) = continuation_token.as_deref() {
-                request = request.continuation_token(token);
-            }
-
-            let response = request.send().await.map_err(|error| {
+        let objects = object_store::list_objects(&client, &pair.bucket, Some(&prefix))
+            .await
+            .map_err(|error| {
                 format!(
                     "failed to list bin inventory for pair '{}': {error}",
                     pair.label
                 )
             })?;
 
-            for object in response.contents() {
-                let Some(key) = object.key() else {
-                    continue;
-                };
+        for object in objects {
+            let key = object.key;
 
-                let Ok(original_relative_path) =
-                    original_relative_path_from_bin_key_for_pair(&pair.id, key)
-                else {
-                    continue;
-                };
+            let Ok(original_relative_path) =
+                original_relative_path_from_bin_key_for_pair(&pair.id, &key)
+            else {
+                continue;
+            };
 
-                let last_modified_at = object.last_modified().map(|value| value.to_string());
-                let etag = object.e_tag().map(|value| value.to_string());
-                let storage_class = object.storage_class().map(|sc| sc.as_str().to_string());
+            let last_modified_at = object.last_modified_at;
+            let etag = object.etag;
+            let storage_class = object.storage_class;
 
-                if key.ends_with('/') {
-                    let relative_path = original_relative_path.trim_matches('/').to_string();
-                    if relative_path.is_empty() {
-                        continue;
-                    }
-
-                    entries.insert(
-                        key.to_string(),
-                        RemoteObjectEntry {
-                            key: key.to_string(),
-                            relative_path,
-                            kind: "directory".into(),
-                            size: 0,
-                            last_modified_at,
-                            etag,
-                            storage_class: None,
-                        },
-                    );
+            if key.ends_with('/') {
+                let relative_path = original_relative_path.trim_matches('/').to_string();
+                if relative_path.is_empty() {
                     continue;
                 }
 
@@ -7536,21 +7702,29 @@ async fn list_remote_bin_inventory_for_pair(
                     key.to_string(),
                     RemoteObjectEntry {
                         key: key.to_string(),
-                        relative_path: original_relative_path,
-                        kind: "file".into(),
-                        size: object.size().unwrap_or_default().max(0) as u64,
+                        relative_path,
+                        kind: "directory".into(),
+                        size: 0,
                         last_modified_at,
                         etag,
-                        storage_class,
+                        storage_class: None,
                     },
                 );
+                continue;
             }
 
-            if response.is_truncated().unwrap_or(false) {
-                continuation_token = response.next_continuation_token().map(ToString::to_string);
-            } else {
-                break;
-            }
+            entries.insert(
+                key.to_string(),
+                RemoteObjectEntry {
+                    key: key.to_string(),
+                    relative_path: original_relative_path,
+                    kind: "file".into(),
+                    size: object.size,
+                    last_modified_at,
+                    etag,
+                    storage_class,
+                },
+            );
         }
     }
 
@@ -7660,7 +7834,7 @@ fn build_file_entry_responses(
             let in_remote = remote_entries.get(path);
             let anchor = anchors.and_then(|anchors| anchors.get(path.as_str()));
             let remote_is_glacier = in_remote.is_some_and(|remote| {
-                super::remote_index::is_glacier_storage_class(remote.storage_class.as_deref())
+                super::remote_index::is_cold_storage_class(remote.storage_class.as_deref())
             });
 
             let status = match (in_local, in_remote) {
@@ -7776,7 +7950,10 @@ pub async fn list_file_versions(
     }
 
     let credentials = resolve_credentials_for_pair(&app, &pair)?;
-    let client = s3_adapter::build_client(&s3_config_for_pair(&pair, &credentials)).await?;
+    if !provider_supports_runtime_object_versioning(&pair.provider) {
+        return Err(sync_location_runtime_object_versioning_message(&pair));
+    }
+    let client = object_store::build_client(&storage_config_for_pair(&pair, &credentials)).await?;
     let object_key = s3_adapter::object_key(&path);
 
     let mut key_marker: Option<String> = None;
@@ -7784,7 +7961,7 @@ pub async fn list_file_versions(
     let mut versions = Vec::new();
 
     loop {
-        let page = s3_adapter::list_object_versions_page_with_prefix(
+        let page = object_store::list_object_versions_page_with_prefix(
             &client,
             &pair.bucket,
             Some(&object_key),
@@ -7837,14 +8014,17 @@ pub async fn list_version_counts(
     }
 
     let credentials = resolve_credentials_for_pair(&app, &pair)?;
-    let client = s3_adapter::build_client(&s3_config_for_pair(&pair, &credentials)).await?;
+    if !provider_supports_runtime_object_versioning(&pair.provider) {
+        return Err(sync_location_runtime_object_versioning_message(&pair));
+    }
+    let client = object_store::build_client(&storage_config_for_pair(&pair, &credentials)).await?;
 
     let mut key_marker: Option<String> = None;
     let mut version_id_marker: Option<String> = None;
     let mut counts: BTreeMap<String, u32> = BTreeMap::new();
 
     loop {
-        let page = s3_adapter::list_object_versions_page(
+        let page = object_store::list_object_versions_page(
             &client,
             &pair.bucket,
             key_marker.as_deref(),
@@ -7896,10 +8076,13 @@ pub async fn restore_file_version(
     }
 
     let credentials = resolve_credentials_for_pair(&app, &pair)?;
-    let client = s3_adapter::build_client(&s3_config_for_pair(&pair, &credentials)).await?;
+    if !provider_supports_runtime_object_versioning(&pair.provider) {
+        return Err(sync_location_runtime_object_versioning_message(&pair));
+    }
+    let client = object_store::build_client(&storage_config_for_pair(&pair, &credentials)).await?;
     let key = s3_adapter::object_key(&path);
 
-    s3_adapter::copy_object_version(&client, &pair.bucket, &key, &version_id).await?;
+    object_store::copy_object_version(&client, &pair.bucket, &key, &version_id).await?;
 
     refresh_pair_state_after_remote_change(&app, &pair, &credentials)
         .await
@@ -8003,10 +8186,10 @@ fn finalize_version_compare_details(
                 "One or both versions look binary, so inline text compare is unavailable.".into(),
             );
         }
-        let a_text = String::from_utf8(a_bytes)
-            .map_err(|_| "Version A is not valid UTF-8.".to_string())?;
-        let b_text = String::from_utf8(b_bytes)
-            .map_err(|_| "Version B is not valid UTF-8.".to_string())?;
+        let a_text =
+            String::from_utf8(a_bytes).map_err(|_| "Version A is not valid UTF-8.".to_string())?;
+        let b_text =
+            String::from_utf8(b_bytes).map_err(|_| "Version B is not valid UTF-8.".to_string())?;
         Ok((a_text, b_text))
     })();
 
@@ -8059,15 +8242,18 @@ pub async fn prepare_version_comparison(
     }
 
     let credentials = resolve_credentials_for_pair(&app, &pair)?;
-    let client = s3_adapter::build_client(&s3_config_for_pair(&pair, &credentials)).await?;
+    if !provider_supports_runtime_object_versioning(&pair.provider) {
+        return Err(sync_location_runtime_object_versioning_message(&pair));
+    }
+    let client = object_store::build_client(&storage_config_for_pair(&pair, &credentials)).await?;
     let key = s3_adapter::object_key(&path);
 
     let temp_path_a = temp_version_compare_file_path(&app, &path, "a")?;
     let temp_path_b = temp_version_compare_file_path(&app, &path, "b")?;
 
-    s3_adapter::download_file_version(&client, &pair.bucket, &key, &version_id_a, &temp_path_a)
+    object_store::download_file_version(&client, &pair.bucket, &key, &version_id_a, &temp_path_a)
         .await?;
-    s3_adapter::download_file_version(&client, &pair.bucket, &key, &version_id_b, &temp_path_b)
+    object_store::download_file_version(&client, &pair.bucket, &key, &version_id_b, &temp_path_b)
         .await?;
 
     let path_a_str = temp_path_a.to_string_lossy().into_owned();
@@ -8100,10 +8286,13 @@ pub async fn delete_file_version(
     }
 
     let credentials = resolve_credentials_for_pair(&app, &pair)?;
-    let client = s3_adapter::build_client(&s3_config_for_pair(&pair, &credentials)).await?;
+    if !provider_supports_runtime_object_versioning(&pair.provider) {
+        return Err(sync_location_runtime_object_versioning_message(&pair));
+    }
+    let client = object_store::build_client(&storage_config_for_pair(&pair, &credentials)).await?;
     let key = s3_adapter::object_key(&path);
 
-    s3_adapter::delete_object_version(&client, &pair.bucket, &key, &version_id).await?;
+    object_store::delete_object_version(&client, &pair.bucket, &key, &version_id).await?;
 
     Ok(())
 }
@@ -8297,8 +8486,8 @@ pub async fn toggle_local_copy(
     if keep {
         // Download files from S3 to local storage
         let credentials = resolve_credentials_for_pair(&app, &pair)?;
-        let config = s3_config_for_pair(&pair, &credentials);
-        let client = s3_adapter::build_client(&config).await?;
+        let client =
+            object_store::build_client(&storage_config_for_pair(&pair, &credentials)).await?;
 
         for path in &paths {
             let key = s3_adapter::object_key(path);
@@ -8319,7 +8508,7 @@ pub async fn toggle_local_copy(
                 }
             }
             if let Err(e) =
-                s3_adapter::download_file(&client, &pair.bucket, &key, &local_path).await
+                object_store::download_file(&client, &pair.bucket, &key, &local_path).await
             {
                 errors.push(e);
             }
@@ -8371,20 +8560,19 @@ pub async fn delete_file(app: AppHandle, location_id: String, path: String) -> R
         .clone();
 
     let credentials = resolve_credentials_for_pair(&app, &pair)?;
-    let config = s3_config_for_pair(&pair, &credentials);
-    let client = s3_adapter::build_client(&config).await?;
+    let client = object_store::build_client(&storage_config_for_pair(&pair, &credentials)).await?;
     let key = s3_adapter::object_key(&path);
 
     if pair.object_versioning_enabled {
-        s3_adapter::delete_object(&client, &pair.bucket, &key).await?;
+        object_store::delete_object(&client, &pair.bucket, &key).await?;
     } else if pair.remote_bin.enabled {
         if let Some(target) = target_for_pair(&pair) {
             reconcile_remote_bin_lifecycle_target(&app, &target).await?;
         }
         let remote_bin_key = deleted_object_key(&pair.id, &path);
-        s3_adapter::move_object(&client, &pair.bucket, &key, &remote_bin_key, None).await?;
+        object_store::move_object(&client, &pair.bucket, &key, &remote_bin_key, None).await?;
     } else {
-        s3_adapter::delete_object(&client, &pair.bucket, &key).await?;
+        object_store::delete_object(&client, &pair.bucket, &key).await?;
     }
 
     let local_path = resolve_local_download_path(&pair.local_folder, &path)?;
@@ -8444,15 +8632,15 @@ fn remote_bin_key_for_deleted_key(pair_id: &str, key: &str) -> String {
 async fn delete_remote_folder_subtree(
     app: &AppHandle,
     pair: &SyncPair,
-    client: &aws_sdk_s3::Client,
+    client: &object_store::ObjectStoreClient,
     folder_path: &str,
 ) -> Result<(), String> {
     let prefix = s3_adapter::directory_key(folder_path);
-    let keys = s3_adapter::list_object_keys_with_prefix(client, &pair.bucket, &prefix).await?;
+    let keys = object_store::list_object_keys_with_prefix(client, &pair.bucket, &prefix).await?;
 
     if pair.object_versioning_enabled {
         for key in keys {
-            s3_adapter::delete_object(client, &pair.bucket, &key).await?;
+            object_store::delete_object(client, &pair.bucket, &key).await?;
         }
         return Ok(());
     }
@@ -8464,13 +8652,13 @@ async fn delete_remote_folder_subtree(
 
         for key in keys {
             let bin_key = remote_bin_key_for_deleted_key(&pair.id, &key);
-            s3_adapter::move_object(client, &pair.bucket, &key, &bin_key, None).await?;
+            object_store::move_object(client, &pair.bucket, &key, &bin_key, None).await?;
         }
         return Ok(());
     }
 
     for key in keys {
-        s3_adapter::delete_object(client, &pair.bucket, &key).await?;
+        object_store::delete_object(client, &pair.bucket, &key).await?;
     }
 
     Ok(())
@@ -8492,8 +8680,7 @@ pub async fn delete_folder(
 
     let normalized_path = normalize_directory_delete_path(&path)?;
     let credentials = resolve_credentials_for_pair(&app, &pair)?;
-    let config = s3_config_for_pair(&pair, &credentials);
-    let client = s3_adapter::build_client(&config).await?;
+    let client = object_store::build_client(&storage_config_for_pair(&pair, &credentials)).await?;
 
     delete_remote_folder_subtree(&app, &pair, &client, &normalized_path).await?;
     remove_local_directory_subtree(&pair.local_folder, &normalized_path)?;
@@ -8523,14 +8710,14 @@ pub async fn change_storage_class(
         .clone();
 
     let credentials = resolve_credentials_for_pair(&app, &pair)?;
-    let config = s3_config_for_pair(&pair, &credentials);
-    let client = s3_adapter::build_client(&config).await?;
+    let client = object_store::build_client(&storage_config_for_pair(&pair, &credentials)).await?;
     let key = s3_adapter::object_key(&path);
 
-    s3_adapter::copy_object_with_storage_class(&client, &pair.bucket, &key, &storage_class).await?;
+    object_store::copy_object_with_storage_class(&client, &pair.bucket, &key, &storage_class)
+        .await?;
 
     // Delete local copy when moving to a glacier tier
-    if super::remote_index::is_glacier_storage_class(Some(&storage_class)) {
+    if super::remote_index::is_cold_storage_class(Some(&storage_class)) {
         let local_path = resolve_local_download_path(&pair.local_folder, &path)?;
         match std::fs::remove_file(&local_path) {
             Ok(()) => {}
@@ -8555,22 +8742,29 @@ mod tests {
         collect_remote_bin_keys_for_request, collect_versioned_bin_entries_for_request,
         collect_versioned_history_for_deleted_entries, destination_key_for_bin_restore,
         directory_relative_paths_from_key, directory_relative_paths_from_relative_path,
-        download_stale_plan_error, due_polling_pairs, format_timeout_error,
-        input_matches_saved_profile, local_fingerprint_for_path, local_snapshot_is_fresh,
-        next_polling_deadline, parse_versioned_bin_key, path_matches_exact_or_descendant,
-        persist_profile_with_remote_bin_reconciliation_for_test, planned_remote_bin_reconciliation,
-        relative_path_from_key, remote_bin_key_for_deleted_key, remove_local_directory_subtree,
+        download_stale_plan_error, due_polling_pairs, filter_remote_bin_reconciliation_targets,
+        format_timeout_error, input_matches_saved_profile, local_fingerprint_for_path,
+        local_snapshot_is_fresh, next_polling_deadline, parse_versioned_bin_key,
+        path_matches_exact_or_descendant, persist_profile_with_remote_bin_reconciliation_for_test,
+        planned_remote_bin_reconciliation, provider_supports_remote_bin_lifecycle_reconciliation,
+        provider_supports_runtime_object_versioning, relative_path_from_key,
+        remote_bin_key_for_deleted_key, remove_local_directory_subtree,
         resolve_local_download_path, resolve_session_credentials, s3_config_for_pair,
-        should_poll_pair, should_scan_local_for_trigger, sync_pair_for_location,
-        upload_stale_plan_error, validate_bin_batch_requests, validate_remote_restore_destination,
-        versioned_bin_key, watcher_eligible_pairs, BinEntryRequest, PairSyncTrigger,
-        VersionedBinEntry, LOCAL_SNAPSHOT_STALE_TTL,
+        should_defer_create_time_credential_test, should_poll_pair, should_scan_local_for_trigger,
+        sync_pair_for_location, upload_stale_plan_error, validate_bin_batch_requests,
+        validate_remote_restore_destination, versioned_bin_key, watcher_eligible_pairs,
+        BinEntryRequest, CredentialTestContext, PairSyncTrigger, VersionedBinEntry,
+        LOCAL_SNAPSHOT_STALE_TTL,
     };
-    use crate::storage::credentials_store::StoredCredentials;
+    use crate::storage::credentials_store::{
+        CredentialSummary, CredentialValidationStatus, StoredCredentials,
+    };
     use crate::storage::local_index::{LocalIndexEntry, LocalIndexSnapshot, LocalIndexSummary};
     use crate::storage::profile_store::{
         ConnectionValidationInput, RemoteBinConfig, StoredProfile, SyncPair,
     };
+    use crate::storage::provider::GCS_PROVIDER;
+    use crate::storage::remote_bin::{managed_lifecycle_rule_plan, DEFAULT_REMOTE_BIN_PAIR_ID};
     use crate::storage::remote_index::{
         RemoteIndexSnapshot, RemoteIndexSummary, RemoteObjectEntry,
     };
@@ -8581,6 +8775,73 @@ mod tests {
     use std::path::Path;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    #[test]
+    fn provider_supports_runtime_object_versioning_for_gcs() {
+        assert!(provider_supports_runtime_object_versioning("gcs"));
+    }
+
+    #[test]
+    fn provider_supports_runtime_object_versioning_for_aws() {
+        assert!(provider_supports_runtime_object_versioning("aws"));
+    }
+
+    #[test]
+    fn create_time_validation_only_defers_for_gcs_without_bucket_context() {
+        assert!(should_defer_create_time_credential_test(
+            &CredentialSummary {
+                id: "cred-gcs".into(),
+                name: "GCS".into(),
+                provider: "gcp".into(),
+                ready: true,
+                validation_status: CredentialValidationStatus::Untested,
+                last_tested_at: None,
+                last_test_message: None,
+                summary: None,
+            },
+            &CredentialTestContext {
+                provider: "gcs".into(),
+                region: String::new(),
+                bucket: String::new(),
+            },
+        ));
+
+        assert!(!should_defer_create_time_credential_test(
+            &CredentialSummary {
+                id: "cred-gcs".into(),
+                name: "GCS".into(),
+                provider: GCS_PROVIDER.into(),
+                ready: true,
+                validation_status: CredentialValidationStatus::Untested,
+                last_tested_at: None,
+                last_test_message: None,
+                summary: None,
+            },
+            &CredentialTestContext {
+                provider: GCS_PROVIDER.into(),
+                region: String::new(),
+                bucket: "bucket-a".into(),
+            },
+        ));
+
+        assert!(!should_defer_create_time_credential_test(
+            &CredentialSummary {
+                id: "cred-aws".into(),
+                name: "AWS".into(),
+                provider: "aws".into(),
+                ready: true,
+                validation_status: CredentialValidationStatus::Untested,
+                last_tested_at: None,
+                last_test_message: None,
+                summary: None,
+            },
+            &CredentialTestContext {
+                provider: "aws".into(),
+                region: String::new(),
+                bucket: String::new(),
+            },
+        ));
+    }
 
     fn build_local_snapshot(entries: &[(&str, &str, u64)]) -> LocalIndexSnapshot {
         let file_count = entries
@@ -8852,10 +9113,8 @@ mod tests {
 
     #[test]
     fn prefers_session_credentials_over_missing_keyring_credentials() {
-        let session_credentials = StoredCredentials {
-            access_key_id: "session-key".into(),
-            secret_access_key: "session-secret".into(),
-        };
+        let session_credentials =
+            StoredCredentials::aws_access_key("aws", "session-key", "session-secret");
 
         assert_eq!(
             resolve_session_credentials(
@@ -8870,10 +9129,8 @@ mod tests {
 
     #[test]
     fn falls_back_to_stored_credentials_without_session_credentials() {
-        let stored_credentials = StoredCredentials {
-            access_key_id: "stored-key".into(),
-            secret_access_key: "stored-secret".into(),
-        };
+        let stored_credentials =
+            StoredCredentials::aws_access_key("aws", "stored-key", "stored-secret");
 
         assert_eq!(
             resolve_session_credentials(
@@ -8909,10 +9166,12 @@ mod tests {
 
         let matching = ConnectionValidationInput {
             local_folder: String::new(),
+            provider: "aws".into(),
             region: String::new(),
             bucket: "demo".into(),
             access_key_id: String::new(),
             secret_access_key: String::new(),
+            credential: None,
             credential_profile_id: Some("cred-1".into()),
             remote_polling_enabled: true,
             poll_interval_seconds: 60,
@@ -8944,10 +9203,12 @@ mod tests {
 
         let input = ConnectionValidationInput {
             local_folder: String::new(),
+            provider: "aws".into(),
             region: String::new(),
             bucket: "demo".into(),
             access_key_id: String::new(),
             secret_access_key: String::new(),
+            credential: None,
             credential_profile_id: Some("cred-1".into()),
             remote_polling_enabled: true,
             poll_interval_seconds: 60,
@@ -8973,10 +9234,7 @@ mod tests {
             bucket: "demo".into(),
             ..SyncPair::default()
         };
-        let creds = StoredCredentials {
-            access_key_id: "AKIA".into(),
-            secret_access_key: "secret".into(),
-        };
+        let creds = StoredCredentials::aws_access_key("aws", "AKIA", "secret");
         let config = s3_config_for_pair(&pair, &creds);
         assert_eq!(config.region, "us-east-1");
         assert_eq!(config.bucket, "demo");
@@ -9051,7 +9309,9 @@ mod tests {
 
         assert_eq!(targets.len(), 1);
         assert!(targets.iter().any(|target| {
-            target.bucket == "pair-bucket" && !target.enabled && target.retention_days == 30
+            target.bucket == "pair-bucket"
+                && target.managed_rules.is_empty()
+                && target.source_labels == vec!["sync pair 'Docs'".to_string()]
         }));
     }
 
@@ -9080,9 +9340,11 @@ mod tests {
 
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].bucket, "profile-bucket");
-        assert!(targets[0].enabled);
-        assert_eq!(targets[0].retention_days, 14);
-        assert_eq!(targets[0].source_label, "profile");
+        assert_eq!(
+            targets[0].managed_rules,
+            vec![managed_lifecycle_rule_plan(DEFAULT_REMOTE_BIN_PAIR_ID, 14)]
+        );
+        assert_eq!(targets[0].source_labels, vec!["profile".to_string()]);
     }
 
     #[test]
@@ -9119,9 +9381,157 @@ mod tests {
 
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].bucket, "pair-bucket");
-        assert!(targets[0].enabled);
-        assert_eq!(targets[0].retention_days, 7);
-        assert_eq!(targets[0].source_label, "sync pair 'Docs'");
+        assert_eq!(
+            targets[0].managed_rules,
+            vec![managed_lifecycle_rule_plan("pair-1", 7)]
+        );
+        assert_eq!(targets[0].source_labels, vec!["sync pair 'Docs'".to_string()]);
+    }
+
+    #[test]
+    fn planned_remote_bin_reconciliation_aggregates_multiple_pairs_sharing_bucket() {
+        let current = StoredProfile::default();
+        let next = StoredProfile {
+            sync_pairs: vec![
+                SyncPair {
+                    id: "pair-1".into(),
+                    label: "Docs".into(),
+                    provider: "aws".into(),
+                    local_folder: "C:/docs".into(),
+                    bucket: "shared-bucket".into(),
+                    region: "us-east-1".into(),
+                    credential_profile_id: Some("cred-1".into()),
+                    remote_bin: RemoteBinConfig {
+                        enabled: true,
+                        retention_days: 7,
+                    },
+                    ..SyncPair::default()
+                },
+                SyncPair {
+                    id: "pair-2".into(),
+                    label: "Media".into(),
+                    provider: "aws".into(),
+                    local_folder: "C:/media".into(),
+                    bucket: "shared-bucket".into(),
+                    region: "us-east-1".into(),
+                    credential_profile_id: Some("cred-1".into()),
+                    remote_bin: RemoteBinConfig {
+                        enabled: true,
+                        retention_days: 30,
+                    },
+                    ..SyncPair::default()
+                },
+            ],
+            ..StoredProfile::default()
+        };
+
+        let targets = planned_remote_bin_reconciliation(&current, &next);
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].bucket, "shared-bucket");
+        assert_eq!(
+            targets[0].managed_rules,
+            vec![
+                managed_lifecycle_rule_plan("pair-1", 7),
+                managed_lifecycle_rule_plan("pair-2", 30),
+            ]
+        );
+        assert_eq!(
+            targets[0].source_labels,
+            vec!["sync pair 'Docs'".to_string(), "sync pair 'Media'".to_string()]
+        );
+    }
+
+    #[test]
+    fn planned_remote_bin_reconciliation_clears_removed_pair_rule_but_keeps_other_shared_bucket_rules() {
+        let current = StoredProfile {
+            sync_pairs: vec![
+                SyncPair {
+                    id: "pair-1".into(),
+                    label: "Docs".into(),
+                    provider: "aws".into(),
+                    local_folder: "C:/docs".into(),
+                    bucket: "shared-bucket".into(),
+                    region: "us-east-1".into(),
+                    credential_profile_id: Some("cred-1".into()),
+                    remote_bin: RemoteBinConfig {
+                        enabled: true,
+                        retention_days: 7,
+                    },
+                    ..SyncPair::default()
+                },
+                SyncPair {
+                    id: "pair-2".into(),
+                    label: "Media".into(),
+                    provider: "aws".into(),
+                    local_folder: "C:/media".into(),
+                    bucket: "shared-bucket".into(),
+                    region: "us-east-1".into(),
+                    credential_profile_id: Some("cred-1".into()),
+                    remote_bin: RemoteBinConfig {
+                        enabled: true,
+                        retention_days: 30,
+                    },
+                    ..SyncPair::default()
+                },
+            ],
+            ..StoredProfile::default()
+        };
+        let next = StoredProfile {
+            sync_pairs: vec![
+                SyncPair {
+                    remote_bin: RemoteBinConfig {
+                        enabled: false,
+                        retention_days: 7,
+                    },
+                    ..current.sync_pairs[0].clone()
+                },
+                current.sync_pairs[1].clone(),
+            ],
+            ..StoredProfile::default()
+        };
+
+        let targets = planned_remote_bin_reconciliation(&current, &next);
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            targets[0].managed_rules,
+            vec![managed_lifecycle_rule_plan("pair-2", 30)]
+        );
+    }
+
+    #[test]
+    fn provider_supports_remote_bin_lifecycle_reconciliation_for_aws_and_gcs() {
+        assert!(provider_supports_remote_bin_lifecycle_reconciliation("aws"));
+        assert!(provider_supports_remote_bin_lifecycle_reconciliation("s3"));
+        assert!(provider_supports_remote_bin_lifecycle_reconciliation("gcs"));
+        assert!(provider_supports_remote_bin_lifecycle_reconciliation("gcp"));
+    }
+
+    #[test]
+    fn filter_remote_bin_reconciliation_targets_keeps_supported_gcs_targets() {
+        let filtered = filter_remote_bin_reconciliation_targets(vec![
+            super::RemoteBinLifecycleTarget {
+                provider: "aws".into(),
+                bucket: "aws-bucket".into(),
+                region: "us-east-1".into(),
+                credential_profile_id: Some("cred-aws".into()),
+                source_labels: vec!["sync pair 'AWS'".into()],
+                managed_rules: vec![managed_lifecycle_rule_plan("pair-aws", 7)],
+            },
+            super::RemoteBinLifecycleTarget {
+                provider: "gcs".into(),
+                bucket: "gcs-bucket".into(),
+                region: "US".into(),
+                credential_profile_id: Some("cred-gcs".into()),
+                source_labels: vec!["sync pair 'GCS'".into()],
+                managed_rules: vec![managed_lifecycle_rule_plan("pair-gcs", 7)],
+            },
+        ]);
+
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().any(|target| target.bucket == "aws-bucket"));
+        assert!(filtered.iter().any(|target| target.bucket == "gcs-bucket"));
     }
 
     #[test]
@@ -9177,8 +9587,11 @@ mod tests {
         let reconciled = reconciled.lock().expect("lock should hold");
         assert_eq!(reconciled.len(), 1);
         assert_eq!(reconciled[0].bucket, "pair-bucket");
-        assert_eq!(reconciled[0].retention_days, 7);
-        assert_eq!(reconciled[0].source_label, "sync pair 'Docs'");
+        assert_eq!(
+            reconciled[0].managed_rules,
+            vec![managed_lifecycle_rule_plan("pair-1", 7)]
+        );
+        assert_eq!(reconciled[0].source_labels, vec!["sync pair 'Docs'".to_string()]);
     }
 
     #[test]
@@ -9250,6 +9663,55 @@ mod tests {
 
         assert!(error.contains("demo-bucket"));
         assert!(!*write_called.lock().expect("lock should hold"));
+    }
+
+    #[test]
+    fn persist_profile_reconciles_supported_gcs_remote_bin_targets_and_still_writes() {
+        let current = StoredProfile::default();
+        let next = StoredProfile {
+            sync_pairs: vec![SyncPair {
+                id: "pair-gcs".into(),
+                label: "GCS Assets".into(),
+                provider: GCS_PROVIDER.into(),
+                local_folder: "C:/gcs-assets".into(),
+                bucket: "gcs-bucket".into(),
+                region: "US".into(),
+                credential_profile_id: Some("cred-gcs".into()),
+                remote_bin: RemoteBinConfig {
+                    enabled: true,
+                    retention_days: 7,
+                },
+                ..SyncPair::default()
+            }],
+            ..StoredProfile::default()
+        };
+        let reconcile_called = Arc::new(Mutex::new(0usize));
+        let write_called = Arc::new(Mutex::new(false));
+
+        let saved = persist_profile_with_remote_bin_reconciliation_for_test(
+            &current,
+            next.clone(),
+            {
+                let reconcile_called = Arc::clone(&reconcile_called);
+                move |target| {
+                    *reconcile_called.lock().expect("lock should hold") += 1;
+                    assert_eq!(target.bucket, "gcs-bucket");
+                    Ok(())
+                }
+            },
+            {
+                let write_called = Arc::clone(&write_called);
+                move |_| {
+                    *write_called.lock().expect("lock should hold") = true;
+                    Ok(())
+                }
+            },
+        )
+        .expect("supported gcs remote-bin targets should reconcile");
+
+        assert_eq!(saved.sync_pairs.len(), 1);
+        assert_eq!(*reconcile_called.lock().expect("lock should hold"), 1);
+        assert!(*write_called.lock().expect("lock should hold"));
     }
 
     #[test]
@@ -9829,6 +10291,16 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn reveal_windows_select_argument_combines_flag_and_path() {
+        let path = Path::new(r"C:\sync\photos\img001.jpg");
+        let mut arg = std::ffi::OsString::from("/select,");
+        arg.push(path);
+
+        assert_eq!(arg.to_string_lossy(), r"/select,C:\sync\photos\img001.jpg");
+    }
+
     #[test]
     fn build_file_entry_responses_includes_directory_entries_and_uses_sync_planner_for_files() {
         let local = build_local_snapshot(&[
@@ -10289,7 +10761,8 @@ mod tests {
 #[cfg(all(test, feature = "tauri-command-tests"))]
 mod tauri_command_tests {
     use super::{
-        build_file_entry_responses, clear_planned_transfer_test_hooks, compare_mode_external,
+        build_file_entry_responses, build_file_entry_responses, clear_planned_transfer_test_hooks,
+        clear_planned_transfer_test_hooks, compare_mode_external, compare_mode_external,
         execute_planned_download_queue_for_pair, execute_planned_upload_queue_for_pair,
         finalize_conflict_compare_details, image_media_type_for_extension, is_probably_text_bytes,
         local_fingerprint_for_path, persist_download_success_for_pair,
@@ -10498,10 +10971,7 @@ mod tauri_command_tests {
     }
 
     fn test_credentials() -> StoredCredentials {
-        StoredCredentials {
-            access_key_id: "test-access-key".into(),
-            secret_access_key: "test-secret-key".into(),
-        }
+        StoredCredentials::aws_access_key("aws", "test-access-key", "test-secret-key")
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {
@@ -10519,6 +10989,7 @@ mod tauri_command_tests {
         SyncPairDraft {
             id: None,
             label: label.into(),
+            provider: "aws".into(),
             local_folder: folder.into(),
             region: "us-east-1".into(),
             bucket: bucket.into(),
@@ -10586,8 +11057,11 @@ mod tauri_command_tests {
             &harness.app_handle(),
             CredentialDraft {
                 name: name.into(),
+                provider: "aws".into(),
+                credential: None,
                 access_key_id: format!("AKIA-{name}"),
                 secret_access_key: format!("secret-{name}"),
+                service_account_json: String::new(),
             },
         )
         .expect("credential should be created")
@@ -10746,6 +11220,7 @@ mod tauri_command_tests {
             SyncPairDraft {
                 id: Some(original_id.clone()),
                 label: "Photos Archive".into(),
+                provider: "aws".into(),
                 local_folder: "D:/archive/photos".into(),
                 region: "eu-west-1".into(),
                 bucket: "bucket-b".into(),
@@ -10805,6 +11280,7 @@ mod tauri_command_tests {
             SyncPairDraft {
                 id: Some(original_id.clone()),
                 label: "Photos Archive".into(),
+                provider: "aws".into(),
                 local_folder: "D:/archive/photos".into(),
                 region: "eu-west-1".into(),
                 bucket: "bucket-b".into(),
@@ -10940,8 +11416,11 @@ mod tauri_command_tests {
             &harness.app_handle(),
             CredentialDraft {
                 name: "Primary".into(),
+                provider: "aws".into(),
+                credential: None,
                 access_key_id: "AKIA123".into(),
                 secret_access_key: "secret-1".into(),
+                service_account_json: String::new(),
             },
         )
         .expect("credential should be created");

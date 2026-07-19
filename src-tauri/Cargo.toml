@@ -21,9 +21,12 @@ aws-config = "1"
 aws-credential-types = "1"
 aws-sdk-s3 = "1"
 aws-types = "1"
+jsonwebtoken = "9"
 keyring = { version = "3.6", features = ["windows-native"] }
 notify = "6"
 percent-encoding = "2"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -33,4 +36,4 @@ tauri-plugin-dialog = "2.7"
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 tokio = { version = "1", features = ["time"] }
 uuid = { version = "1", features = ["v4"] }
-
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
