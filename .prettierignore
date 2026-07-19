@@ -1,0 +1,8 @@
+dist/
+node_modules/
+src-tauri/
+coverage/
+bun.lock
+*.md
+index.html
+src/styles.css

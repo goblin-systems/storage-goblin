@@ -3,9 +3,9 @@ import { createNativeActivity, sanitizeActivityText } from "./activity";
 
 describe("activity helpers", () => {
   it("redacts likely credential values from activity text", () => {
-    expect(sanitizeActivityText("accessKeyId=AKIA1234567890ABCDEF secret_access_key=topsecret")).toBe(
-      "accessKeyId=[redacted] secret_access_key=[redacted]",
-    );
+    expect(
+      sanitizeActivityText("accessKeyId=AKIA1234567890ABCDEF secret_access_key=topsecret"),
+    ).toBe("accessKeyId=[redacted] secret_access_key=[redacted]");
   });
 
   it("redacts bearer tokens and aws-style keys", () => {
@@ -28,9 +28,17 @@ describe("activity helpers", () => {
   });
 
   it("redacts GCS service account fields in assignments and JSON payloads", () => {
-    expect(sanitizeActivityText("client_email=sync@example.iam.gserviceaccount.com private_key=-----BEGIN PRIVATE KEY-----abc"))
-      .toBe("client_email=[redacted] private_key=[redacted]");
-    expect(sanitizeActivityText('{"client_email":"sync@example.iam.gserviceaccount.com","private_key":"super-secret","private_key_id":"abc123"}'))
-      .toBe('{"client_email":"[redacted]","private_key":"[redacted]","private_key_id":"[redacted]"}');
+    expect(
+      sanitizeActivityText(
+        "client_email=sync@example.iam.gserviceaccount.com private_key=-----BEGIN PRIVATE KEY-----abc",
+      ),
+    ).toBe("client_email=[redacted] private_key=[redacted]");
+    expect(
+      sanitizeActivityText(
+        '{"client_email":"sync@example.iam.gserviceaccount.com","private_key":"super-secret","private_key_id":"abc123"}',
+      ),
+    ).toBe(
+      '{"client_email":"[redacted]","private_key":"[redacted]","private_key_id":"[redacted]"}',
+    );
   });
 });

@@ -12,14 +12,6 @@ import {
   type SyncLocation,
 } from "./types";
 
-type LegacyRemoteBinCarrier = {
-  remoteBin?: {
-    enabled?: boolean;
-    retentionDays?: number;
-  };
-  deleteSafetyHours?: number;
-};
-
 export const DEFAULT_REMOTE_BIN_RETENTION_DAYS = 7;
 
 export const DEFAULT_STORED_PROFILE: StoredStorageProfile = {
@@ -45,7 +37,7 @@ export const DEFAULT_PROFILE_DRAFT: StorageProfileDraft = {
 
 function normalizeConflictStrategy(value: string | undefined): ConflictStrategy {
   return CONFLICT_STRATEGIES.includes(value as ConflictStrategy)
-    ? value as ConflictStrategy
+    ? (value as ConflictStrategy)
     : "preserve-both";
 }
 
@@ -53,7 +45,9 @@ function normalizeText(value: string | undefined): string {
   return (value ?? "").trim();
 }
 
-function normalizeCredentialSummary(value: Partial<CredentialSummary> | null | undefined): CredentialSummary | null {
+function normalizeCredentialSummary(
+  value: Partial<CredentialSummary> | null | undefined,
+): CredentialSummary | null {
   return normalizeCredentialSummaryRecord(value);
 }
 
@@ -62,14 +56,20 @@ function clampInt(value: number | undefined, min: number, max: number, fallback:
   return Math.min(max, Math.max(min, Math.round(value)));
 }
 
-function normalizeSyncLocation(input: Partial<SyncLocation> | null | undefined): SyncLocation | null {
+function normalizeSyncLocation(
+  input: Partial<SyncLocation> | null | undefined,
+): SyncLocation | null {
   const id = normalizeText(input?.id);
   if (!id) return null;
 
-   const legacyInput = input as (Partial<SyncLocation> & LegacyRemoteBinCarrier) | null | undefined;
+  // Legacy persisted locations carried "deleteSafetyHours" instead of remoteBin retention.
+  const legacyDeleteSafetyHours = ((input ?? {}) as Record<string, unknown>).deleteSafetyHours;
 
   const retentionDays = clampInt(
-    legacyInput?.remoteBin?.retentionDays ?? (typeof legacyInput?.deleteSafetyHours === "number" ? Math.ceil(legacyInput.deleteSafetyHours / 24) : undefined),
+    input?.remoteBin?.retentionDays ??
+      (typeof legacyDeleteSafetyHours === "number"
+        ? Math.ceil(legacyDeleteSafetyHours / 24)
+        : undefined),
     1,
     3650,
     DEFAULT_REMOTE_BIN_RETENTION_DAYS,
@@ -86,21 +86,34 @@ function normalizeSyncLocation(input: Partial<SyncLocation> | null | undefined):
     objectVersioningEnabled: Boolean(input?.objectVersioningEnabled),
     enabled: input?.enabled ?? true,
     remotePollingEnabled: input?.remotePollingEnabled ?? true,
-    pollIntervalSeconds: clampInt(input?.pollIntervalSeconds, 15, 3600, DEFAULT_STORED_PROFILE.pollIntervalSeconds),
+    pollIntervalSeconds: clampInt(
+      input?.pollIntervalSeconds,
+      15,
+      3600,
+      DEFAULT_STORED_PROFILE.pollIntervalSeconds,
+    ),
     conflictStrategy: normalizeConflictStrategy(input?.conflictStrategy),
     remoteBin: {
-      enabled: Boolean(input?.objectVersioningEnabled) ? false : (legacyInput?.remoteBin?.enabled ?? true),
+      enabled: input?.objectVersioningEnabled ? false : (input?.remoteBin?.enabled ?? true),
       retentionDays,
     },
-    providerDefinition: normalizeProviderDefinition((input as Record<string, unknown> | undefined)?.providerDefinition)
-      ?? defaultProviderDefinition(normalizeProvider(input?.provider)),
-    capabilities: normalizeProviderCapabilities((input as Record<string, unknown> | undefined)?.capabilities, normalizeProvider(input?.provider)),
+    providerDefinition:
+      normalizeProviderDefinition(
+        (input as Record<string, unknown> | undefined)?.providerDefinition,
+      ) ?? defaultProviderDefinition(normalizeProvider(input?.provider)),
+    capabilities: normalizeProviderCapabilities(
+      (input as Record<string, unknown> | undefined)?.capabilities,
+      normalizeProvider(input?.provider),
+    ),
   };
 }
 
-export function normalizeStoredProfile(input?: Partial<StoredStorageProfile> | null): StoredStorageProfile {
+export function normalizeStoredProfile(
+  input?: Partial<StoredStorageProfile> | null,
+): StoredStorageProfile {
   const selectedCredential = normalizeCredentialSummary(input?.selectedCredential);
-  const credentialProfileId = normalizeText(input?.credentialProfileId ?? undefined) || selectedCredential?.id || "";
+  const credentialProfileId =
+    normalizeText(input?.credentialProfileId ?? undefined) || (selectedCredential?.id ?? "");
   const selectedCredentialReady = selectedCredential?.ready ?? false;
   const selectedCredentialAvailable = input?.selectedCredentialAvailable ?? selectedCredentialReady;
   const credentialsStoredSecurely = input?.credentialsStoredSecurely ?? selectedCredentialReady;
@@ -123,22 +136,37 @@ export function normalizeStoredProfile(input?: Partial<StoredStorageProfile> | n
     region: normalizeText(input?.region),
     bucket: normalizeText(input?.bucket),
     remotePollingEnabled: input?.remotePollingEnabled ?? true,
-    pollIntervalSeconds: clampInt(input?.pollIntervalSeconds, 15, 3600, DEFAULT_STORED_PROFILE.pollIntervalSeconds),
+    pollIntervalSeconds: clampInt(
+      input?.pollIntervalSeconds,
+      15,
+      3600,
+      DEFAULT_STORED_PROFILE.pollIntervalSeconds,
+    ),
     conflictStrategy: normalizeConflictStrategy(input?.conflictStrategy),
     activityDebugModeEnabled: input?.activityDebugModeEnabled ?? false,
     credentialProfileId: credentialProfileId || null,
     selectedCredential,
     selectedCredentialAvailable,
     credentialsStoredSecurely,
-    providerDefinition: normalizeProviderDefinition((input as Record<string, unknown> | undefined)?.providerDefinition)
-      ?? defaultProviderDefinition(normalizeProvider(input?.provider)),
-    capabilities: normalizeProviderCapabilities((input as Record<string, unknown> | undefined)?.capabilities, normalizeProvider(input?.provider)),
+    providerDefinition:
+      normalizeProviderDefinition(
+        (input as Record<string, unknown> | undefined)?.providerDefinition,
+      ) ?? defaultProviderDefinition(normalizeProvider(input?.provider)),
+    capabilities: normalizeProviderCapabilities(
+      (input as Record<string, unknown> | undefined)?.capabilities,
+      normalizeProvider(input?.provider),
+    ),
     syncLocations: normalizedSyncLocations,
-    activeLocationId: typeof input?.activeLocationId === "string" && input.activeLocationId.trim() ? input.activeLocationId.trim() : null,
+    activeLocationId:
+      typeof input?.activeLocationId === "string" && input.activeLocationId.trim()
+        ? input.activeLocationId.trim()
+        : null,
   };
 }
 
-export function normalizeProfileDraft(input?: Partial<StorageProfileDraft> | null): StorageProfileDraft {
+export function normalizeProfileDraft(
+  input?: Partial<StorageProfileDraft> | null,
+): StorageProfileDraft {
   return normalizeStoredProfile(input);
 }
 
@@ -154,7 +182,9 @@ export function isStoredProfileConfigured(profile: StoredStorageProfile): boolea
   return profile.localFolder.length > 0 && profile.bucket.length > 0;
 }
 
-export function hasSelectedCredential(profile: Pick<StoredStorageProfile, "credentialProfileId" | "selectedCredentialAvailable">): boolean {
+export function hasSelectedCredential(
+  profile: Pick<StoredStorageProfile, "credentialProfileId" | "selectedCredentialAvailable">,
+): boolean {
   return Boolean(profile.credentialProfileId && profile.selectedCredentialAvailable);
 }
 

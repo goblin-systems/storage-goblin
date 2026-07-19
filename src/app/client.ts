@@ -1,5 +1,8 @@
 import { DEFAULT_STORED_PROFILE, normalizeStoredProfile } from "./profile";
-import { loadStoredProfileFromBrowserStorage, saveStoredProfileToBrowserStorage } from "./persistence";
+import {
+  loadStoredProfileFromBrowserStorage,
+  saveStoredProfileToBrowserStorage,
+} from "./persistence";
 import type { FileEntry } from "./file-tree";
 import type {
   ActivityDebugLogState,
@@ -25,7 +28,11 @@ import type {
   SyncStatus,
   VersionCountEntry,
 } from "./types";
-import { normalizeCredentialSummaryRecord, normalizeProvider, normalizeProviderDefinition } from "./types";
+import {
+  normalizeCredentialSummaryRecord,
+  normalizeProvider,
+  normalizeProviderDefinition,
+} from "./types";
 
 declare global {
   interface Window {
@@ -47,7 +54,9 @@ function nowIsoString(): string {
   return new Date().toISOString();
 }
 
-function serializeSyncLocationDraft(draft: SyncLocationDraft): Omit<SyncLocationDraft, "id"> & { id: string | null } {
+function serializeSyncLocationDraft(
+  draft: SyncLocationDraft,
+): Omit<SyncLocationDraft, "id"> & { id: string | null } {
   return {
     id: draft.id,
     label: draft.label,
@@ -67,9 +76,9 @@ function serializeSyncLocationDraft(draft: SyncLocationDraft): Omit<SyncLocation
 
 function mockValidateConnection(profile: StorageProfileDraft): ConnectionValidationResult {
   const ok = Boolean(
-    profile.localFolder
-      && profile.bucket
-      && (profile.credentialProfileId || profile.selectedCredentialAvailable),
+    profile.localFolder &&
+    profile.bucket &&
+    (Boolean(profile.credentialProfileId) || profile.selectedCredentialAvailable),
   );
   return {
     ok,
@@ -124,7 +133,7 @@ function createBrowserStatus(profile: StoredStorageProfile = DEFAULT_STORED_PROF
     remoteTotalBytes: 0,
     comparison,
     overview: createOverview(comparison, pendingOperationCount),
-      plan: {
+    plan: {
       lastPlannedAt: null,
       observedPathCount: 0,
       uploadCount: 0,
@@ -132,9 +141,9 @@ function createBrowserStatus(profile: StoredStorageProfile = DEFAULT_STORED_PROF
       conflictCount: 0,
       noopCount: 0,
       pendingOperationCount,
-        credentialsAvailable: profile.selectedCredentialAvailable,
-      },
-    };
+      credentialsAvailable: profile.selectedCredentialAvailable,
+    },
+  };
 }
 
 function phaseAfterBrowserSave(profile: StoredStorageProfile, previousPhase: SyncPhase): SyncPhase {
@@ -149,7 +158,9 @@ function phaseAfterBrowserSave(profile: StoredStorageProfile, previousPhase: Syn
       return profile.remotePollingEnabled ? "polling" : "idle";
     case "syncing":
       return profile.remotePollingEnabled ? "idle" : "syncing";
-    default:
+    case "error":
+    case "unconfigured":
+    case "idle":
       return "idle";
   }
 }
@@ -182,7 +193,14 @@ async function invokeCommand<T>(command: string, args?: Record<string, unknown>)
   return core.invoke<T>(command, args);
 }
 
-async function invokeProfileCommand(command: string, args?: Record<string, unknown>): Promise<StoredStorageProfile> {
+async function invokeVoidCommand(command: string, args?: Record<string, unknown>): Promise<void> {
+  await invokeCommand<unknown>(command, args);
+}
+
+async function invokeProfileCommand(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<StoredStorageProfile> {
   return normalizeStoredProfile(await invokeCommand<StoredStorageProfile>(command, args));
 }
 
@@ -219,7 +237,10 @@ export interface StorageGoblinClient {
   deleteFile(locationId: string, path: string): Promise<void>;
   deleteFolder(locationId: string, path: string): Promise<void>;
   restoreBinEntry(locationId: string, binKey: string): Promise<void>;
-  restoreBinEntries(locationId: string, entries: BinEntryRequest[]): Promise<BinEntryMutationSummary>;
+  restoreBinEntries(
+    locationId: string,
+    entries: BinEntryRequest[],
+  ): Promise<BinEntryMutationSummary>;
   purgeBinEntries(locationId: string, entries: BinEntryRequest[]): Promise<BinEntryMutationSummary>;
   addSyncLocation(draft: SyncLocationDraft): Promise<StoredStorageProfile>;
   updateSyncLocation(draft: SyncLocationDraft): Promise<StoredStorageProfile>;
@@ -229,11 +250,20 @@ export interface StorageGoblinClient {
   listFileVersions(locationId: string, path: string): Promise<FileVersionEntry[]>;
   listVersionCounts(locationId: string): Promise<VersionCountEntry[]>;
   restoreFileVersion(locationId: string, path: string, versionId: string): Promise<void>;
-  prepareVersionComparison(locationId: string, path: string, versionIdA: string, versionIdB: string): Promise<VersionComparisonDetails>;
+  prepareVersionComparison(
+    locationId: string,
+    path: string,
+    versionIdA: string,
+    versionIdB: string,
+  ): Promise<VersionComparisonDetails>;
   deleteFileVersion(locationId: string, path: string, versionId: string): Promise<void>;
   prepareConflictComparison(locationId: string, path: string): Promise<ConflictResolutionDetails>;
   openPath(path: string): Promise<void>;
-  resolveConflict(locationId: string, path: string, resolution: "keep-local" | "keep-remote"): Promise<void>;
+  resolveConflict(
+    locationId: string,
+    path: string,
+    resolution: "keep-local" | "keep-remote",
+  ): Promise<void>;
 }
 
 export function createStorageGoblinClient(): StorageGoblinClient {
@@ -252,7 +282,8 @@ export function createStorageGoblinClient(): StorageGoblinClient {
         const stored = saveStoredProfileToBrowserStorage(profile);
         browserStatus = {
           ...createBrowserStatus(stored),
-          lastError: "Browser preview saved your setup locally. Connect and sync runs only in the desktop app.",
+          lastError:
+            "Browser preview saved your setup locally. Connect and sync runs only in the desktop app.",
         };
         emitBrowserStatus(browserStatus);
         return { ...browserStatus };
@@ -261,7 +292,9 @@ export function createStorageGoblinClient(): StorageGoblinClient {
     },
     async validateConnection(profile) {
       if (!native) return mockValidateConnection(profile);
-      return invokeCommand<ConnectionValidationResult>("validate_storage_connection", { input: profile });
+      return invokeCommand<ConnectionValidationResult>("validate_storage_connection", {
+        input: profile,
+      });
     },
     async validateS3Connection(profile) {
       return this.validateConnection(profile);
@@ -286,8 +319,10 @@ export function createStorageGoblinClient(): StorageGoblinClient {
           summary: null,
         };
       }
-      return normalizeCredentialSummaryRecord(await invokeCommand<CredentialSummary>("create_credential_command", { draft }))
-        ?? {
+      return (
+        normalizeCredentialSummaryRecord(
+          await invokeCommand<CredentialSummary>("create_credential_command", { draft }),
+        ) ?? {
           id: "",
           name: draft.name.trim(),
           provider: normalizeProvider(draft.provider),
@@ -296,7 +331,8 @@ export function createStorageGoblinClient(): StorageGoblinClient {
           lastTestedAt: null,
           lastTestMessage: null,
           summary: null,
-        };
+        }
+      );
     },
     async testCredential(request) {
       if (!native) {
@@ -319,7 +355,9 @@ export function createStorageGoblinClient(): StorageGoblinClient {
           permissions: null,
         };
       }
-      const result = await invokeCommand<CredentialTestResult>("test_credential_command", { request });
+      const result = await invokeCommand<CredentialTestResult>("test_credential_command", {
+        request,
+      });
       return {
         ...result,
         credential: normalizeCredentialSummaryRecord(result.credential) ?? result.credential,
@@ -359,7 +397,11 @@ export function createStorageGoblinClient(): StorageGoblinClient {
         const configured = Boolean(profile.localFolder && profile.bucket);
         browserStatus = {
           ...createBrowserStatus(profile),
-          phase: configured ? (profile.remotePollingEnabled ? "polling" : "syncing") : "unconfigured",
+          phase: configured
+            ? profile.remotePollingEnabled
+              ? "polling"
+              : "syncing"
+            : "unconfigured",
           lastSyncAt: configured ? nowIsoString() : null,
           lastError: configured ? null : "Save setup details before starting sync.",
         };
@@ -385,7 +427,12 @@ export function createStorageGoblinClient(): StorageGoblinClient {
         const profile = loadStoredProfileFromBrowserStorage();
         browserStatus = {
           ...createBrowserStatus(profile),
-          phase: profile.localFolder && profile.bucket ? (profile.remotePollingEnabled ? "polling" : "idle") : "unconfigured",
+          phase:
+            profile.localFolder && profile.bucket
+              ? profile.remotePollingEnabled
+                ? "polling"
+                : "idle"
+              : "unconfigured",
           lastRescanAt: nowIsoString(),
         };
         emitBrowserStatus(browserStatus);
@@ -398,7 +445,12 @@ export function createStorageGoblinClient(): StorageGoblinClient {
         const stored = loadStoredProfileFromBrowserStorage();
         browserStatus = {
           ...createBrowserStatus(stored),
-          phase: stored.localFolder && stored.bucket ? (stored.remotePollingEnabled ? "polling" : "idle") : "unconfigured",
+          phase:
+            stored.localFolder && stored.bucket
+              ? stored.remotePollingEnabled
+                ? "polling"
+                : "idle"
+              : "unconfigured",
           lastError: null,
         };
         emitBrowserStatus(browserStatus);
@@ -422,7 +474,8 @@ export function createStorageGoblinClient(): StorageGoblinClient {
         const profile = loadStoredProfileFromBrowserStorage();
         browserStatus = {
           ...createBrowserStatus(profile),
-          lastError: "Manual upload execution is only available in the native desktop runtime. Browser fallback did not run uploads.",
+          lastError:
+            "Manual upload execution is only available in the native desktop runtime. Browser fallback did not run uploads.",
         };
         emitBrowserStatus(browserStatus);
         return { ...browserStatus };
@@ -438,9 +491,12 @@ export function createStorageGoblinClient(): StorageGoblinClient {
       }
 
       const event = await import("@tauri-apps/api/event");
-      const unlisten = await event.listen<SyncStatus>("storage://sync-status-changed", (payload) => {
-        listener(payload.payload);
-      });
+      const unlisten = await event.listen<SyncStatus>(
+        "storage://sync-status-changed",
+        (payload) => {
+          listener(payload.payload);
+        },
+      );
 
       return () => {
         unlisten();
@@ -482,12 +538,12 @@ export function createStorageGoblinClient(): StorageGoblinClient {
     },
     async openActivityDebugLogFolder() {
       if (!native) return;
-      await invokeCommand<void>("open_activity_debug_log_folder");
+      await invokeVoidCommand("open_activity_debug_log_folder");
     },
     async listSyncLocations() {
       if (!native) {
         const profile = loadStoredProfileFromBrowserStorage();
-        return profile.syncLocations ?? [];
+        return profile.syncLocations;
       }
       const locations = await invokeCommand<SyncLocation[]>("list_sync_locations");
       if (!Array.isArray(locations)) {
@@ -496,9 +552,14 @@ export function createStorageGoblinClient(): StorageGoblinClient {
       return locations.map((location) => ({
         ...location,
         provider: normalizeProvider(location.provider),
-        providerDefinition: normalizeProviderDefinition((location as unknown as Record<string, unknown>).providerDefinition)
-          ?? normalizeProviderDefinition((location as unknown as Record<string, unknown>).provider_definition)
-          ?? null,
+        providerDefinition:
+          normalizeProviderDefinition(
+            (location as unknown as Record<string, unknown>).providerDefinition,
+          ) ??
+          normalizeProviderDefinition(
+            (location as unknown as Record<string, unknown>).provider_definition,
+          ) ??
+          null,
       }));
     },
     async listFileEntries(locationId) {
@@ -513,23 +574,23 @@ export function createStorageGoblinClient(): StorageGoblinClient {
       if (!native) {
         throw new Error("Reveal in file manager is only available in the desktop app.");
       }
-      await invokeCommand<void>("reveal_tree_entry", { locationId, path });
+      await invokeVoidCommand("reveal_tree_entry", { locationId, path });
     },
     async toggleLocalCopy(locationId, paths, keep) {
       if (!native) return;
-      await invokeCommand<void>("toggle_local_copy", { locationId, paths, keep });
+      await invokeVoidCommand("toggle_local_copy", { locationId, paths, keep });
     },
     async deleteFile(locationId, path) {
       if (!native) return;
-      await invokeCommand<void>("delete_file", { locationId, path });
+      await invokeVoidCommand("delete_file", { locationId, path });
     },
     async deleteFolder(locationId, path) {
       if (!native) return;
-      await invokeCommand<void>("delete_folder", { locationId, path });
+      await invokeVoidCommand("delete_folder", { locationId, path });
     },
     async restoreBinEntry(locationId, binKey) {
       if (!native) return;
-      await invokeCommand<void>("restore_bin_entry", { locationId, binKey });
+      await invokeVoidCommand("restore_bin_entry", { locationId, binKey });
     },
     async restoreBinEntries(locationId, entries) {
       if (!native) return { results: [] };
@@ -541,11 +602,15 @@ export function createStorageGoblinClient(): StorageGoblinClient {
     },
     async addSyncLocation(draft) {
       if (!native) return loadStoredProfileFromBrowserStorage();
-      return invokeProfileCommand("add_sync_location", { draft: serializeSyncLocationDraft(draft) });
+      return invokeProfileCommand("add_sync_location", {
+        draft: serializeSyncLocationDraft(draft),
+      });
     },
     async updateSyncLocation(draft) {
       if (!native) return loadStoredProfileFromBrowserStorage();
-      return invokeProfileCommand("update_sync_location", { draft: serializeSyncLocationDraft(draft) });
+      return invokeProfileCommand("update_sync_location", {
+        draft: serializeSyncLocationDraft(draft),
+      });
     },
     async setSyncLocationVersioning(locationId, enabled) {
       if (!native) return loadStoredProfileFromBrowserStorage();
@@ -557,7 +622,7 @@ export function createStorageGoblinClient(): StorageGoblinClient {
     },
     async changeStorageClass(locationId, path, storageClass) {
       if (!native) return;
-      await invokeCommand<void>("change_storage_class", { locationId, path, storageClass });
+      await invokeVoidCommand("change_storage_class", { locationId, path, storageClass });
     },
     async listFileVersions(locationId, path) {
       if (!native) return [];
@@ -569,33 +634,41 @@ export function createStorageGoblinClient(): StorageGoblinClient {
     },
     async restoreFileVersion(locationId, path, versionId) {
       if (!native) return;
-      await invokeCommand<void>("restore_file_version", { locationId, path, versionId });
+      await invokeVoidCommand("restore_file_version", { locationId, path, versionId });
     },
     async prepareVersionComparison(locationId, path, versionIdA, versionIdB) {
       if (!native) throw new Error("Version comparison is only available in the desktop app.");
-      return invokeCommand<VersionComparisonDetails>("prepare_version_comparison", { locationId, path, versionIdA, versionIdB });
+      return invokeCommand<VersionComparisonDetails>("prepare_version_comparison", {
+        locationId,
+        path,
+        versionIdA,
+        versionIdB,
+      });
     },
     async deleteFileVersion(locationId, path, versionId) {
       if (!native) return;
-      await invokeCommand<void>("delete_file_version", { locationId, path, versionId });
+      await invokeVoidCommand("delete_file_version", { locationId, path, versionId });
     },
     async prepareConflictComparison(locationId, path) {
       if (!native) {
         throw new Error("Conflict compare is only available in the desktop app.");
       }
-      return invokeCommand<ConflictResolutionDetails>("prepare_conflict_comparison", { locationId, path });
+      return invokeCommand<ConflictResolutionDetails>("prepare_conflict_comparison", {
+        locationId,
+        path,
+      });
     },
     async openPath(path) {
       if (!native) {
         throw new Error("Opening local files is only available in the desktop app.");
       }
-      await invokeCommand<void>("open_path", { path });
+      await invokeVoidCommand("open_path", { path });
     },
     async resolveConflict(locationId, path, resolution) {
       if (!native) {
         throw new Error("Conflict resolution is only available in the desktop app.");
       }
-      await invokeCommand<void>("resolve_conflict", { locationId, path, resolution });
+      await invokeVoidCommand("resolve_conflict", { locationId, path, resolution });
     },
   };
 }

@@ -131,17 +131,34 @@ describe("profile helpers", () => {
   });
 
   it("strips credentials from persisted profile", () => {
-    const stored = toStoredProfile(normalizeProfileDraft({
-      localFolder: "C:/sync",
-      bucket: "demo",
-      credentialProfileId: "cred-1",
-      selectedCredential: { id: "cred-1", name: "Primary", provider: "aws", ready: true, validationStatus: "untested", lastTestedAt: null, lastTestMessage: null },
-      selectedCredentialAvailable: true,
-    }));
+    const stored = toStoredProfile(
+      normalizeProfileDraft({
+        localFolder: "C:/sync",
+        bucket: "demo",
+        credentialProfileId: "cred-1",
+        selectedCredential: {
+          id: "cred-1",
+          name: "Primary",
+          provider: "aws",
+          ready: true,
+          validationStatus: "untested",
+          lastTestedAt: null,
+          lastTestMessage: null,
+        },
+        selectedCredentialAvailable: true,
+      }),
+    );
 
     expect(stored).toMatchObject({
       credentialProfileId: "cred-1",
-      selectedCredential: { id: "cred-1", name: "Primary", ready: true, validationStatus: "untested", lastTestedAt: null, lastTestMessage: null },
+      selectedCredential: {
+        id: "cred-1",
+        name: "Primary",
+        ready: true,
+        validationStatus: "untested",
+        lastTestedAt: null,
+        lastTestMessage: null,
+      },
       selectedCredentialAvailable: true,
       credentialsStoredSecurely: true,
     });
@@ -158,7 +175,15 @@ describe("profile helpers", () => {
       conflictStrategy: "preserve-both",
       activityDebugModeEnabled: true,
       credentialProfileId: "cred-1",
-      selectedCredential: { id: "cred-1", name: "Primary", provider: "aws", ready: true, validationStatus: "untested", lastTestedAt: null, lastTestMessage: null },
+      selectedCredential: {
+        id: "cred-1",
+        name: "Primary",
+        provider: "aws",
+        ready: true,
+        validationStatus: "untested",
+        lastTestedAt: null,
+        lastTestMessage: null,
+      },
       selectedCredentialAvailable: true,
       credentialsStoredSecurely: true,
       syncLocations: [],
@@ -182,7 +207,15 @@ describe("profile helpers", () => {
       conflictStrategy: "preserve-both",
       activityDebugModeEnabled: false,
       credentialProfileId: "cred-1",
-      selectedCredential: { id: "cred-1", name: "Primary", provider: "aws", ready: true, validationStatus: "untested", lastTestedAt: null, lastTestMessage: null },
+      selectedCredential: {
+        id: "cred-1",
+        name: "Primary",
+        provider: "aws",
+        ready: true,
+        validationStatus: "untested",
+        lastTestedAt: null,
+        lastTestMessage: null,
+      },
       selectedCredentialAvailable: false,
       credentialsStoredSecurely: true,
       syncLocations: [],
@@ -194,32 +227,42 @@ describe("profile helpers", () => {
   });
 
   it("describes combined local and remote target", () => {
-    expect(describeProfileTarget({
-      provider: "aws",
-      localFolder: "C:/sync",
-      region: "",
-      bucket: "demo",
-      remotePollingEnabled: true,
-      pollIntervalSeconds: 60,
-      conflictStrategy: "preserve-both",
-      activityDebugModeEnabled: false,
-      credentialProfileId: null,
-      selectedCredential: null,
-      selectedCredentialAvailable: false,
-      credentialsStoredSecurely: false,
-      syncLocations: [],
-    })).toBe("demo ↔ C:/sync");
+    expect(
+      describeProfileTarget({
+        provider: "aws",
+        localFolder: "C:/sync",
+        region: "",
+        bucket: "demo",
+        remotePollingEnabled: true,
+        pollIntervalSeconds: 60,
+        conflictStrategy: "preserve-both",
+        activityDebugModeEnabled: false,
+        credentialProfileId: null,
+        selectedCredential: null,
+        selectedCredentialAvailable: false,
+        credentialsStoredSecurely: false,
+        syncLocations: [],
+      }),
+    ).toBe("demo ↔ C:/sync");
   });
 
   it("detects when a selected credential is ready to use", () => {
-    expect(hasSelectedCredential(normalizeProfileDraft({
-      credentialProfileId: "cred-1",
-      selectedCredentialAvailable: true,
-    }))).toBe(true);
-    expect(hasSelectedCredential(normalizeProfileDraft({
-      credentialProfileId: "cred-1",
-      selectedCredentialAvailable: false,
-    }))).toBe(false);
+    expect(
+      hasSelectedCredential(
+        normalizeProfileDraft({
+          credentialProfileId: "cred-1",
+          selectedCredentialAvailable: true,
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      hasSelectedCredential(
+        normalizeProfileDraft({
+          credentialProfileId: "cred-1",
+          selectedCredentialAvailable: false,
+        }),
+      ),
+    ).toBe(false);
   });
 
   it("migrates legacy syncPairs to syncLocations", () => {
@@ -249,9 +292,7 @@ describe("profile helpers", () => {
       syncPairs: [legacyLocation],
     } as unknown as Parameters<typeof normalizeStoredProfile>[0]);
 
-    expect(fromLegacy.syncLocations).toEqual([
-      expect.objectContaining(legacyLocation),
-    ]);
+    expect(fromLegacy.syncLocations).toEqual([expect.objectContaining(legacyLocation)]);
 
     // When both exist, syncLocations takes precedence
     const withBoth = normalizeStoredProfile({

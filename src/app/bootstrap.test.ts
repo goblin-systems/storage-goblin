@@ -1,7 +1,14 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CredentialSummary, DeleteCredentialResult, LocationSyncStatus, StoredStorageProfile, SyncLocation, SyncStatus } from "./types";
+import type {
+  CredentialSummary,
+  DeleteCredentialResult,
+  LocationSyncStatus,
+  StoredStorageProfile,
+  SyncLocation,
+  SyncStatus,
+} from "./types";
 import type { FileEntry } from "./file-tree";
 
 type ModalBackdrop = HTMLElement & { __onClose?: () => void };
@@ -46,17 +53,21 @@ const {
   closeDrawerMock: vi.fn(),
   changeStorageClassMock: vi.fn(),
   confirmModalMock: vi.fn().mockResolvedValue(true),
-  openModalMock: vi.fn(({ backdrop, onClose }: { backdrop: ModalBackdrop; onClose?: () => void }) => {
-    backdrop.__onClose = onClose;
-    backdrop.removeAttribute("hidden");
-    document.body.classList.add("modal-open");
-  }),
-  closeModalMock: vi.fn(({ backdrop, onClose }: { backdrop: ModalBackdrop; onClose?: () => void }) => {
-    backdrop.setAttribute("hidden", "");
-    document.body.classList.remove("modal-open");
-    backdrop.__onClose?.();
-    onClose?.();
-  }),
+  openModalMock: vi.fn(
+    ({ backdrop, onClose }: { backdrop: ModalBackdrop; onClose?: () => void }) => {
+      backdrop.__onClose = onClose;
+      backdrop.removeAttribute("hidden");
+      document.body.classList.add("modal-open");
+    },
+  ),
+  closeModalMock: vi.fn(
+    ({ backdrop, onClose }: { backdrop: ModalBackdrop; onClose?: () => void }) => {
+      backdrop.setAttribute("hidden", "");
+      document.body.classList.remove("modal-open");
+      backdrop.__onClose?.();
+      onClose?.();
+    },
+  ),
   chooseLocalFolderMock: vi.fn(),
   createCredentialMock: vi.fn(),
   deleteFileMock: vi.fn(),
@@ -98,22 +109,25 @@ const {
 vi.mock("@goblin-systems/goblin-design-system", () => ({
   applyIcons: vi.fn(),
   bindCheckboxTree: bindCheckboxTreeMock,
-  bindNavigation: vi.fn(({ root, onSelect }: { root: HTMLElement; onSelect: (id: string) => void }) => {
-    root.querySelectorAll<HTMLElement>("[data-nav-id]").forEach((item) => {
-      item.addEventListener("click", () => {
-        const id = item.dataset.navId;
-        if (id) onSelect(id);
+  bindNavigation: vi.fn(
+    ({ root, onSelect }: { root: HTMLElement; onSelect: (id: string) => void }) => {
+      root.querySelectorAll<HTMLElement>("[data-nav-id]").forEach((item) => {
+        item.addEventListener("click", () => {
+          const id = item.dataset.navId;
+          if (id) onSelect(id);
+        });
       });
-    });
 
-    return {
-      closeAll: vi.fn(),
-      closeItem: vi.fn(),
-      openItem: vi.fn(),
-    };
-  }),
+      return {
+        closeAll: vi.fn(),
+        closeItem: vi.fn(),
+        openItem: vi.fn(),
+      };
+    },
+  ),
   byId: <T extends HTMLElement>(id: string, root: Document | HTMLElement = document) => {
-    const element = root instanceof Document ? root.getElementById(id) : root.querySelector(`#${id}`);
+    const element =
+      root instanceof Document ? root.getElementById(id) : root.querySelector(`#${id}`);
     if (!element) {
       throw new Error(`Missing element: ${id}`);
     }
@@ -274,7 +288,11 @@ function baseStoredProfile(overrides: Partial<StoredStorageProfile> = {}): Store
   };
 }
 
-function baseSyncLocation(id: string, label: string, overrides: Partial<SyncLocation> = {}): SyncLocation {
+function baseSyncLocation(
+  id: string,
+  label: string,
+  overrides: Partial<SyncLocation> = {},
+): SyncLocation {
   return {
     id,
     label,
@@ -421,11 +439,12 @@ function createDeferred<T>() {
 }
 
 function listItemByText(selector: string, text: string): HTMLElement {
-  const item = Array.from(document.querySelectorAll<HTMLElement>(selector))
-    .find((element) => element.textContent?.includes(text));
+  const item = Array.from(document.querySelectorAll<HTMLElement>(selector)).find((element) =>
+    element.textContent?.includes(text),
+  );
 
   expect(item).toBeTruthy();
-  return item as HTMLElement;
+  return item!;
 }
 
 function selectOptionValues(select: HTMLSelectElement): string[] {
@@ -441,31 +460,35 @@ function getAsyncConfirmMessage(): HTMLElement | null {
 }
 
 function getVisibleAsyncConfirmModals(): HTMLElement[] {
-  return Array.from(document.querySelectorAll<HTMLElement>(".storage-async-confirm-modal:not([hidden])"));
+  return Array.from(
+    document.querySelectorAll<HTMLElement>(".storage-async-confirm-modal:not([hidden])"),
+  );
 }
 
 function getAsyncConfirmAcceptButton(): HTMLButtonElement {
   const button = getAsyncConfirmModal()?.querySelector<HTMLButtonElement>(".modal-btn-accept");
   expect(button).toBeTruthy();
-  return button as HTMLButtonElement;
+  return button!;
 }
 
 function getAsyncConfirmAcceptSpinner(): HTMLElement {
   const spinner = getAsyncConfirmAcceptButton().querySelector<HTMLElement>(".modal-btn-spinner");
   expect(spinner).toBeTruthy();
-  return spinner as HTMLElement;
+  return spinner!;
 }
 
 function getAsyncConfirmAcceptBusyText(): HTMLElement {
   const busyText = getAsyncConfirmAcceptButton().querySelector<HTMLElement>(".modal-btn-busy-text");
   expect(busyText).toBeTruthy();
-  return busyText as HTMLElement;
+  return busyText!;
 }
 
 function getAsyncConfirmRejectButton(): HTMLButtonElement {
-  const button = getAsyncConfirmModal()?.querySelector<HTMLButtonElement>(".modal-footer .secondary-btn");
+  const button = getAsyncConfirmModal()?.querySelector<HTMLButtonElement>(
+    ".modal-footer .secondary-btn",
+  );
   expect(button).toBeTruthy();
-  return button as HTMLButtonElement;
+  return button!;
 }
 
 describe("bootstrapStorageGoblin", () => {
@@ -480,7 +503,9 @@ describe("bootstrapStorageGoblin", () => {
     openActivityDebugLogFolderMock.mockReset().mockResolvedValue(undefined);
     showToastMock.mockReset();
     loadProfileMock.mockReset().mockResolvedValue(baseStoredProfile());
-    listProviderCapabilitiesMock.mockReset().mockResolvedValue(defaultProviderCapabilitiesPayload());
+    listProviderCapabilitiesMock
+      .mockReset()
+      .mockResolvedValue(defaultProviderCapabilitiesPayload());
     saveProfileSettingsMock.mockReset().mockResolvedValue({});
     toggleLocalCopyMock.mockReset().mockResolvedValue(undefined);
     deleteFileMock.mockReset().mockResolvedValue(undefined);
@@ -489,23 +514,26 @@ describe("bootstrapStorageGoblin", () => {
     listCredentialsMock.mockReset().mockResolvedValue([baseCredential()]);
     listFileVersionsMock.mockReset().mockResolvedValue([]);
     createCredentialMock.mockReset().mockResolvedValue(baseCredential("cred-2", "Archive"));
-    testCredentialMock.mockReset().mockImplementation(async ({ credentialId }: { credentialId: string }) => ({
-      credential: {
-        id: credentialId,
-        name: credentialId === "cred-2" ? "Archive" : "Primary",
-        provider: "aws",
-        ready: true,
-        validationStatus: "passed",
-        lastTestedAt: "2026-04-04T12:05:00.000Z",
-        lastTestMessage: "Validated access to bucket 'demo-bucket' and sampled 1 remote object(s).",
-      },
-      ok: true,
-      checkedAt: "2026-04-04T12:05:00.000Z",
-      message: "Validated access to bucket 'demo-bucket' and sampled 1 remote object(s).",
-      bucketCount: 1,
-      buckets: ["demo-bucket"],
-      permissions: null,
-    }));
+    testCredentialMock
+      .mockReset()
+      .mockImplementation(async ({ credentialId }: { credentialId: string }) => ({
+        credential: {
+          id: credentialId,
+          name: credentialId === "cred-2" ? "Archive" : "Primary",
+          provider: "aws",
+          ready: true,
+          validationStatus: "passed",
+          lastTestedAt: "2026-04-04T12:05:00.000Z",
+          lastTestMessage:
+            "Validated access to bucket 'demo-bucket' and sampled 1 remote object(s).",
+        },
+        ok: true,
+        checkedAt: "2026-04-04T12:05:00.000Z",
+        message: "Validated access to bucket 'demo-bucket' and sampled 1 remote object(s).",
+        bucketCount: 1,
+        buckets: ["demo-bucket"],
+        permissions: null,
+      }));
     deleteCredentialMock.mockReset().mockResolvedValue({
       deleted: true,
       profile: baseStoredProfile(),
@@ -573,7 +601,9 @@ describe("bootstrapStorageGoblin", () => {
   });
 
   it("creates credentials from the dedicated dialog", async () => {
-    listCredentialsMock.mockResolvedValueOnce([]).mockResolvedValueOnce([baseCredential("cred-2", "Archive")]);
+    listCredentialsMock
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([baseCredential("cred-2", "Archive")]);
 
     cleanup = await bootstrapStorageGoblin();
 
@@ -582,7 +612,9 @@ describe("bootstrapStorageGoblin", () => {
     (document.getElementById("credential-access-key-input") as HTMLInputElement).value = "AKIA123";
     (document.getElementById("credential-secret-key-input") as HTMLInputElement).value = "secret";
 
-    document.getElementById("create-credential-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document
+      .getElementById("create-credential-btn")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();
 
     expect(createCredentialMock).toHaveBeenCalledWith({
@@ -592,10 +624,18 @@ describe("bootstrapStorageGoblin", () => {
       secretAccessKey: "secret",
     });
     expect((document.getElementById("credential-name-input") as HTMLInputElement).value).toBe("");
-    expect((document.getElementById("credential-access-key-input") as HTMLInputElement).value).toBe("");
-    expect((document.getElementById("credential-secret-key-input") as HTMLInputElement).value).toBe("");
-    expect(document.getElementById("credentials-result")?.textContent).toContain("Saved credential \"Archive\" securely.");
-    expect(document.getElementById("credentials-result")?.textContent).toContain("It was not tested yet.");
+    expect((document.getElementById("credential-access-key-input") as HTMLInputElement).value).toBe(
+      "",
+    );
+    expect((document.getElementById("credential-secret-key-input") as HTMLInputElement).value).toBe(
+      "",
+    );
+    expect(document.getElementById("credentials-result")?.textContent).toContain(
+      'Saved credential "Archive" securely.',
+    );
+    expect(document.getElementById("credentials-result")?.textContent).toContain(
+      "It was not tested yet.",
+    );
   });
 
   it("renders a GCS-specific credential flow without AWS placeholders", async () => {
@@ -604,31 +644,44 @@ describe("bootstrapStorageGoblin", () => {
     cleanup = await bootstrapStorageGoblin();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-credentials']")?.click();
-    const providerSelect = document.getElementById("credential-provider-select") as HTMLSelectElement;
+    const providerSelect = document.getElementById(
+      "credential-provider-select",
+    ) as HTMLSelectElement;
     providerSelect.value = "gcs";
     providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
 
-    expect((document.getElementById("credential-access-key-field") as HTMLElement).hidden).toBe(true);
-    expect((document.getElementById("credential-secret-key-field") as HTMLElement).hidden).toBe(true);
-    expect((document.getElementById("credential-service-account-field") as HTMLElement).hidden).toBe(false);
-    expect((document.getElementById("credential-provider-help") as HTMLElement).textContent).toContain("service account JSON");
-    expect((document.getElementById("credential-access-key-input") as HTMLInputElement).placeholder).not.toContain("AKIA");
+    expect(document.getElementById("credential-access-key-field")!.hidden).toBe(true);
+    expect(document.getElementById("credential-secret-key-field")!.hidden).toBe(true);
+    expect(document.getElementById("credential-service-account-field")!.hidden).toBe(false);
+    expect(document.getElementById("credential-provider-help")!.textContent).toContain(
+      "service account JSON",
+    );
+    expect(
+      (document.getElementById("credential-access-key-input") as HTMLInputElement).placeholder,
+    ).not.toContain("AKIA");
   });
 
   it("creates GCS credentials with service account JSON", async () => {
-    listCredentialsMock.mockResolvedValueOnce([]).mockResolvedValueOnce([baseGcsCredential("cred-gcs-1", "GCS Archive")]);
+    listCredentialsMock
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([baseGcsCredential("cred-gcs-1", "GCS Archive")]);
     createCredentialMock.mockResolvedValueOnce(baseGcsCredential("cred-gcs-1", "GCS Archive"));
 
     cleanup = await bootstrapStorageGoblin();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-credentials']")?.click();
     (document.getElementById("credential-name-input") as HTMLInputElement).value = "GCS Archive";
-    const providerSelect = document.getElementById("credential-provider-select") as HTMLSelectElement;
+    const providerSelect = document.getElementById(
+      "credential-provider-select",
+    ) as HTMLSelectElement;
     providerSelect.value = "gcs";
     providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
-    (document.getElementById("credential-service-account-input") as HTMLTextAreaElement).value = '{"type":"service_account","client_email":"sync@example-project.iam.gserviceaccount.com"}';
+    (document.getElementById("credential-service-account-input") as HTMLTextAreaElement).value =
+      '{"type":"service_account","client_email":"sync@example-project.iam.gserviceaccount.com"}';
 
-    document.getElementById("create-credential-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document
+      .getElementById("create-credential-btn")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();
 
     expect(createCredentialMock).toHaveBeenCalledWith({
@@ -636,18 +689,21 @@ describe("bootstrapStorageGoblin", () => {
       provider: "gcs",
       credential: {
         kind: "gcsServiceAccount",
-        serviceAccountJson: '{"type":"service_account","client_email":"sync@example-project.iam.gserviceaccount.com"}',
+        serviceAccountJson:
+          '{"type":"service_account","client_email":"sync@example-project.iam.gserviceaccount.com"}',
       },
     });
   });
 
   it("surfaces tested-on-create credentials when bucket context exists", async () => {
-    listCredentialsMock.mockResolvedValueOnce([]).mockResolvedValueOnce([{
-      ...baseCredential("cred-2", "Archive"),
-      validationStatus: "passed",
-      lastTestedAt: "2026-04-04T12:05:00.000Z",
-      lastTestMessage: "Validated access to bucket 'demo-bucket' and sampled 1 remote object(s).",
-    }]);
+    listCredentialsMock.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      {
+        ...baseCredential("cred-2", "Archive"),
+        validationStatus: "passed",
+        lastTestedAt: "2026-04-04T12:05:00.000Z",
+        lastTestMessage: "Validated access to bucket 'demo-bucket' and sampled 1 remote object(s).",
+      },
+    ]);
     createCredentialMock.mockResolvedValueOnce({
       ...baseCredential("cred-2", "Archive"),
       validationStatus: "passed",
@@ -662,18 +718,23 @@ describe("bootstrapStorageGoblin", () => {
     (document.getElementById("credential-access-key-input") as HTMLInputElement).value = "AKIA123";
     (document.getElementById("credential-secret-key-input") as HTMLInputElement).value = "secret";
 
-    document.getElementById("create-credential-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document
+      .getElementById("create-credential-btn")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();
 
-    expect(document.getElementById("credentials-result")?.textContent).toContain("tested and is valid");
+    expect(document.getElementById("credentials-result")?.textContent).toContain(
+      "tested and is valid",
+    );
   });
 
   it("offers re-test actions and updates credential test state", async () => {
     cleanup = await bootstrapStorageGoblin();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-credentials']")?.click();
-    const testButton = Array.from(document.querySelectorAll<HTMLButtonElement>("#credentials-list button"))
-      .find((button) => button.textContent === "Test");
+    const testButton = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("#credentials-list button"),
+    ).find((button) => button.textContent === "Test");
 
     expect(testButton).toBeTruthy();
     testButton?.click();
@@ -687,8 +748,14 @@ describe("bootstrapStorageGoblin", () => {
         bucket: "",
       },
     });
-    expect(document.getElementById("credentials-result")?.textContent).toContain("test passed. Can access 1 bucket(s)");
-    expect(Array.from(document.querySelectorAll<HTMLButtonElement>("#credentials-list button")).some((button) => button.textContent === "Re-test")).toBe(true);
+    expect(document.getElementById("credentials-result")?.textContent).toContain(
+      "test passed. Can access 1 bucket(s)",
+    );
+    expect(
+      Array.from(document.querySelectorAll<HTMLButtonElement>("#credentials-list button")).some(
+        (button) => button.textContent === "Re-test",
+      ),
+    ).toBe(true);
   });
 
   it("deletes credentials from the dedicated dialog and clears selected state", async () => {
@@ -745,9 +812,15 @@ describe("bootstrapStorageGoblin", () => {
     getAsyncConfirmAcceptButton().click();
     await flushTasks();
 
-    const selectAfterDelete = document.getElementById("active-location-select") as HTMLSelectElement;
+    const selectAfterDelete = document.getElementById(
+      "active-location-select",
+    ) as HTMLSelectElement;
     expect(removeSyncLocationMock).toHaveBeenCalledWith("loc-1");
-    expect(Array.from(selectAfterDelete.options).map((option) => option.value)).toEqual(["", "live:loc-2", "bin:loc-2"]);
+    expect(Array.from(selectAfterDelete.options).map((option) => option.value)).toEqual([
+      "",
+      "live:loc-2",
+      "bin:loc-2",
+    ]);
     expect(selectAfterDelete.value).toBe("live:loc-2");
     expect(document.getElementById("locations-count-badge")?.textContent).toBe("1 sync location");
 
@@ -762,8 +835,14 @@ describe("bootstrapStorageGoblin", () => {
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    const selectAfterReload = document.getElementById("active-location-select") as HTMLSelectElement;
-    expect(Array.from(selectAfterReload.options).map((option) => option.value)).toEqual(["", "live:loc-2", "bin:loc-2"]);
+    const selectAfterReload = document.getElementById(
+      "active-location-select",
+    ) as HTMLSelectElement;
+    expect(Array.from(selectAfterReload.options).map((option) => option.value)).toEqual([
+      "",
+      "live:loc-2",
+      "bin:loc-2",
+    ]);
     expect(selectAfterReload.value).toBe("live:loc-2");
   });
 
@@ -791,41 +870,51 @@ describe("bootstrapStorageGoblin", () => {
 
     // Fill in the form
     (document.getElementById("location-label-input") as HTMLInputElement).value = "My photos";
-    (document.getElementById("location-local-folder-input") as HTMLInputElement).value = "C:/photos";
+    (document.getElementById("location-local-folder-input") as HTMLInputElement).value =
+      "C:/photos";
     (document.getElementById("location-bucket-input") as HTMLInputElement).value = "photo-bucket";
     (document.getElementById("location-region-select") as HTMLSelectElement).value = "us-east-1";
-    (document.getElementById("location-conflict-strategy-select") as HTMLSelectElement).value = "prefer-local";
+    (document.getElementById("location-conflict-strategy-select") as HTMLSelectElement).value =
+      "prefer-local";
 
     // Click create
-    document.getElementById("save-location-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document
+      .getElementById("save-location-btn")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();
 
-    expect(addSyncLocationMock).toHaveBeenCalledWith(expect.objectContaining({
-      id: null,
-      label: "My photos",
-      provider: "aws",
-      localFolder: "C:/photos",
-      bucket: "photo-bucket",
-      region: "us-east-1",
-      conflictStrategy: "prefer-local",
-      remoteBin: {
-        enabled: true,
-        retentionDays: 7,
-      },
-    }));
-    expect(document.getElementById("locations-result")?.textContent).toContain('Created sync location "My photos"');
+    expect(addSyncLocationMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: null,
+        label: "My photos",
+        provider: "aws",
+        localFolder: "C:/photos",
+        bucket: "photo-bucket",
+        region: "us-east-1",
+        conflictStrategy: "prefer-local",
+        remoteBin: {
+          enabled: true,
+          retentionDays: 7,
+        },
+      }),
+    );
+    expect(document.getElementById("locations-result")?.textContent).toContain(
+      'Created sync location "My photos"',
+    );
     expect(document.getElementById("locations-count-badge")?.textContent).toBe("1 sync location");
   });
 
   it("hides provider selection on create and keeps provider locked on edit", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos", { provider: "gcs" })]);
+    listSyncLocationsMock.mockResolvedValueOnce([
+      baseSyncLocation("loc-1", "My photos", { provider: "gcs" }),
+    ]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
-    expect((document.getElementById("location-provider-select-field") as HTMLElement).hidden).toBe(true);
-    expect((document.getElementById("location-provider-info") as HTMLElement).hidden).toBe(true);
+    expect(document.getElementById("location-provider-select-field")!.hidden).toBe(true);
+    expect(document.getElementById("location-provider-info")!.hidden).toBe(true);
 
     listItemByText("#locations-list li", "My photos")
       .querySelectorAll<HTMLButtonElement>("button")
@@ -835,38 +924,56 @@ describe("bootstrapStorageGoblin", () => {
         }
       });
 
-    expect((document.getElementById("location-provider-select-field") as HTMLElement).hidden).toBe(true);
-    expect((document.getElementById("location-provider-info") as HTMLElement).hidden).toBe(false);
-    expect((document.getElementById("location-provider-label") as HTMLElement).textContent).toContain("Google Cloud Storage");
+    expect(document.getElementById("location-provider-select-field")!.hidden).toBe(true);
+    expect(document.getElementById("location-provider-info")!.hidden).toBe(false);
+    expect(document.getElementById("location-provider-label")!.textContent).toContain(
+      "Google Cloud Storage",
+    );
   });
 
   it("infers location provider from the selected credential when creating a location", async () => {
-    listCredentialsMock.mockResolvedValueOnce([baseCredential("cred-aws", "AWS Primary"), baseGcsCredential("cred-gcs", "GCS Primary")]);
-    addSyncLocationMock.mockResolvedValueOnce({ syncLocations: [baseSyncLocation("loc-1", "Assets", { provider: "gcs", credentialProfileId: "cred-gcs" })] });
+    listCredentialsMock.mockResolvedValueOnce([
+      baseCredential("cred-aws", "AWS Primary"),
+      baseGcsCredential("cred-gcs", "GCS Primary"),
+    ]);
+    addSyncLocationMock.mockResolvedValueOnce({
+      syncLocations: [
+        baseSyncLocation("loc-1", "Assets", { provider: "gcs", credentialProfileId: "cred-gcs" }),
+      ],
+    });
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
-    const credentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    const credentialSelect = document.getElementById(
+      "location-credential-select",
+    ) as HTMLSelectElement;
     expect(selectOptionValues(credentialSelect)).toEqual(["", "cred-aws", "cred-gcs"]);
 
     (document.getElementById("location-label-input") as HTMLInputElement).value = "Assets";
-    (document.getElementById("location-local-folder-input") as HTMLInputElement).value = "C:/assets";
+    (document.getElementById("location-local-folder-input") as HTMLInputElement).value =
+      "C:/assets";
     (document.getElementById("location-bucket-input") as HTMLInputElement).value = "assets-bucket";
     credentialSelect.value = "cred-gcs";
     credentialSelect.dispatchEvent(new Event("change", { bubbles: true }));
 
     expect(document.getElementById("location-region-label")?.textContent).toBe("Bucket location");
-    expect(document.getElementById("location-provider-help")?.textContent).toContain("GCS sync locations");
+    expect(document.getElementById("location-provider-help")?.textContent).toContain(
+      "GCS sync locations",
+    );
 
-    document.getElementById("save-location-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document
+      .getElementById("save-location-btn")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();
 
-    expect(addSyncLocationMock).toHaveBeenCalledWith(expect.objectContaining({
-      provider: "gcs",
-      credentialProfileId: "cred-gcs",
-    }));
+    expect(addSyncLocationMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "gcs",
+        credentialProfileId: "cred-gcs",
+      }),
+    );
   });
 
   it("shows newly created GCS credentials in the location picker without a manual provider toggle", async () => {
@@ -880,18 +987,29 @@ describe("bootstrapStorageGoblin", () => {
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-credentials']")?.click();
     (document.getElementById("credential-name-input") as HTMLInputElement).value = "GCS Archive";
-    const credentialProviderSelect = document.getElementById("credential-provider-select") as HTMLSelectElement;
+    const credentialProviderSelect = document.getElementById(
+      "credential-provider-select",
+    ) as HTMLSelectElement;
     credentialProviderSelect.value = "gcs";
     credentialProviderSelect.dispatchEvent(new Event("change", { bubbles: true }));
-    (document.getElementById("credential-service-account-input") as HTMLTextAreaElement).value = '{"type":"service_account","client_email":"sync@example-project.iam.gserviceaccount.com"}';
+    (document.getElementById("credential-service-account-input") as HTMLTextAreaElement).value =
+      '{"type":"service_account","client_email":"sync@example-project.iam.gserviceaccount.com"}';
 
-    document.getElementById("create-credential-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document
+      .getElementById("create-credential-btn")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
 
-    const locationCredentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
-    expect(selectOptionValues(locationCredentialSelect)).toEqual(["", "cred-aws", "cred-gcs-archive"]);
+    const locationCredentialSelect = document.getElementById(
+      "location-credential-select",
+    ) as HTMLSelectElement;
+    expect(selectOptionValues(locationCredentialSelect)).toEqual([
+      "",
+      "cred-aws",
+      "cred-gcs-archive",
+    ]);
     locationCredentialSelect.value = "cred-gcs-archive";
     locationCredentialSelect.dispatchEvent(new Event("change", { bubbles: true }));
     expect(document.getElementById("location-region-label")?.textContent).toBe("Bucket location");
@@ -907,17 +1025,24 @@ describe("bootstrapStorageGoblin", () => {
     cleanup = await bootstrapStorageGoblin();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
-    const locationCredentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    const locationCredentialSelect = document.getElementById(
+      "location-credential-select",
+    ) as HTMLSelectElement;
     expect(selectOptionValues(locationCredentialSelect)).toEqual(["", "cred-aws"]);
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-credentials']")?.click();
     (document.getElementById("credential-name-input") as HTMLInputElement).value = "GCS Live";
-    const credentialProviderSelect = document.getElementById("credential-provider-select") as HTMLSelectElement;
+    const credentialProviderSelect = document.getElementById(
+      "credential-provider-select",
+    ) as HTMLSelectElement;
     credentialProviderSelect.value = "gcs";
     credentialProviderSelect.dispatchEvent(new Event("change", { bubbles: true }));
-    (document.getElementById("credential-service-account-input") as HTMLTextAreaElement).value = '{"type":"service_account","client_email":"sync@example-project.iam.gserviceaccount.com"}';
+    (document.getElementById("credential-service-account-input") as HTMLTextAreaElement).value =
+      '{"type":"service_account","client_email":"sync@example-project.iam.gserviceaccount.com"}';
 
-    document.getElementById("create-credential-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document
+      .getElementById("create-credential-btn")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
@@ -929,13 +1054,15 @@ describe("bootstrapStorageGoblin", () => {
   });
 
   it("uses the effective default provider for create-form hints before a credential is chosen", async () => {
-    loadProfileMock.mockResolvedValueOnce(baseStoredProfile({
-      provider: "aws",
-      credentialProfileId: "cred-gcs-selected",
-      selectedCredential: baseGcsCredential("cred-gcs-selected", "Selected GCS"),
-      selectedCredentialAvailable: true,
-      credentialsStoredSecurely: true,
-    }));
+    loadProfileMock.mockResolvedValueOnce(
+      baseStoredProfile({
+        provider: "aws",
+        credentialProfileId: "cred-gcs-selected",
+        selectedCredential: baseGcsCredential("cred-gcs-selected", "Selected GCS"),
+        selectedCredentialAvailable: true,
+        credentialsStoredSecurely: true,
+      }),
+    );
     listCredentialsMock.mockResolvedValueOnce([
       baseCredential("cred-aws", "AWS Primary"),
       baseGcsCredential("cred-gcs-selected", "Selected GCS"),
@@ -946,19 +1073,23 @@ describe("bootstrapStorageGoblin", () => {
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
 
-    const credentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    const credentialSelect = document.getElementById(
+      "location-credential-select",
+    ) as HTMLSelectElement;
     expect(selectOptionValues(credentialSelect)).toEqual(["", "cred-aws", "cred-gcs-selected"]);
     expect(document.getElementById("location-region-label")?.textContent).toBe("Bucket location");
   });
 
   it("keeps create-location default provider hints on GCS after credential refresh when profile provider is still AWS", async () => {
-    loadProfileMock.mockResolvedValueOnce(baseStoredProfile({
-      provider: "aws",
-      credentialProfileId: "cred-gcs-selected",
-      selectedCredential: baseGcsCredential("cred-gcs-selected", "Selected GCS"),
-      selectedCredentialAvailable: true,
-      credentialsStoredSecurely: true,
-    }));
+    loadProfileMock.mockResolvedValueOnce(
+      baseStoredProfile({
+        provider: "aws",
+        credentialProfileId: "cred-gcs-selected",
+        selectedCredential: baseGcsCredential("cred-gcs-selected", "Selected GCS"),
+        selectedCredentialAvailable: true,
+        credentialsStoredSecurely: true,
+      }),
+    );
     listCredentialsMock
       .mockResolvedValueOnce([baseGcsCredential("cred-gcs-selected", "Selected GCS")])
       .mockResolvedValueOnce([baseGcsCredential("cred-gcs-selected", "Selected GCS")]);
@@ -967,7 +1098,9 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
-    const credentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    const credentialSelect = document.getElementById(
+      "location-credential-select",
+    ) as HTMLSelectElement;
 
     expect(selectOptionValues(credentialSelect)).toEqual(["", "cred-gcs-selected"]);
     expect(document.getElementById("location-region-label")?.textContent).toBe("Bucket location");
@@ -999,7 +1132,9 @@ describe("bootstrapStorageGoblin", () => {
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
 
-    const credentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    const credentialSelect = document.getElementById(
+      "location-credential-select",
+    ) as HTMLSelectElement;
     expect(selectOptionValues(credentialSelect)).toEqual(["", "cred-aws", "cred-gcs"]);
 
     listItemByText("#locations-list li", "Assets")
@@ -1010,26 +1145,43 @@ describe("bootstrapStorageGoblin", () => {
         }
       });
 
-    expect((document.getElementById("location-provider-label") as HTMLElement).textContent).toContain("Google Cloud Storage");
+    expect(document.getElementById("location-provider-label")!.textContent).toContain(
+      "Google Cloud Storage",
+    );
     expect(selectOptionValues(credentialSelect)).toEqual(["", "cred-gcs"]);
     expect(credentialSelect.value).toBe("cred-gcs");
   });
 
   it("uses provider-specific bucket location language for GCS setup", async () => {
-    listCredentialsMock.mockResolvedValueOnce([baseCredential("cred-aws", "AWS Primary"), baseGcsCredential("cred-gcs", "GCS Primary")]);
+    listCredentialsMock.mockResolvedValueOnce([
+      baseCredential("cred-aws", "AWS Primary"),
+      baseGcsCredential("cred-gcs", "GCS Primary"),
+    ]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
-    const credentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    const credentialSelect = document.getElementById(
+      "location-credential-select",
+    ) as HTMLSelectElement;
     credentialSelect.value = "cred-gcs";
     credentialSelect.dispatchEvent(new Event("change", { bubbles: true }));
 
     expect(document.getElementById("location-region-label")?.textContent).toBe("Bucket location");
-    expect(Array.from((document.getElementById("location-region-select") as HTMLSelectElement).options).map((option) => option.textContent)).toContain("US multi-region");
-    expect(Array.from((document.getElementById("location-region-select") as HTMLSelectElement).options).map((option) => option.textContent)).not.toContain("US East (N. Virginia) — us-east-1");
-    expect(document.getElementById("location-provider-help")?.textContent).toContain("bucket locations");
+    expect(
+      Array.from(
+        (document.getElementById("location-region-select") as HTMLSelectElement).options,
+      ).map((option) => option.textContent),
+    ).toContain("US multi-region");
+    expect(
+      Array.from(
+        (document.getElementById("location-region-select") as HTMLSelectElement).options,
+      ).map((option) => option.textContent),
+    ).not.toContain("US East (N. Virginia) — us-east-1");
+    expect(document.getElementById("location-provider-help")?.textContent).toContain(
+      "bucket locations",
+    );
   });
 
   it("derives saved location capability state from backend provider metadata when location payload omits it", async () => {
@@ -1063,7 +1215,9 @@ describe("bootstrapStorageGoblin", () => {
         supportsNativeValidation: true,
       },
     ]);
-    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "Assets", { provider: "gcs" })]);
+    listSyncLocationsMock.mockResolvedValueOnce([
+      baseSyncLocation("loc-1", "Assets", { provider: "gcs" }),
+    ]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
@@ -1077,9 +1231,13 @@ describe("bootstrapStorageGoblin", () => {
         }
       });
 
-    expect(document.getElementById("location-capability-versioning")?.textContent).toBe("Available");
+    expect(document.getElementById("location-capability-versioning")?.textContent).toBe(
+      "Available",
+    );
     expect(document.getElementById("location-capability-archive")?.textContent).toBe("Available");
-    expect(document.getElementById("location-provider-label")?.textContent).toContain("Google Cloud Storage");
+    expect(document.getElementById("location-provider-label")?.textContent).toContain(
+      "Google Cloud Storage",
+    );
   });
 
   it("renders provider-aware credential summary details in the credentials list", async () => {
@@ -1094,7 +1252,9 @@ describe("bootstrapStorageGoblin", () => {
     document.querySelector<HTMLElement>("[data-nav-id='nav-credentials']")?.click();
 
     expect(listItemByText("#credentials-list li", "AWS Primary").textContent).toContain("••••A123");
-    expect(listItemByText("#credentials-list li", "GCS Primary").textContent).toContain("sync@example-project.iam.gserviceaccount.com");
+    expect(listItemByText("#credentials-list li", "GCS Primary").textContent).toContain(
+      "sync@example-project.iam.gserviceaccount.com",
+    );
   });
 
   it("shows GCS remote bin as an available provider capability", async () => {
@@ -1104,15 +1264,26 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
-    const credentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    const credentialSelect = document.getElementById(
+      "location-credential-select",
+    ) as HTMLSelectElement;
     credentialSelect.value = "cred-gcs";
     credentialSelect.dispatchEvent(new Event("change", { bubbles: true }));
 
     expect(document.getElementById("location-capability-archive")?.textContent).toBe("Available");
-    expect((document.getElementById("location-capability-archive")?.parentElement as HTMLElement).classList.contains("is-disabled")).toBe(false);
+    expect(
+      (document.getElementById("location-capability-archive")?.parentElement!).classList.contains(
+        "is-disabled",
+      ),
+    ).toBe(false);
 
-    expect(document.getElementById("location-capability-remote-bin")?.textContent).toBe("Available");
-    expect((document.getElementById("location-capability-remote-bin")?.parentElement as HTMLElement).classList.contains("is-disabled")).toBe(false);
+    expect(document.getElementById("location-capability-remote-bin")?.textContent).toBe(
+      "Available",
+    );
+    expect(
+      (document.getElementById("location-capability-remote-bin")
+        ?.parentElement!).classList.contains("is-disabled"),
+    ).toBe(false);
 
     const capabilityHelp = document.getElementById("location-capability-help");
     expect(capabilityHelp?.textContent).toContain("Remote bin: available");
@@ -1123,9 +1294,15 @@ describe("bootstrapStorageGoblin", () => {
       baseSyncLocation("loc-1", "My photos", {
         provider: "gcs",
         capabilities: {
-          objectVersioning: { status: "config-unavailable", message: "Enable object versioning in the bucket first." },
+          objectVersioning: {
+            status: "config-unavailable",
+            message: "Enable object versioning in the bucket first.",
+          },
           remoteBin: { status: "supported", message: null },
-          archiveStorage: { status: "runtime-unavailable", message: "Archive controls are temporarily unavailable." },
+          archiveStorage: {
+            status: "runtime-unavailable",
+            message: "Archive controls are temporarily unavailable.",
+          },
         },
       }),
     ]);
@@ -1142,12 +1319,22 @@ describe("bootstrapStorageGoblin", () => {
         }
       });
 
-    expect(document.getElementById("location-capability-versioning")?.textContent).toBe("Setup required");
-    expect(document.getElementById("location-capability-archive")?.textContent).toBe("Temporarily unavailable");
-    expect((document.getElementById("location-versioning-btn-wrap") as HTMLElement).hidden).toBe(false);
-    expect((document.getElementById("location-object-versioning-btn") as HTMLButtonElement).disabled).toBe(true);
-    expect(document.getElementById("location-capability-help")?.textContent).toContain("setup required");
-    expect(document.getElementById("location-capability-help")?.textContent).toContain("temporarily unavailable");
+    expect(document.getElementById("location-capability-versioning")?.textContent).toBe(
+      "Setup required",
+    );
+    expect(document.getElementById("location-capability-archive")?.textContent).toBe(
+      "Temporarily unavailable",
+    );
+    expect(document.getElementById("location-versioning-btn-wrap")!.hidden).toBe(false);
+    expect(
+      (document.getElementById("location-object-versioning-btn") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(document.getElementById("location-capability-help")?.textContent).toContain(
+      "setup required",
+    );
+    expect(document.getElementById("location-capability-help")?.textContent).toContain(
+      "temporarily unavailable",
+    );
   });
 
   it("exposes all conflict strategies in settings and sync location forms", async () => {
@@ -1171,26 +1358,32 @@ describe("bootstrapStorageGoblin", () => {
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    (document.getElementById("conflict-strategy-select") as HTMLSelectElement).value = "prefer-remote";
-    document.getElementById("save-conflict-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    (document.getElementById("conflict-strategy-select") as HTMLSelectElement).value =
+      "prefer-remote";
+    document
+      .getElementById("save-conflict-btn")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();
 
-    expect(saveProfileSettingsMock).toHaveBeenCalledWith(expect.objectContaining({
-      conflictStrategy: "prefer-remote",
-    }));
+    expect(saveProfileSettingsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conflictStrategy: "prefer-remote",
+      }),
+    );
   });
 
   it("uses the saved default conflict strategy when resetting the new location form", async () => {
     saveProfileSettingsMock.mockImplementation(async (profile: StoredStorageProfile) => profile);
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    (document.getElementById("conflict-strategy-select") as HTMLSelectElement).value = "prefer-remote";
-    document.getElementById("save-conflict-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    (document.getElementById("conflict-strategy-select") as HTMLSelectElement).value =
+      "prefer-remote";
+    document
+      .getElementById("save-conflict-btn")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
@@ -1202,12 +1395,18 @@ describe("bootstrapStorageGoblin", () => {
         }
       });
 
-    expect((document.getElementById("location-conflict-strategy-select") as HTMLSelectElement).value).toBe("preserve-both");
+    expect(
+      (document.getElementById("location-conflict-strategy-select") as HTMLSelectElement).value,
+    ).toBe("preserve-both");
 
-    document.getElementById("cancel-edit-location-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document
+      .getElementById("cancel-edit-location-btn")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();
 
-    expect((document.getElementById("location-conflict-strategy-select") as HTMLSelectElement).value).toBe("prefer-remote");
+    expect(
+      (document.getElementById("location-conflict-strategy-select") as HTMLSelectElement).value,
+    ).toBe("prefer-remote");
   });
 
   it("defaults new sync locations to a 7 day remote bin retention and shows that default clearly", async () => {
@@ -1215,7 +1414,9 @@ describe("bootstrapStorageGoblin", () => {
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
 
-    const retentionInput = document.getElementById("location-remote-bin-retention-input") as HTMLInputElement;
+    const retentionInput = document.getElementById(
+      "location-remote-bin-retention-input",
+    ) as HTMLInputElement;
     const retentionHint = retentionInput.parentElement?.querySelector("small.hint");
 
     expect(retentionInput.value).toBe("7");
@@ -1227,8 +1428,12 @@ describe("bootstrapStorageGoblin", () => {
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
 
-    const enabledInput = document.getElementById("location-remote-bin-enabled-input") as HTMLInputElement;
-    const retentionInput = document.getElementById("location-remote-bin-retention-input") as HTMLInputElement;
+    const enabledInput = document.getElementById(
+      "location-remote-bin-enabled-input",
+    ) as HTMLInputElement;
+    const retentionInput = document.getElementById(
+      "location-remote-bin-retention-input",
+    ) as HTMLInputElement;
     const hint = document.getElementById("location-remote-bin-hint");
 
     expect(document.getElementById("location-delete-safety-input")).toBeNull();
@@ -1248,7 +1453,9 @@ describe("bootstrapStorageGoblin", () => {
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
 
-    const objectVersioningInput = document.getElementById("location-object-versioning-enabled-input") as HTMLInputElement;
+    const objectVersioningInput = document.getElementById(
+      "location-object-versioning-enabled-input",
+    ) as HTMLInputElement;
     expect(objectVersioningInput.value).toBe("false");
   });
 
@@ -1257,11 +1464,17 @@ describe("bootstrapStorageGoblin", () => {
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
 
-    const enabledInput = document.getElementById("location-remote-bin-enabled-input") as HTMLInputElement;
-    const retentionInput = document.getElementById("location-remote-bin-retention-input") as HTMLInputElement;
+    const enabledInput = document.getElementById(
+      "location-remote-bin-enabled-input",
+    ) as HTMLInputElement;
+    const retentionInput = document.getElementById(
+      "location-remote-bin-retention-input",
+    ) as HTMLInputElement;
     const hint = document.getElementById("location-remote-bin-hint");
 
-    const versioningCheckbox = document.getElementById("location-versioning-checkbox") as HTMLInputElement;
+    const versioningCheckbox = document.getElementById(
+      "location-versioning-checkbox",
+    ) as HTMLInputElement;
     versioningCheckbox.checked = true;
     versioningCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
 
@@ -1272,21 +1485,32 @@ describe("bootstrapStorageGoblin", () => {
   });
 
   it("shows GCS remote bin controls in create flow when a GCS credential is selected", async () => {
-    listCredentialsMock.mockResolvedValueOnce([baseCredential("cred-aws", "AWS Primary"), baseGcsCredential("cred-gcs", "GCS Primary")]);
+    listCredentialsMock.mockResolvedValueOnce([
+      baseCredential("cred-aws", "AWS Primary"),
+      baseGcsCredential("cred-gcs", "GCS Primary"),
+    ]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
-    const credentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    const credentialSelect = document.getElementById(
+      "location-credential-select",
+    ) as HTMLSelectElement;
     credentialSelect.value = "cred-gcs";
     credentialSelect.dispatchEvent(new Event("change", { bubbles: true }));
 
-    const enabledInput = document.getElementById("location-remote-bin-enabled-input") as HTMLInputElement;
-    const retentionInput = document.getElementById("location-remote-bin-retention-input") as HTMLInputElement;
+    const enabledInput = document.getElementById(
+      "location-remote-bin-enabled-input",
+    ) as HTMLInputElement;
+    const retentionInput = document.getElementById(
+      "location-remote-bin-retention-input",
+    ) as HTMLInputElement;
     const hint = document.getElementById("location-remote-bin-hint");
 
-    expect(document.getElementById("location-capability-remote-bin")?.textContent).toBe("Available");
+    expect(document.getElementById("location-capability-remote-bin")?.textContent).toBe(
+      "Available",
+    );
     expect(enabledInput.checked).toBe(true);
     expect(enabledInput.disabled).toBe(false);
     expect(retentionInput.disabled).toBe(false);
@@ -1300,13 +1524,21 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
-    const credentialSelect = document.getElementById("location-credential-select") as HTMLSelectElement;
+    const credentialSelect = document.getElementById(
+      "location-credential-select",
+    ) as HTMLSelectElement;
     credentialSelect.value = "cred-gcs";
     credentialSelect.dispatchEvent(new Event("change", { bubbles: true }));
 
-    const enabledInput = document.getElementById("location-remote-bin-enabled-input") as HTMLInputElement;
-    const retentionInput = document.getElementById("location-remote-bin-retention-input") as HTMLInputElement;
-    const versioningCheckbox = document.getElementById("location-versioning-checkbox") as HTMLInputElement;
+    const enabledInput = document.getElementById(
+      "location-remote-bin-enabled-input",
+    ) as HTMLInputElement;
+    const retentionInput = document.getElementById(
+      "location-remote-bin-retention-input",
+    ) as HTMLInputElement;
+    const versioningCheckbox = document.getElementById(
+      "location-versioning-checkbox",
+    ) as HTMLInputElement;
     const hint = document.getElementById("location-remote-bin-hint");
 
     versioningCheckbox.checked = true;
@@ -1320,33 +1552,42 @@ describe("bootstrapStorageGoblin", () => {
 
   it("round-trips object versioning and disables remote bin in saved drafts", async () => {
     addSyncLocationMock.mockResolvedValueOnce({
-      syncLocations: [baseSyncLocation("loc-1", "My photos", {
-        objectVersioningEnabled: true,
-        remoteBin: { enabled: false, retentionDays: 7 },
-      })],
+      syncLocations: [
+        baseSyncLocation("loc-1", "My photos", {
+          objectVersioningEnabled: true,
+          remoteBin: { enabled: false, retentionDays: 7 },
+        }),
+      ],
     });
 
     cleanup = await bootstrapStorageGoblin();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
     (document.getElementById("location-label-input") as HTMLInputElement).value = "My photos";
-    (document.getElementById("location-local-folder-input") as HTMLInputElement).value = "C:/photos";
+    (document.getElementById("location-local-folder-input") as HTMLInputElement).value =
+      "C:/photos";
     (document.getElementById("location-bucket-input") as HTMLInputElement).value = "photo-bucket";
     (document.getElementById("location-region-select") as HTMLSelectElement).value = "us-east-1";
-    const versioningCheckbox = document.getElementById("location-versioning-checkbox") as HTMLInputElement;
+    const versioningCheckbox = document.getElementById(
+      "location-versioning-checkbox",
+    ) as HTMLInputElement;
     versioningCheckbox.checked = true;
     versioningCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
 
-    document.getElementById("save-location-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document
+      .getElementById("save-location-btn")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();
 
-    expect(addSyncLocationMock).toHaveBeenCalledWith(expect.objectContaining({
-      objectVersioningEnabled: true,
-      remoteBin: {
-        enabled: false,
-        retentionDays: 7,
-      },
-    }));
+    expect(addSyncLocationMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        objectVersioningEnabled: true,
+        remoteBin: {
+          enabled: false,
+          retentionDays: 7,
+        },
+      }),
+    );
   });
 
   it("does not hydrate legacy endpoint or prefix values into the sync location form", async () => {
@@ -1355,7 +1596,7 @@ describe("bootstrapStorageGoblin", () => {
         ...baseSyncLocation("loc-1", "My photos"),
         endpointUrl: "https://s3.example.test",
         prefix: "archive/2026",
-      } as unknown as SyncLocation,
+      },
     ]);
 
     cleanup = await bootstrapStorageGoblin();
@@ -1383,14 +1624,17 @@ describe("bootstrapStorageGoblin", () => {
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-locations']")?.click();
     (document.getElementById("location-label-input") as HTMLInputElement).value = "My photos";
-    (document.getElementById("location-local-folder-input") as HTMLInputElement).value = "C:/photos";
+    (document.getElementById("location-local-folder-input") as HTMLInputElement).value =
+      "C:/photos";
     (document.getElementById("location-bucket-input") as HTMLInputElement).value = "photo-bucket";
     (document.getElementById("location-region-select") as HTMLSelectElement).value = "us-east-1";
 
     expect(document.getElementById("location-endpoint-input")).toBeNull();
     expect(document.getElementById("location-prefix-input")).toBeNull();
 
-    document.getElementById("save-location-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document
+      .getElementById("save-location-btn")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();
 
     const sentDraft = addSyncLocationMock.mock.calls[0]?.[0] as Record<string, unknown>;
@@ -1407,7 +1651,7 @@ describe("bootstrapStorageGoblin", () => {
         localFolder: "C:/photos",
         bucket: "photo-bucket",
         prefix: "archive/2026",
-      } as unknown as SyncLocation,
+      },
     ]);
 
     cleanup = await bootstrapStorageGoblin();
@@ -1421,9 +1665,11 @@ describe("bootstrapStorageGoblin", () => {
   });
 
   it("surfaces unsupported legacy sync location load errors", async () => {
-    listSyncLocationsMock.mockRejectedValueOnce(new Error(
-      "Unsupported legacy sync location config: prefix and endpointUrl are no longer supported.",
-    ));
+    listSyncLocationsMock.mockRejectedValueOnce(
+      new Error(
+        "Unsupported legacy sync location config: prefix and endpointUrl are no longer supported.",
+      ),
+    );
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
@@ -1497,25 +1743,31 @@ describe("bootstrapStorageGoblin", () => {
     select.dispatchEvent(new Event("change", { bubbles: true }));
     await flushTasks();
 
-    expect(saveProfileSettingsMock).toHaveBeenCalledWith(expect.objectContaining({
-      activeLocationId: "loc-2",
-    }));
+    expect(saveProfileSettingsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        activeLocationId: "loc-2",
+      }),
+    );
 
     cleanup?.();
     cleanup = undefined;
     document.body.className = "";
     renderAppShell();
 
-    loadProfileMock.mockResolvedValueOnce(baseStoredProfile({
-      syncLocations: [photos, documents],
-      activeLocationId: "loc-2",
-    }));
+    loadProfileMock.mockResolvedValueOnce(
+      baseStoredProfile({
+        syncLocations: [photos, documents],
+        activeLocationId: "loc-2",
+      }),
+    );
     listSyncLocationsMock.mockResolvedValueOnce([photos, documents]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    expect((document.getElementById("active-location-select") as HTMLSelectElement).value).toBe("live:loc-2");
+    expect((document.getElementById("active-location-select") as HTMLSelectElement).value).toBe(
+      "live:loc-2",
+    );
   });
 
   it("updates an existing sync location and refreshes the visible wiring", async () => {
@@ -1548,38 +1800,52 @@ describe("bootstrapStorageGoblin", () => {
         }
       });
 
-    expect((document.getElementById("location-editing-id") as HTMLInputElement).value).toBe("loc-1");
+    expect((document.getElementById("location-editing-id") as HTMLInputElement).value).toBe(
+      "loc-1",
+    );
     expect(document.getElementById("location-form-title")?.textContent).toBe("Edit sync location");
 
     (document.getElementById("location-label-input") as HTMLInputElement).value = "Updated photos";
-    (document.getElementById("location-local-folder-input") as HTMLInputElement).value = "D:/photos-archive";
+    (document.getElementById("location-local-folder-input") as HTMLInputElement).value =
+      "D:/photos-archive";
     (document.getElementById("location-bucket-input") as HTMLInputElement).value = "archive-bucket";
     (document.getElementById("location-region-select") as HTMLSelectElement).value = "eu-west-1";
     (document.getElementById("location-credential-select") as HTMLSelectElement).value = "cred-1";
-    (document.getElementById("location-conflict-strategy-select") as HTMLSelectElement).value = "prefer-remote";
+    (document.getElementById("location-conflict-strategy-select") as HTMLSelectElement).value =
+      "prefer-remote";
 
-    document.getElementById("save-location-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document
+      .getElementById("save-location-btn")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();
 
-    expect(updateSyncLocationMock).toHaveBeenCalledWith(expect.objectContaining({
-      id: "loc-1",
-      label: "Updated photos",
-      provider: "aws",
-      localFolder: "D:/photos-archive",
-      bucket: "archive-bucket",
-      region: "eu-west-1",
-      credentialProfileId: "cred-1",
-      conflictStrategy: "prefer-remote",
-      remoteBin: {
-        enabled: true,
-        retentionDays: 7,
-      },
-    }));
-    expect(document.getElementById("locations-result")?.textContent).toContain('Updated sync location "Updated photos"');
-    expect(listItemByText("#locations-list li", "Updated photos").textContent).toContain("D:/photos-archive → archive-bucket");
-    expect(Array.from((document.getElementById("active-location-select") as HTMLSelectElement).options).some(
-      (option) => option.value === "live:loc-1" && option.textContent === "Updated photos",
-    )).toBe(true);
+    expect(updateSyncLocationMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "loc-1",
+        label: "Updated photos",
+        provider: "aws",
+        localFolder: "D:/photos-archive",
+        bucket: "archive-bucket",
+        region: "eu-west-1",
+        credentialProfileId: "cred-1",
+        conflictStrategy: "prefer-remote",
+        remoteBin: {
+          enabled: true,
+          retentionDays: 7,
+        },
+      }),
+    );
+    expect(document.getElementById("locations-result")?.textContent).toContain(
+      'Updated sync location "Updated photos"',
+    );
+    expect(listItemByText("#locations-list li", "Updated photos").textContent).toContain(
+      "D:/photos-archive → archive-bucket",
+    );
+    expect(
+      Array.from(
+        (document.getElementById("active-location-select") as HTMLSelectElement).options,
+      ).some((option) => option.value === "live:loc-1" && option.textContent === "Updated photos"),
+    ).toBe(true);
   });
 
   it("round-trips edited remote bin retention values through the sync location form", async () => {
@@ -1608,23 +1874,31 @@ describe("bootstrapStorageGoblin", () => {
         }
       });
 
-    const retentionInput = document.getElementById("location-remote-bin-retention-input") as HTMLInputElement;
+    const retentionInput = document.getElementById(
+      "location-remote-bin-retention-input",
+    ) as HTMLInputElement;
     expect(retentionInput.value).toBe("14");
 
     retentionInput.value = "30";
     retentionInput.dispatchEvent(new Event("input", { bubbles: true }));
 
-    document.getElementById("save-location-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document
+      .getElementById("save-location-btn")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushTasks();
 
-    expect(updateSyncLocationMock).toHaveBeenCalledWith(expect.objectContaining({
-      id: "loc-1",
-      remoteBin: {
-        enabled: true,
-        retentionDays: 30,
-      },
-    }));
-    expect(listItemByText("#locations-list li", "My photos").textContent).toContain("remote bin 30d");
+    expect(updateSyncLocationMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "loc-1",
+        remoteBin: {
+          enabled: true,
+          retentionDays: 30,
+        },
+      }),
+    );
+    expect(listItemByText("#locations-list li", "My photos").textContent).toContain(
+      "remote bin 30d",
+    );
   });
 
   it("keeps selected credential UI cleared after deletion and bootstrap reload", async () => {
@@ -1648,9 +1922,11 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-credentials']")?.click();
-    expect(Array.from(document.querySelectorAll("#credentials-list li .badge")).some(
-      (badge) => badge.textContent === "selected",
-    )).toBe(true);
+    expect(
+      Array.from(document.querySelectorAll("#credentials-list li .badge")).some(
+        (badge) => badge.textContent === "selected",
+      ),
+    ).toBe(true);
 
     listItemByText("#credentials-list li", "Primary")
       .querySelectorAll<HTMLButtonElement>("button")
@@ -1665,9 +1941,11 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     expect(deleteCredentialMock).toHaveBeenCalledWith("cred-1");
-    expect(Array.from(document.querySelectorAll("#credentials-list li .badge")).some(
-      (badge) => badge.textContent === "selected",
-    )).toBe(false);
+    expect(
+      Array.from(document.querySelectorAll("#credentials-list li .badge")).some(
+        (badge) => badge.textContent === "selected",
+      ),
+    ).toBe(false);
     expect(document.getElementById("credentials-empty-state")?.hidden).toBe(false);
 
     cleanup?.();
@@ -1682,22 +1960,28 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     document.querySelector<HTMLElement>("[data-nav-id='nav-credentials']")?.click();
-    expect(Array.from(document.querySelectorAll("#credentials-list li .badge")).some(
-      (badge) => badge.textContent === "selected",
-    )).toBe(false);
-    expect(listItemByText("#credentials-list li", "Primary").textContent).not.toContain("Selected for this bucket");
+    expect(
+      Array.from(document.querySelectorAll("#credentials-list li .badge")).some(
+        (badge) => badge.textContent === "selected",
+      ),
+    ).toBe(false);
+    expect(listItemByText("#credentials-list li", "Primary").textContent).not.toContain(
+      "Selected for this bucket",
+    );
   });
 
   it("preserves GCS provider identity for unavailable selected credential fallbacks", async () => {
-    loadProfileMock.mockResolvedValueOnce(baseStoredProfile({
-      provider: "aws",
-      bucket: "gcs-bucket",
-      region: "US",
-      credentialProfileId: "cred-gcs-missing",
-      selectedCredential: baseGcsCredential("cred-gcs-missing", "Missing GCS"),
-      selectedCredentialAvailable: true,
-      credentialsStoredSecurely: true,
-    }));
+    loadProfileMock.mockResolvedValueOnce(
+      baseStoredProfile({
+        provider: "aws",
+        bucket: "gcs-bucket",
+        region: "US",
+        credentialProfileId: "cred-gcs-missing",
+        selectedCredential: baseGcsCredential("cred-gcs-missing", "Missing GCS"),
+        selectedCredentialAvailable: true,
+        credentialsStoredSecurely: true,
+      }),
+    );
     listCredentialsMock.mockResolvedValueOnce([baseCredential("cred-aws", "AWS Primary")]);
 
     cleanup = await bootstrapStorageGoblin();
@@ -1877,8 +2161,12 @@ describe("bootstrapStorageGoblin", () => {
 
     expect(select.value).toBe("live:loc-1");
     expect(topBadge?.textContent).toBe("Polling");
-    expect(summary?.textContent).toContain("monitoring this folder and checking the bucket every 60s");
-    expect(windowSubtitle?.textContent).toContain("monitoring this folder and checking the bucket every 60s");
+    expect(summary?.textContent).toContain(
+      "monitoring this folder and checking the bucket every 60s",
+    );
+    expect(windowSubtitle?.textContent).toContain(
+      "monitoring this folder and checking the bucket every 60s",
+    );
     expect(localLabel?.textContent).toBe("Local");
     expect(local?.textContent).toBe("5");
     expect(remoteLabel?.textContent).toBe("Remote");
@@ -1892,8 +2180,12 @@ describe("bootstrapStorageGoblin", () => {
     select.dispatchEvent(new Event("change", { bubbles: true }));
 
     expect(topBadge?.textContent).toBe("Paused");
-    expect(summary?.textContent).toBe("Setup is saved, but automatic sync work is paused right now.");
-    expect(windowSubtitle?.textContent).toBe("Setup is saved, but automatic sync work is paused right now.");
+    expect(summary?.textContent).toBe(
+      "Setup is saved, but automatic sync work is paused right now.",
+    );
+    expect(windowSubtitle?.textContent).toBe(
+      "Setup is saved, but automatic sync work is paused right now.",
+    );
     expect(local?.textContent).toBe("9");
     expect(remote?.textContent).toBe("10");
     expect(inSync?.textContent).toBe("8");
@@ -1902,7 +2194,9 @@ describe("bootstrapStorageGoblin", () => {
     select.value = "";
     select.dispatchEvent(new Event("change", { bubbles: true }));
 
-    expect(summary?.textContent).toBe("Choose a folder, bucket target, and saved credential, then run Connect and sync.");
+    expect(summary?.textContent).toBe(
+      "Choose a folder, bucket target, and saved credential, then run Connect and sync.",
+    );
     expect(local?.textContent).toBe("0");
     expect(remote?.textContent).toBe("0");
     expect(inSync?.textContent).toBe("0");
@@ -2025,22 +2319,18 @@ describe("bootstrapStorageGoblin", () => {
 
     // The file tree should be populated (not hidden)
     const fileTree = document.getElementById("file-tree") as HTMLUListElement;
-    const emptyState = document.getElementById("file-tree-empty-state") as HTMLElement;
+    const emptyState = document.getElementById("file-tree-empty-state")!;
 
     expect(emptyState.hidden).toBe(true);
     expect(fileTree.hidden).toBe(false);
     expect(fileTree.querySelectorAll(".tree-item").length).toBeGreaterThan(0);
 
     // Check that bindCheckboxTree was called
-    expect(bindCheckboxTreeMock).toHaveBeenCalledWith(
-      expect.objectContaining({ el: fileTree }),
-    );
+    expect(bindCheckboxTreeMock).toHaveBeenCalledWith(expect.objectContaining({ el: fileTree }));
   });
 
   it("opens live view successfully when backend returns review-required entries", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([
       fileEntry({ path: "photos/review.jpg", status: "review-required", hasLocalCopy: false }),
       fileEntry({ path: "photos/synced.jpg", status: "synced", hasLocalCopy: true }),
@@ -2059,7 +2349,9 @@ describe("bootstrapStorageGoblin", () => {
     expect(reviewIndicator?.getAttribute("title")).toBe("Requires review before syncing changes");
     expect(reviewCheckbox?.disabled).toBe(true);
     expect(reviewCheckbox?.checked).toBe(false);
-    expect(document.getElementById("status-overview-not-in-sync-label")?.textContent).toBe("Changes");
+    expect(document.getElementById("status-overview-not-in-sync-label")?.textContent).toBe(
+      "Changes",
+    );
     expect(document.getElementById("status-overview-not-in-sync")?.textContent).toBe("1");
   });
 
@@ -2073,7 +2365,10 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     const select = document.getElementById("active-location-select") as HTMLSelectElement;
-    const options = Array.from(select.options).map((option) => ({ value: option.value, text: option.textContent }));
+    const options = Array.from(select.options).map((option) => ({
+      value: option.value,
+      text: option.textContent,
+    }));
 
     expect(options).toEqual([
       { value: "", text: "Select a sync location" },
@@ -2102,7 +2397,10 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     const select = document.getElementById("active-location-select") as HTMLSelectElement;
-    const options = Array.from(select.options).map((option) => ({ value: option.value, text: option.textContent }));
+    const options = Array.from(select.options).map((option) => ({
+      value: option.value,
+      text: option.textContent,
+    }));
 
     expect(options).toEqual([
       { value: "", text: "Select a sync location" },
@@ -2126,7 +2424,10 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     const select = document.getElementById("active-location-select") as HTMLSelectElement;
-    const options = Array.from(select.options).map((option) => ({ value: option.value, text: option.textContent }));
+    const options = Array.from(select.options).map((option) => ({
+      value: option.value,
+      text: option.textContent,
+    }));
     expect(options).toEqual([
       { value: "", text: "Select a sync location" },
       { value: "live:loc-gcs", text: "Assets" },
@@ -2138,16 +2439,21 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     expect(document.getElementById("status-phase-inline")?.textContent).toBe("Deleted");
-    expect(document.getElementById("status-summary")?.textContent).toContain("Viewing Assets Deleted.");
+    expect(document.getElementById("status-summary")?.textContent).toContain(
+      "Viewing Assets Deleted.",
+    );
   });
 
   it("loads bin entries and shows restore actions when bin view is selected", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([]);
     listBinEntriesMock.mockResolvedValueOnce([
-      fileEntry({ path: "photos/deleted.jpg", status: "deleted", hasLocalCopy: false, binKey: "opaque-bin-key" }),
+      fileEntry({
+        path: "photos/deleted.jpg",
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: "opaque-bin-key",
+      }),
     ]);
 
     cleanup = await bootstrapStorageGoblin();
@@ -2158,28 +2464,32 @@ describe("bootstrapStorageGoblin", () => {
     select.dispatchEvent(new Event("change", { bubbles: true }));
     await flushTasks();
 
-    expect(saveProfileSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ activeLocationId: "loc-1" }));
+    expect(saveProfileSettingsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ activeLocationId: "loc-1" }),
+    );
     expect(listBinEntriesMock).toHaveBeenCalledWith("loc-1");
     expect(listFileEntriesMock).toHaveBeenCalledTimes(1);
 
-    const fileTreeSection = document.getElementById("file-tree-section") as HTMLElement;
+    const fileTreeSection = document.getElementById("file-tree-section")!;
     expect(fileTreeSection.classList.contains("is-bin-view")).toBe(true);
     expect(document.querySelector(".tree-restore-btn")?.textContent).toBe("Restore");
-    expect((document.getElementById("bin-toolbar") as HTMLElement).hidden).toBe(false);
+    expect(document.getElementById("bin-toolbar")!.hidden).toBe(false);
     expect(document.querySelector(".tree-delete-btn")).toBeNull();
     expect(document.querySelector(".status-indicator.error")).not.toBeNull();
     expect(document.getElementById("status-overview-local-label")?.textContent).toBe("Bin items");
     expect(document.getElementById("status-overview-local")?.textContent).toBe("1");
     expect(document.getElementById("status-overview-remote-label")?.textContent).toBe("Retention");
     expect(document.getElementById("status-overview-remote")?.textContent).toBe("7d");
-    expect(document.getElementById("status-overview-in-sync-label")?.textContent).toBe("Live phase");
-    expect(document.getElementById("status-overview-not-in-sync-label")?.textContent).toBe("Pending");
+    expect(document.getElementById("status-overview-in-sync-label")?.textContent).toBe(
+      "Live phase",
+    );
+    expect(document.getElementById("status-overview-not-in-sync-label")?.textContent).toBe(
+      "Pending",
+    );
   });
 
   it("supports folder restore and lifecycle visibility in bin mode", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([]);
     listBinEntriesMock.mockResolvedValueOnce([
       {
@@ -2203,14 +2513,23 @@ describe("bootstrapStorageGoblin", () => {
     select.dispatchEvent(new Event("change", { bubbles: true }));
     await flushTasks();
 
-    expect(document.querySelector('.tree-item[data-value="photos/2026"] .tree-restore-btn')).not.toBeNull();
-    expect(document.querySelector('.tree-item[data-value="photos/2026"] .tree-bin-lifecycle')?.textContent).toContain("Object versioning");
+    expect(
+      document.querySelector('.tree-item[data-value="photos/2026"] .tree-restore-btn'),
+    ).not.toBeNull();
+    expect(
+      document.querySelector('.tree-item[data-value="photos/2026"] .tree-bin-lifecycle')
+        ?.textContent,
+    ).toContain("Object versioning");
 
-    document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/2026"] .tree-restore-btn')?.click();
+    document
+      .querySelector<HTMLButtonElement>('.tree-item[data-value="photos/2026"] .tree-restore-btn')
+      ?.click();
     await flushTasks();
     await flushTasks();
 
-    expect(restoreBinEntriesMock).toHaveBeenCalledWith("loc-1", [{ path: "photos/2026", kind: "directory", binKey: null }]);
+    expect(restoreBinEntriesMock).toHaveBeenCalledWith("loc-1", [
+      { path: "photos/2026", kind: "directory", binKey: null },
+    ]);
   });
 
   it("supports bulk restore and purge from bin selection", async () => {
@@ -2219,8 +2538,20 @@ describe("bootstrapStorageGoblin", () => {
     ]);
     listFileEntriesMock.mockResolvedValueOnce([]);
     listBinEntriesMock.mockResolvedValue([
-      fileEntry({ path: "photos/a.jpg", status: "deleted", hasLocalCopy: false, binKey: "bin-a", deletedFrom: "object-versioning" }),
-      fileEntry({ path: "photos/b.jpg", status: "deleted", hasLocalCopy: false, binKey: "bin-b", deletedFrom: "object-versioning" }),
+      fileEntry({
+        path: "photos/a.jpg",
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: "bin-a",
+        deletedFrom: "object-versioning",
+      }),
+      fileEntry({
+        path: "photos/b.jpg",
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: "bin-b",
+        deletedFrom: "object-versioning",
+      }),
     ]);
     restoreBinEntriesMock.mockResolvedValue({ results: [] });
     purgeBinEntriesMock.mockResolvedValue({ results: [] });
@@ -2239,9 +2570,13 @@ describe("bootstrapStorageGoblin", () => {
     latestBindCall?.[0].onChange?.(["photos/a.jpg", "photos/b.jpg"]);
     await flushTasks();
 
-    expect(document.getElementById("bin-selection-summary")?.textContent).toContain("2 bin entries selected");
+    expect(document.getElementById("bin-selection-summary")?.textContent).toContain(
+      "2 bin entries selected",
+    );
 
-    document.getElementById("restore-selected-btn")?.dispatchEvent(new Event("click", { bubbles: true }));
+    document
+      .getElementById("restore-selected-btn")
+      ?.dispatchEvent(new Event("click", { bubbles: true }));
     await flushTasks();
     await flushTasks();
 
@@ -2253,9 +2588,13 @@ describe("bootstrapStorageGoblin", () => {
     latestBindCall?.[0].onChange?.(["photos/a.jpg", "photos/b.jpg"]);
     await flushTasks();
 
-    document.getElementById("purge-selected-btn")?.dispatchEvent(new Event("click", { bubbles: true }));
+    document
+      .getElementById("purge-selected-btn")
+      ?.dispatchEvent(new Event("click", { bubbles: true }));
     await flushTasks();
-    expect(getAsyncConfirmMessage()?.textContent).toContain("permanently deletes the selected object versions");
+    expect(getAsyncConfirmMessage()?.textContent).toContain(
+      "permanently deletes the selected object versions",
+    );
     getAsyncConfirmAcceptButton().click();
     await flushTasks();
     await flushTasks();
@@ -2267,18 +2606,42 @@ describe("bootstrapStorageGoblin", () => {
   });
 
   it("keeps failed bulk restore selections and reports partial mutation results", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([]);
     listBinEntriesMock.mockResolvedValue([
-      fileEntry({ path: "photos/a.jpg", status: "deleted", hasLocalCopy: false, binKey: "bin-a", deletedFrom: "remote-bin" }),
-      fileEntry({ path: "photos/b.jpg", status: "deleted", hasLocalCopy: false, binKey: "bin-b", deletedFrom: "remote-bin" }),
+      fileEntry({
+        path: "photos/a.jpg",
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: "bin-a",
+        deletedFrom: "remote-bin",
+      }),
+      fileEntry({
+        path: "photos/b.jpg",
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: "bin-b",
+        deletedFrom: "remote-bin",
+      }),
     ]);
     restoreBinEntriesMock.mockResolvedValueOnce({
       results: [
-        { path: "photos/a.jpg", kind: "file", binKey: "bin-a", success: true, affectedCount: 1, error: null },
-        { path: "photos/b.jpg", kind: "file", binKey: "bin-b", success: false, affectedCount: 0, error: "destination exists" },
+        {
+          path: "photos/a.jpg",
+          kind: "file",
+          binKey: "bin-a",
+          success: true,
+          affectedCount: 1,
+          error: null,
+        },
+        {
+          path: "photos/b.jpg",
+          kind: "file",
+          binKey: "bin-b",
+          success: false,
+          affectedCount: 0,
+          error: "destination exists",
+        },
       ],
     });
 
@@ -2296,14 +2659,23 @@ describe("bootstrapStorageGoblin", () => {
     latestBindCall?.[0].onChange?.(["photos/a.jpg", "photos/b.jpg"]);
     await flushTasks();
 
-    document.getElementById("restore-selected-btn")?.dispatchEvent(new Event("click", { bubbles: true }));
+    document
+      .getElementById("restore-selected-btn")
+      ?.dispatchEvent(new Event("click", { bubbles: true }));
     await flushTasks();
     await flushTasks();
     await new Promise((resolve) => setTimeout(resolve, 200));
     await flushTasks();
 
-    expect(showToastMock).toHaveBeenCalledWith("Restored 1 of 2 bin entries; 1 failed.", "info", 2200, "app-toast");
-    expect(document.getElementById("bin-selection-summary")?.textContent).toContain("1 bin entry selected");
+    expect(showToastMock).toHaveBeenCalledWith(
+      "Restored 1 of 2 bin entries; 1 failed.",
+      "info",
+      2200,
+      "app-toast",
+    );
+    expect(document.getElementById("bin-selection-summary")?.textContent).toContain(
+      "1 bin entry selected",
+    );
     expect(document.getElementById("activity-list")?.textContent).toContain("destination exists");
   });
 
@@ -2313,13 +2685,39 @@ describe("bootstrapStorageGoblin", () => {
     ]);
     listFileEntriesMock.mockResolvedValueOnce([]);
     listBinEntriesMock.mockResolvedValue([
-      fileEntry({ path: "photos/a.jpg", status: "deleted", hasLocalCopy: false, binKey: "bin-a", deletedFrom: "object-versioning" }),
-      fileEntry({ path: "photos/b.jpg", status: "deleted", hasLocalCopy: false, binKey: "bin-b", deletedFrom: "object-versioning" }),
+      fileEntry({
+        path: "photos/a.jpg",
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: "bin-a",
+        deletedFrom: "object-versioning",
+      }),
+      fileEntry({
+        path: "photos/b.jpg",
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: "bin-b",
+        deletedFrom: "object-versioning",
+      }),
     ]);
     purgeBinEntriesMock.mockResolvedValueOnce({
       results: [
-        { path: "photos/a.jpg", kind: "file", binKey: "bin-a", success: false, affectedCount: 0, error: "access denied" },
-        { path: "photos/b.jpg", kind: "file", binKey: "bin-b", success: false, affectedCount: 0, error: "version locked" },
+        {
+          path: "photos/a.jpg",
+          kind: "file",
+          binKey: "bin-a",
+          success: false,
+          affectedCount: 0,
+          error: "access denied",
+        },
+        {
+          path: "photos/b.jpg",
+          kind: "file",
+          binKey: "bin-b",
+          success: false,
+          affectedCount: 0,
+          error: "version locked",
+        },
       ],
     });
 
@@ -2337,7 +2735,9 @@ describe("bootstrapStorageGoblin", () => {
     latestBindCall?.[0].onChange?.(["photos/a.jpg", "photos/b.jpg"]);
     await flushTasks();
 
-    document.getElementById("purge-selected-btn")?.dispatchEvent(new Event("click", { bubbles: true }));
+    document
+      .getElementById("purge-selected-btn")
+      ?.dispatchEvent(new Event("click", { bubbles: true }));
     await flushTasks();
     getAsyncConfirmAcceptButton().click();
     await flushTasks();
@@ -2345,16 +2745,21 @@ describe("bootstrapStorageGoblin", () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     await flushTasks();
 
-    expect(showToastMock).toHaveBeenCalledWith("Purge failed for 2 bin entries.", "error", 2200, "app-toast");
-    expect(document.getElementById("bin-selection-summary")?.textContent).toContain("2 bin entries selected");
+    expect(showToastMock).toHaveBeenCalledWith(
+      "Purge failed for 2 bin entries.",
+      "error",
+      2200,
+      "app-toast",
+    );
+    expect(document.getElementById("bin-selection-summary")?.textContent).toContain(
+      "2 bin entries selected",
+    );
     expect(document.getElementById("activity-list")?.textContent).toContain("access denied");
     expect(document.getElementById("activity-list")?.textContent).toContain("version locked");
   });
 
   it("restores synthetic grouping rows through batch restore", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([]);
     listBinEntriesMock.mockResolvedValueOnce([
       {
@@ -2364,9 +2769,26 @@ describe("bootstrapStorageGoblin", () => {
         hasLocalCopy: false,
         deletedFrom: "remote-bin",
       },
-      fileEntry({ path: "photos/2026/img001.jpg", status: "deleted", hasLocalCopy: false, binKey: "bin-1", deletedFrom: "remote-bin" }),
+      fileEntry({
+        path: "photos/2026/img001.jpg",
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: "bin-1",
+        deletedFrom: "remote-bin",
+      }),
     ] satisfies FileEntry[]);
-    restoreBinEntriesMock.mockResolvedValueOnce({ results: [{ path: "photos/2026", kind: "directory", binKey: null, success: true, affectedCount: 1, error: null }] });
+    restoreBinEntriesMock.mockResolvedValueOnce({
+      results: [
+        {
+          path: "photos/2026",
+          kind: "directory",
+          binKey: null,
+          success: true,
+          affectedCount: 1,
+          error: null,
+        },
+      ],
+    });
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
@@ -2376,22 +2798,28 @@ describe("bootstrapStorageGoblin", () => {
     select.dispatchEvent(new Event("change", { bubbles: true }));
     await flushTasks();
 
-    document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/2026"] .tree-restore-btn')?.click();
+    document
+      .querySelector<HTMLButtonElement>('.tree-item[data-value="photos/2026"] .tree-restore-btn')
+      ?.click();
     await flushTasks();
     await flushTasks();
 
-    expect(restoreBinEntriesMock).toHaveBeenCalledWith("loc-1", [{ path: "photos/2026", kind: "directory", binKey: null }]);
+    expect(restoreBinEntriesMock).toHaveBeenCalledWith("loc-1", [
+      { path: "photos/2026", kind: "directory", binKey: null },
+    ]);
   });
 
   it("shows bin retention from the saved selected location config when listed locations are stale", async () => {
-    loadProfileMock.mockResolvedValueOnce(baseStoredProfile({
-      syncLocations: [
-        baseSyncLocation("loc-1", "My photos", {
-          remoteBin: { enabled: true, retentionDays: 7 },
-        }),
-      ],
-      activeLocationId: "loc-1",
-    }));
+    loadProfileMock.mockResolvedValueOnce(
+      baseStoredProfile({
+        syncLocations: [
+          baseSyncLocation("loc-1", "My photos", {
+            remoteBin: { enabled: true, retentionDays: 7 },
+          }),
+        ],
+        activeLocationId: "loc-1",
+      }),
+    );
     listSyncLocationsMock.mockResolvedValueOnce([
       baseSyncLocation("loc-1", "My photos", {
         remoteBin: { enabled: true, retentionDays: 1 },
@@ -2465,9 +2893,7 @@ describe("bootstrapStorageGoblin", () => {
       },
     ];
 
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     getSyncStatusMock.mockResolvedValueOnce({
       ...baseUnconfiguredStatus(),
       locations: locationStatuses,
@@ -2527,8 +2953,13 @@ describe("bootstrapStorageGoblin", () => {
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    expect(document.querySelector('.tree-item[data-value="photos/a.jpg"] .tree-version-badge')?.textContent).toBe("3 versions");
-    expect(document.querySelector('.tree-item[data-value="photos/a.jpg"] .tree-versions-btn')).not.toBeNull();
+    expect(
+      document.querySelector('.tree-item[data-value="photos/a.jpg"] .tree-version-badge')
+        ?.textContent,
+    ).toBe("3 versions");
+    expect(
+      document.querySelector('.tree-item[data-value="photos/a.jpg"] .tree-versions-btn'),
+    ).not.toBeNull();
 
     const select = document.getElementById("active-location-select") as HTMLSelectElement;
     select.value = "bin:loc-1";
@@ -2539,8 +2970,13 @@ describe("bootstrapStorageGoblin", () => {
     select.dispatchEvent(new Event("change", { bubbles: true }));
     await flushTasks();
 
-    expect(document.querySelector('.tree-item[data-value="photos/a.jpg"] .tree-version-badge')?.textContent).toBe("3 versions");
-    expect(document.querySelector('.tree-item[data-value="photos/a.jpg"] .tree-versions-btn')).not.toBeNull();
+    expect(
+      document.querySelector('.tree-item[data-value="photos/a.jpg"] .tree-version-badge')
+        ?.textContent,
+    ).toBe("3 versions");
+    expect(
+      document.querySelector('.tree-item[data-value="photos/a.jpg"] .tree-versions-btn'),
+    ).not.toBeNull();
   });
 
   it("closes the version history drawer with its explicit backdrop", async () => {
@@ -2556,15 +2992,21 @@ describe("bootstrapStorageGoblin", () => {
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/a.jpg"] .tree-versions-btn')?.click();
+    document
+      .querySelector<HTMLButtonElement>('.tree-item[data-value="photos/a.jpg"] .tree-versions-btn')
+      ?.click();
     await flushTasks();
 
-    document.getElementById("drawer-file-versions-close")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document
+      .getElementById("drawer-file-versions-close")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    expect(closeDrawerMock).toHaveBeenCalledWith(expect.objectContaining({
-      drawer: document.getElementById("drawer-file-versions"),
-      backdrop: document.getElementById("drawer-file-versions-backdrop"),
-    }));
+    expect(closeDrawerMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        drawer: document.getElementById("drawer-file-versions"),
+        backdrop: document.getElementById("drawer-file-versions-backdrop"),
+      }),
+    );
   });
 
   it("does not count cold-storage-only mismatches as live Changes when no work is pending", async () => {
@@ -2620,9 +3062,7 @@ describe("bootstrapStorageGoblin", () => {
       },
     ];
 
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     getSyncStatusMock.mockResolvedValueOnce({
       ...baseUnconfiguredStatus(),
       locations: locationStatuses,
@@ -2635,13 +3075,15 @@ describe("bootstrapStorageGoblin", () => {
     expect(document.getElementById("status-overview-local")?.textContent).toBe("1");
     expect(document.getElementById("status-overview-remote")?.textContent).toBe("1");
     expect(document.getElementById("status-overview-in-sync")?.textContent).toBe("0");
-    expect(document.getElementById("status-overview-not-in-sync-label")?.textContent).toBe("Changes");
+    expect(document.getElementById("status-overview-not-in-sync-label")?.textContent).toBe(
+      "Changes",
+    );
     expect(document.getElementById("status-overview-not-in-sync")?.textContent).toBe("0");
   });
 
   it("renders the bottom status bar metrics without forced wide spacing", async () => {
     const stylesheet = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
-    const metricBlock = stylesheet.match(/\.home-status-metric\s*\{[^}]*\}/)?.[0] ?? "";
+    const metricBlock = /\.home-status-metric\s*\{[^}]*\}/.exec(stylesheet)?.[0] ?? "";
 
     expect(metricBlock).toContain("justify-content: flex-start;");
     expect(metricBlock).not.toContain("justify-content: space-between;");
@@ -2651,9 +3093,7 @@ describe("bootstrapStorageGoblin", () => {
   it("ignores stale live responses and keeps status keyed by location plus mode", async () => {
     const liveDeferred = createDeferred<FileEntry[]>();
 
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockImplementationOnce(() => liveDeferred.promise);
     listBinEntriesMock.mockResolvedValueOnce([]);
 
@@ -2671,9 +3111,7 @@ describe("bootstrapStorageGoblin", () => {
     expect(document.getElementById("status-overview-local-label")?.textContent).toBe("Bin items");
     expect(document.getElementById("status-overview-local")?.textContent).toBe("0");
 
-    liveDeferred.resolve([
-      fileEntry({ path: "photos/from-live.jpg" }),
-    ]);
+    liveDeferred.resolve([fileEntry({ path: "photos/from-live.jpg" })]);
     await flushTasks();
     await flushTasks();
 
@@ -2693,9 +3131,7 @@ describe("bootstrapStorageGoblin", () => {
   });
 
   it("reveals live tree files and folders for the active sync location", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([
       directoryEntry({ path: "photos" }),
       fileEntry({ path: "photos/img001.jpg" }),
@@ -2714,13 +3150,13 @@ describe("bootstrapStorageGoblin", () => {
   });
 
   it("surfaces reveal errors clearly to the user", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
-    listFileEntriesMock.mockResolvedValueOnce([
-      fileEntry({ path: "photos/img001.jpg" }),
-    ]);
-    revealTreeEntryMock.mockRejectedValueOnce(new Error("Local path 'C:/my-photos/photos/img001.jpg' does not exist for sync location 'My photos'."));
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
+    listFileEntriesMock.mockResolvedValueOnce([fileEntry({ path: "photos/img001.jpg" })]);
+    revealTreeEntryMock.mockRejectedValueOnce(
+      new Error(
+        "Local path 'C:/my-photos/photos/img001.jpg' does not exist for sync location 'My photos'.",
+      ),
+    );
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
@@ -2737,14 +3173,19 @@ describe("bootstrapStorageGoblin", () => {
   });
 
   it("restores bin entries using opaque binKey and surfaces backend errors", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([]);
     listBinEntriesMock.mockResolvedValueOnce([
-      fileEntry({ path: "photos/deleted.jpg", status: "deleted", hasLocalCopy: false, binKey: "opaque-bin-key" }),
+      fileEntry({
+        path: "photos/deleted.jpg",
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: "opaque-bin-key",
+      }),
     ]);
-    restoreBinEntryMock.mockRejectedValueOnce(new Error("restore conflict: destination already exists"));
+    restoreBinEntryMock.mockRejectedValueOnce(
+      new Error("restore conflict: destination already exists"),
+    );
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
@@ -2754,25 +3195,38 @@ describe("bootstrapStorageGoblin", () => {
     select.dispatchEvent(new Event("change", { bubbles: true }));
     await flushTasks();
 
-    document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/deleted.jpg"] .tree-restore-btn')?.click();
+    document
+      .querySelector<HTMLButtonElement>(
+        '.tree-item[data-value="photos/deleted.jpg"] .tree-restore-btn',
+      )
+      ?.click();
     await flushTasks();
     await new Promise((resolve) => setTimeout(resolve, 200));
     await flushTasks();
 
     expect(restoreBinEntryMock).toHaveBeenCalledWith("loc-1", "opaque-bin-key");
-    expect(document.getElementById("activity-list")?.textContent).toContain("restore conflict: destination already exists");
+    expect(document.getElementById("activity-list")?.textContent).toContain(
+      "restore conflict: destination already exists",
+    );
   });
 
   it("shows restore button loading state while bin restore is pending and clears it on failure", async () => {
     const restore = createDeferred<void>();
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([]);
     listBinEntriesMock.mockResolvedValueOnce([
-      fileEntry({ path: "photos/deleted.jpg", status: "deleted", hasLocalCopy: false, binKey: "opaque-bin-key" }),
+      fileEntry({
+        path: "photos/deleted.jpg",
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: "opaque-bin-key",
+      }),
     ]);
-    restoreBinEntryMock.mockImplementationOnce(() => restore.promise.catch((error) => { throw error; }));
+    restoreBinEntryMock.mockImplementationOnce(() =>
+      restore.promise.catch((error) => {
+        throw error;
+      }),
+    );
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
@@ -2782,7 +3236,9 @@ describe("bootstrapStorageGoblin", () => {
     select.dispatchEvent(new Event("change", { bubbles: true }));
     await flushTasks();
 
-    const restoreButton = document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/deleted.jpg"] .tree-restore-btn');
+    const restoreButton = document.querySelector<HTMLButtonElement>(
+      '.tree-item[data-value="photos/deleted.jpg"] .tree-restore-btn',
+    );
     expect(restoreButton).toBeTruthy();
 
     restoreButton!.click();
@@ -2809,17 +3265,15 @@ describe("bootstrapStorageGoblin", () => {
     vi.useFakeTimers();
 
     const binDeferred = createDeferred<FileEntry[]>();
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([]);
     listBinEntriesMock.mockImplementationOnce(() => binDeferred.promise);
 
     cleanup = await bootstrapStorageGoblin();
     await vi.runAllTimersAsync();
 
-    const loadingIndicator = document.getElementById("file-tree-loading-indicator") as HTMLElement;
-    const fileTreeSection = document.getElementById("file-tree-section") as HTMLElement;
+    const loadingIndicator = document.getElementById("file-tree-loading-indicator")!;
+    const fileTreeSection = document.getElementById("file-tree-section")!;
 
     expect(loadingIndicator.hidden).toBe(true);
 
@@ -2853,17 +3307,15 @@ describe("bootstrapStorageGoblin", () => {
   it("does not show file-tree loading indicator for effectively instant view switches", async () => {
     vi.useFakeTimers();
 
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([]);
     listBinEntriesMock.mockResolvedValueOnce([]);
 
     cleanup = await bootstrapStorageGoblin();
     await vi.runAllTimersAsync();
 
-    const loadingIndicator = document.getElementById("file-tree-loading-indicator") as HTMLElement;
-    const fileTreeSection = document.getElementById("file-tree-section") as HTMLElement;
+    const loadingIndicator = document.getElementById("file-tree-loading-indicator")!;
+    const fileTreeSection = document.getElementById("file-tree-section")!;
 
     expect(loadingIndicator.hidden).toBe(true);
     expect(fileTreeSection.classList.contains("is-loading-tree")).toBe(false);
@@ -3002,16 +3454,10 @@ describe("bootstrapStorageGoblin", () => {
   });
 
   it("refreshes live entries after toggling local copies instead of relying on stale cache", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock
-      .mockResolvedValueOnce([
-        fileEntry({ path: "photos/img001.jpg", hasLocalCopy: false }),
-      ])
-      .mockResolvedValueOnce([
-        fileEntry({ path: "photos/img001.jpg", hasLocalCopy: true }),
-      ]);
+      .mockResolvedValueOnce([fileEntry({ path: "photos/img001.jpg", hasLocalCopy: false })])
+      .mockResolvedValueOnce([fileEntry({ path: "photos/img001.jpg", hasLocalCopy: true })]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
@@ -3035,21 +3481,37 @@ describe("bootstrapStorageGoblin", () => {
   });
 
   it("shows resolve controls for conflict rows and disables their checkboxes", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([
-      fileEntry({ path: "photos/conflict.txt", status: "conflict", localKind: "file", remoteKind: "file" }),
-      fileEntry({ path: "photos/unsupported.txt", status: "conflict", localKind: "file", remoteKind: "directory" }),
+      fileEntry({
+        path: "photos/conflict.txt",
+        status: "conflict",
+        localKind: "file",
+        remoteKind: "file",
+      }),
+      fileEntry({
+        path: "photos/unsupported.txt",
+        status: "conflict",
+        localKind: "file",
+        remoteKind: "directory",
+      }),
     ]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    const checkbox = document.querySelector<HTMLInputElement>('.tree-item[data-value="photos/conflict.txt"] .tree-check');
-    const resolveButton = document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/conflict.txt"] .tree-resolve-btn');
-    const unsupportedResolveButton = document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/unsupported.txt"] .tree-resolve-btn');
-    const unsupportedCheckbox = document.querySelector<HTMLInputElement>('.tree-item[data-value="photos/unsupported.txt"] .tree-check');
+    const checkbox = document.querySelector<HTMLInputElement>(
+      '.tree-item[data-value="photos/conflict.txt"] .tree-check',
+    );
+    const resolveButton = document.querySelector<HTMLButtonElement>(
+      '.tree-item[data-value="photos/conflict.txt"] .tree-resolve-btn',
+    );
+    const unsupportedResolveButton = document.querySelector<HTMLButtonElement>(
+      '.tree-item[data-value="photos/unsupported.txt"] .tree-resolve-btn',
+    );
+    const unsupportedCheckbox = document.querySelector<HTMLInputElement>(
+      '.tree-item[data-value="photos/unsupported.txt"] .tree-check',
+    );
 
     expect(checkbox?.disabled).toBe(true);
     expect(resolveButton?.classList.contains("icon-btn")).toBe(true);
@@ -3063,9 +3525,7 @@ describe("bootstrapStorageGoblin", () => {
   });
 
   it("compares non-inline conflict files by opening local and downloaded remote copies", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([
       fileEntry({
         path: "photos/conflict.txt",
@@ -3089,8 +3549,9 @@ describe("bootstrapStorageGoblin", () => {
     expect(modal?.textContent).toContain("ETag");
     expect(modal?.textContent).toContain("Unavailable");
 
-    const compareButton = Array.from(modal?.querySelectorAll<HTMLButtonElement>("button") ?? [])
-      .find((button) => button.textContent?.includes("Compare"));
+    const compareButton = Array.from(
+      modal?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+    ).find((button) => button.textContent?.includes("Compare"));
     compareButton?.click();
     await flushTasks();
     await flushTasks();
@@ -3113,9 +3574,7 @@ describe("bootstrapStorageGoblin", () => {
       remoteImageDataUrl: null,
       fallbackReason: null,
     });
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My docs"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My docs")]);
     listFileEntriesMock.mockResolvedValueOnce([
       fileEntry({
         path: "docs/conflict.txt",
@@ -3132,8 +3591,9 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     const modal = document.querySelector<HTMLElement>(".storage-conflict-resolution-modal");
-    const compareButton = Array.from(modal?.querySelectorAll<HTMLButtonElement>("button") ?? [])
-      .find((button) => button.textContent?.includes("Compare"));
+    const compareButton = Array.from(
+      modal?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+    ).find((button) => button.textContent?.includes("Compare"));
     compareButton?.click();
     await flushTasks();
     await flushTasks();
@@ -3159,9 +3619,7 @@ describe("bootstrapStorageGoblin", () => {
       remoteImageDataUrl: "data:image/png;base64,BBB",
       fallbackReason: null,
     });
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([
       fileEntry({
         path: "photos/conflict.png",
@@ -3178,14 +3636,16 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     const modal = document.querySelector<HTMLElement>(".storage-conflict-resolution-modal");
-    const compareButton = Array.from(modal?.querySelectorAll<HTMLButtonElement>("button") ?? [])
-      .find((button) => button.textContent?.includes("Compare"));
+    const compareButton = Array.from(
+      modal?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+    ).find((button) => button.textContent?.includes("Compare"));
     compareButton?.click();
     await flushTasks();
     await flushTasks();
 
     expect(modal?.textContent).toContain("Showing inline image previews.");
-    const images = modal?.querySelectorAll<HTMLImageElement>(".storage-conflict-image-preview") ?? [];
+    const images =
+      modal?.querySelectorAll<HTMLImageElement>(".storage-conflict-image-preview") ?? [];
     expect(images).toHaveLength(2);
     expect(images[0]?.getAttribute("src")).toBe("data:image/png;base64,AAA");
     expect(images[1]?.getAttribute("src")).toBe("data:image/png;base64,BBB");
@@ -3206,9 +3666,7 @@ describe("bootstrapStorageGoblin", () => {
       fallbackReason: null;
     }>();
     prepareConflictComparisonMock.mockReturnValueOnce(deferred.promise);
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My docs"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My docs")]);
     listFileEntriesMock.mockResolvedValueOnce([
       fileEntry({
         path: "docs/conflict.txt",
@@ -3225,15 +3683,18 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     const modal = document.querySelector<HTMLElement>(".storage-conflict-resolution-modal");
-    const compareButton = Array.from(modal?.querySelectorAll<HTMLButtonElement>("button") ?? [])
-      .find((button) => button.textContent?.includes("Compare"));
+    const compareButton = Array.from(
+      modal?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+    ).find((button) => button.textContent?.includes("Compare"));
     compareButton?.click();
     await flushTasks();
 
     expect(modal?.textContent).toContain("Loading conflict comparison…");
     expect(compareButton?.classList.contains("is-loading")).toBe(true);
     expect(compareButton?.getAttribute("aria-busy")).toBe("true");
-    expect(compareButton?.querySelector<HTMLElement>(".storage-conflict-action-spinner")?.hidden).toBe(false);
+    expect(
+      compareButton?.querySelector<HTMLElement>(".storage-conflict-action-spinner")?.hidden,
+    ).toBe(false);
 
     deferred.resolve({
       locationId: "loc-1",
@@ -3253,13 +3714,13 @@ describe("bootstrapStorageGoblin", () => {
     expect(modal?.textContent).toContain("Showing inline text comparison.");
     expect(compareButton?.classList.contains("is-loading")).toBe(false);
     expect(compareButton?.getAttribute("aria-busy")).toBe("false");
-    expect(compareButton?.querySelector<HTMLElement>(".storage-conflict-action-spinner")?.hidden).toBe(true);
+    expect(
+      compareButton?.querySelector<HTMLElement>(".storage-conflict-action-spinner")?.hidden,
+    ).toBe(true);
   });
 
   it("shows remote etag in the conflict modal when available", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My docs"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My docs")]);
     listFileEntriesMock.mockResolvedValueOnce([
       fileEntry({
         path: "docs/conflict.txt",
@@ -3294,9 +3755,7 @@ describe("bootstrapStorageGoblin", () => {
       remoteImageDataUrl: null,
       fallbackReason: "File exceeded the 128 KB inline text compare limit.",
     });
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My docs"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My docs")]);
     listFileEntriesMock.mockResolvedValueOnce([
       fileEntry({
         path: "docs/large.txt",
@@ -3313,8 +3772,9 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     const modal = document.querySelector<HTMLElement>(".storage-conflict-resolution-modal");
-    const compareButton = Array.from(modal?.querySelectorAll<HTMLButtonElement>("button") ?? [])
-      .find((button) => button.textContent?.includes("Compare"));
+    const compareButton = Array.from(
+      modal?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+    ).find((button) => button.textContent?.includes("Compare"));
     compareButton?.click();
     await flushTasks();
     await flushTasks();
@@ -3326,9 +3786,7 @@ describe("bootstrapStorageGoblin", () => {
 
   it("resolves conflicts with keep local and refreshes the live view", async () => {
     const resolution = createDeferred<void>();
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     resolveConflictMock.mockReturnValueOnce(resolution.promise);
     listFileEntriesMock
       .mockResolvedValueOnce([
@@ -3339,9 +3797,7 @@ describe("bootstrapStorageGoblin", () => {
           remoteKind: "file",
         }),
       ])
-      .mockResolvedValueOnce([
-        fileEntry({ path: "photos/conflict.txt", status: "synced" }),
-      ]);
+      .mockResolvedValueOnce([fileEntry({ path: "photos/conflict.txt", status: "synced" })]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
@@ -3350,14 +3806,17 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     const modal = document.querySelector<HTMLElement>(".storage-conflict-resolution-modal");
-    const keepLocalButton = Array.from(modal?.querySelectorAll<HTMLButtonElement>("button") ?? [])
-      .find((button) => button.textContent?.includes("Keep local"));
+    const keepLocalButton = Array.from(
+      modal?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+    ).find((button) => button.textContent?.includes("Keep local"));
     keepLocalButton?.click();
     await flushTasks();
 
     expect(keepLocalButton?.classList.contains("is-loading")).toBe(true);
     expect(keepLocalButton?.getAttribute("aria-busy")).toBe("true");
-    expect(keepLocalButton?.querySelector<HTMLElement>(".storage-conflict-action-spinner")?.hidden).toBe(false);
+    expect(
+      keepLocalButton?.querySelector<HTMLElement>(".storage-conflict-action-spinner")?.hidden,
+    ).toBe(false);
 
     resolution.resolve(undefined);
     await flushTasks();
@@ -3375,9 +3834,7 @@ describe("bootstrapStorageGoblin", () => {
 
   it("resolves conflicts with keep remote and refreshes the live view", async () => {
     const resolution = createDeferred<void>();
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     resolveConflictMock.mockReturnValueOnce(resolution.promise);
     listFileEntriesMock
       .mockResolvedValueOnce([
@@ -3388,9 +3845,7 @@ describe("bootstrapStorageGoblin", () => {
           remoteKind: "file",
         }),
       ])
-      .mockResolvedValueOnce([
-        fileEntry({ path: "photos/conflict.txt", status: "synced" }),
-      ]);
+      .mockResolvedValueOnce([fileEntry({ path: "photos/conflict.txt", status: "synced" })]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
@@ -3399,14 +3854,17 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     const modal = document.querySelector<HTMLElement>(".storage-conflict-resolution-modal");
-    const keepRemoteButton = Array.from(modal?.querySelectorAll<HTMLButtonElement>("button") ?? [])
-      .find((button) => button.textContent?.includes("Keep remote"));
+    const keepRemoteButton = Array.from(
+      modal?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+    ).find((button) => button.textContent?.includes("Keep remote"));
     keepRemoteButton?.click();
     await flushTasks();
 
     expect(keepRemoteButton?.classList.contains("is-loading")).toBe(true);
     expect(keepRemoteButton?.getAttribute("aria-busy")).toBe("true");
-    expect(keepRemoteButton?.querySelector<HTMLElement>(".storage-conflict-action-spinner")?.hidden).toBe(false);
+    expect(
+      keepRemoteButton?.querySelector<HTMLElement>(".storage-conflict-action-spinner")?.hidden,
+    ).toBe(false);
 
     resolution.resolve(undefined);
     await flushTasks();
@@ -3423,9 +3881,7 @@ describe("bootstrapStorageGoblin", () => {
   });
 
   it("compares review-required file entries through the same resolution modal", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([
       fileEntry({
         path: "photos/review.txt",
@@ -3448,8 +3904,9 @@ describe("bootstrapStorageGoblin", () => {
     expect(modal?.hidden).toBe(false);
     expect(modal?.textContent).toContain("photos/review.txt");
 
-    const compareButton = Array.from(modal?.querySelectorAll<HTMLButtonElement>("button") ?? [])
-      .find((button) => button.textContent?.includes("Compare"));
+    const compareButton = Array.from(
+      modal?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+    ).find((button) => button.textContent?.includes("Compare"));
     compareButton?.click();
     await flushTasks();
     await flushTasks();
@@ -3461,9 +3918,7 @@ describe("bootstrapStorageGoblin", () => {
 
   it("clears review-required entries with keep local and refreshes the live view", async () => {
     const resolution = createDeferred<void>();
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     resolveConflictMock.mockReturnValueOnce(resolution.promise);
     listFileEntriesMock
       .mockResolvedValueOnce([
@@ -3475,9 +3930,7 @@ describe("bootstrapStorageGoblin", () => {
           remoteKind: "file",
         }),
       ])
-      .mockResolvedValueOnce([
-        fileEntry({ path: "photos/review.txt", status: "synced" }),
-      ]);
+      .mockResolvedValueOnce([fileEntry({ path: "photos/review.txt", status: "synced" })]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
@@ -3486,14 +3939,17 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     const modal = document.querySelector<HTMLElement>(".storage-conflict-resolution-modal");
-    const keepLocalButton = Array.from(modal?.querySelectorAll<HTMLButtonElement>("button") ?? [])
-      .find((button) => button.textContent?.includes("Keep local"));
+    const keepLocalButton = Array.from(
+      modal?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+    ).find((button) => button.textContent?.includes("Keep local"));
     keepLocalButton?.click();
     await flushTasks();
 
     expect(keepLocalButton?.classList.contains("is-loading")).toBe(true);
     expect(keepLocalButton?.getAttribute("aria-busy")).toBe("true");
-    expect(keepLocalButton?.querySelector<HTMLElement>(".storage-conflict-action-spinner")?.hidden).toBe(false);
+    expect(
+      keepLocalButton?.querySelector<HTMLElement>(".storage-conflict-action-spinner")?.hidden,
+    ).toBe(false);
 
     resolution.resolve(undefined);
     await flushTasks();
@@ -3511,9 +3967,7 @@ describe("bootstrapStorageGoblin", () => {
 
   it("clears review-required entries with keep remote and refreshes the live view", async () => {
     const resolution = createDeferred<void>();
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     resolveConflictMock.mockReturnValueOnce(resolution.promise);
     listFileEntriesMock
       .mockResolvedValueOnce([
@@ -3525,9 +3979,7 @@ describe("bootstrapStorageGoblin", () => {
           remoteKind: "file",
         }),
       ])
-      .mockResolvedValueOnce([
-        fileEntry({ path: "photos/review.txt", status: "synced" }),
-      ]);
+      .mockResolvedValueOnce([fileEntry({ path: "photos/review.txt", status: "synced" })]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
@@ -3536,14 +3988,17 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     const modal = document.querySelector<HTMLElement>(".storage-conflict-resolution-modal");
-    const keepRemoteButton = Array.from(modal?.querySelectorAll<HTMLButtonElement>("button") ?? [])
-      .find((button) => button.textContent?.includes("Keep remote"));
+    const keepRemoteButton = Array.from(
+      modal?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+    ).find((button) => button.textContent?.includes("Keep remote"));
     keepRemoteButton?.click();
     await flushTasks();
 
     expect(keepRemoteButton?.classList.contains("is-loading")).toBe(true);
     expect(keepRemoteButton?.getAttribute("aria-busy")).toBe("true");
-    expect(keepRemoteButton?.querySelector<HTMLElement>(".storage-conflict-action-spinner")?.hidden).toBe(false);
+    expect(
+      keepRemoteButton?.querySelector<HTMLElement>(".storage-conflict-action-spinner")?.hidden,
+    ).toBe(false);
 
     resolution.resolve(undefined);
     await flushTasks();
@@ -3565,14 +4020,14 @@ describe("bootstrapStorageGoblin", () => {
         remoteBin: { enabled: true, retentionDays: 14 },
       }),
     ]);
-    listFileEntriesMock.mockResolvedValueOnce([
-      fileEntry({ path: "photos/img001.jpg" }),
-    ]);
+    listFileEntriesMock.mockResolvedValueOnce([fileEntry({ path: "photos/img001.jpg" })]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    const deleteButton = document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/img001.jpg"] .tree-delete-btn');
+    const deleteButton = document.querySelector<HTMLButtonElement>(
+      '.tree-item[data-value="photos/img001.jpg"] .tree-delete-btn',
+    );
     expect(deleteButton).toBeTruthy();
 
     deleteButton?.click();
@@ -3594,14 +4049,14 @@ describe("bootstrapStorageGoblin", () => {
         remoteBin: { enabled: true, retentionDays: 14 },
       }),
     ]);
-    listFileEntriesMock.mockResolvedValueOnce([
-      fileEntry({ path: "photos/2026/img001.jpg" }),
-    ]);
+    listFileEntriesMock.mockResolvedValueOnce([fileEntry({ path: "photos/2026/img001.jpg" })]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    const deleteButton = document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos"] .tree-delete-btn');
+    const deleteButton = document.querySelector<HTMLButtonElement>(
+      '.tree-item[data-value="photos"] .tree-delete-btn',
+    );
     expect(deleteButton).toBeTruthy();
 
     deleteButton?.click();
@@ -3623,14 +4078,16 @@ describe("bootstrapStorageGoblin", () => {
         remoteBin: { enabled: false, retentionDays: 30 },
       }),
     ]);
-    listFileEntriesMock.mockResolvedValueOnce([
-      fileEntry({ path: "photos/img001.jpg" }),
-    ]);
+    listFileEntriesMock.mockResolvedValueOnce([fileEntry({ path: "photos/img001.jpg" })]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/img001.jpg"] .tree-delete-btn')?.click();
+    document
+      .querySelector<HTMLButtonElement>(
+        '.tree-item[data-value="photos/img001.jpg"] .tree-delete-btn',
+      )
+      ?.click();
     await flushTasks();
 
     expect(getAsyncConfirmModal()?.textContent).toContain(
@@ -3650,14 +4107,16 @@ describe("bootstrapStorageGoblin", () => {
         remoteBin: { enabled: false, retentionDays: 7 },
       }),
     ]);
-    listFileEntriesMock.mockResolvedValueOnce([
-      fileEntry({ path: "photos/img001.jpg" }),
-    ]);
+    listFileEntriesMock.mockResolvedValueOnce([fileEntry({ path: "photos/img001.jpg" })]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/img001.jpg"] .tree-delete-btn')?.click();
+    document
+      .querySelector<HTMLButtonElement>(
+        '.tree-item[data-value="photos/img001.jpg"] .tree-delete-btn',
+      )
+      ?.click();
     await flushTasks();
 
     expect(getAsyncConfirmModal()?.textContent).toContain(
@@ -3673,14 +4132,14 @@ describe("bootstrapStorageGoblin", () => {
         remoteBin: { enabled: false, retentionDays: 7 },
       }),
     ]);
-    listFileEntriesMock.mockResolvedValueOnce([
-      fileEntry({ path: "docs/report.pdf" }),
-    ]);
+    listFileEntriesMock.mockResolvedValueOnce([fileEntry({ path: "docs/report.pdf" })]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    document.querySelector<HTMLButtonElement>('.tree-item[data-value="docs/report.pdf"] .tree-delete-btn')?.click();
+    document
+      .querySelector<HTMLButtonElement>('.tree-item[data-value="docs/report.pdf"] .tree-delete-btn')
+      ?.click();
     await flushTasks();
 
     expect(getAsyncConfirmModal()?.textContent).toContain(
@@ -3699,9 +4158,7 @@ describe("bootstrapStorageGoblin", () => {
   });
 
   it("does not expose directory delete in blocked live directory states", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([
       fileEntry({ path: "photos/review.jpg", status: "review-required", hasLocalCopy: false }),
     ]);
@@ -3719,18 +4176,23 @@ describe("bootstrapStorageGoblin", () => {
       }),
     ]);
     listFileEntriesMock
-      .mockResolvedValueOnce([
-        fileEntry({ path: "photos/2026/img001.jpg" }),
-      ])
+      .mockResolvedValueOnce([fileEntry({ path: "photos/2026/img001.jpg" })])
       .mockResolvedValueOnce([]);
     listBinEntriesMock.mockResolvedValueOnce([
-      fileEntry({ path: "photos/2026/img001.jpg", status: "deleted", hasLocalCopy: false, binKey: "bin-key-folder-1" }),
+      fileEntry({
+        path: "photos/2026/img001.jpg",
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: "bin-key-folder-1",
+      }),
     ]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos"] .tree-delete-btn')?.click();
+    document
+      .querySelector<HTMLButtonElement>('.tree-item[data-value="photos"] .tree-delete-btn')
+      ?.click();
     await flushTasks();
     getAsyncConfirmAcceptButton().click();
     await flushTasks();
@@ -3745,23 +4207,25 @@ describe("bootstrapStorageGoblin", () => {
     await flushTasks();
 
     expect(listBinEntriesMock).toHaveBeenCalledWith("loc-1");
-    expect(document.querySelector('.tree-item[data-value="photos/2026/img001.jpg"]')).not.toBeNull();
+    expect(
+      document.querySelector('.tree-item[data-value="photos/2026/img001.jpg"]'),
+    ).not.toBeNull();
   });
 
   it("keeps the file delete confirm modal open and loading until deletion succeeds", async () => {
     const deletion = createDeferred<void>();
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
-    listFileEntriesMock.mockResolvedValueOnce([
-      fileEntry({ path: "photos/img001.jpg" }),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
+    listFileEntriesMock.mockResolvedValueOnce([fileEntry({ path: "photos/img001.jpg" })]);
     deleteFileMock.mockReturnValueOnce(deletion.promise);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/img001.jpg"] .tree-delete-btn')?.click();
+    document
+      .querySelector<HTMLButtonElement>(
+        '.tree-item[data-value="photos/img001.jpg"] .tree-delete-btn',
+      )
+      ?.click();
     await flushTasks();
 
     const acceptButton = getAsyncConfirmAcceptButton();
@@ -3796,18 +4260,25 @@ describe("bootstrapStorageGoblin", () => {
       }),
     ]);
     listFileEntriesMock
-      .mockResolvedValueOnce([
-        fileEntry({ path: "photos/img001.jpg" }),
-      ])
+      .mockResolvedValueOnce([fileEntry({ path: "photos/img001.jpg" })])
       .mockResolvedValueOnce([]);
     listBinEntriesMock.mockResolvedValueOnce([
-      fileEntry({ path: "photos/img001.jpg", status: "deleted", hasLocalCopy: false, binKey: "bin-key-1" }),
+      fileEntry({
+        path: "photos/img001.jpg",
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: "bin-key-1",
+      }),
     ]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/img001.jpg"] .tree-delete-btn')?.click();
+    document
+      .querySelector<HTMLButtonElement>(
+        '.tree-item[data-value="photos/img001.jpg"] .tree-delete-btn',
+      )
+      ?.click();
     await flushTasks();
     getAsyncConfirmAcceptButton().click();
     await flushTasks();
@@ -3825,9 +4296,7 @@ describe("bootstrapStorageGoblin", () => {
   });
 
   it("refreshes both bin and live views after restoring from bin", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([
@@ -3835,7 +4304,12 @@ describe("bootstrapStorageGoblin", () => {
       ]);
     listBinEntriesMock
       .mockResolvedValueOnce([
-        fileEntry({ path: "photos/restored.jpg", status: "deleted", hasLocalCopy: false, binKey: "opaque-bin-key" }),
+        fileEntry({
+          path: "photos/restored.jpg",
+          status: "deleted",
+          hasLocalCopy: false,
+          binKey: "opaque-bin-key",
+        }),
       ])
       .mockResolvedValueOnce([]);
 
@@ -3863,18 +4337,18 @@ describe("bootstrapStorageGoblin", () => {
 
   it("keeps the file delete confirm modal usable after deletion failure", async () => {
     const deletion = createDeferred<void>();
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
-    listFileEntriesMock.mockResolvedValueOnce([
-      fileEntry({ path: "photos/img001.jpg" }),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
+    listFileEntriesMock.mockResolvedValueOnce([fileEntry({ path: "photos/img001.jpg" })]);
     deleteFileMock.mockReturnValueOnce(deletion.promise);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/img001.jpg"] .tree-delete-btn')?.click();
+    document
+      .querySelector<HTMLButtonElement>(
+        '.tree-item[data-value="photos/img001.jpg"] .tree-delete-btn',
+      )
+      ?.click();
     await flushTasks();
 
     const acceptButton = getAsyncConfirmAcceptButton();
@@ -3897,7 +4371,12 @@ describe("bootstrapStorageGoblin", () => {
     expect(acceptButton.disabled).toBe(false);
     expect(getAsyncConfirmAcceptSpinner().hidden).toBe(true);
     expect(getAsyncConfirmAcceptBusyText().hidden).toBe(true);
-    expect(showToastMock).toHaveBeenCalledWith("Failed to delete file: network down", "error", 2200, "app-toast");
+    expect(showToastMock).toHaveBeenCalledWith(
+      "Failed to delete file: network down",
+      "error",
+      2200,
+      "app-toast",
+    );
 
     getAsyncConfirmRejectButton().click();
     await flushTasks();
@@ -3908,9 +4387,7 @@ describe("bootstrapStorageGoblin", () => {
 
   it("keeps the move-to-Glacier confirm modal open and loading until the storage class change succeeds", async () => {
     const change = createDeferred<void>();
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([
       fileEntry({ path: "photos/img001.jpg", storageClass: "STANDARD" }),
     ]);
@@ -3946,15 +4423,18 @@ describe("bootstrapStorageGoblin", () => {
   });
 
   it("refreshes live entries after changing storage class", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock
       .mockResolvedValueOnce([
         fileEntry({ path: "photos/img001.jpg", storageClass: "STANDARD", hasLocalCopy: true }),
       ])
       .mockResolvedValueOnce([
-        fileEntry({ path: "photos/img001.jpg", storageClass: "GLACIER_IR", status: "glacier", hasLocalCopy: false }),
+        fileEntry({
+          path: "photos/img001.jpg",
+          storageClass: "GLACIER_IR",
+          status: "glacier",
+          hasLocalCopy: false,
+        }),
       ]);
 
     cleanup = await bootstrapStorageGoblin();
@@ -3972,11 +4452,14 @@ describe("bootstrapStorageGoblin", () => {
 
   it("keeps the restore-from-Glacier confirm modal open and loading until the storage class change succeeds", async () => {
     const change = createDeferred<void>();
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
     listFileEntriesMock.mockResolvedValueOnce([
-      fileEntry({ path: "photos/archive.zip", status: "glacier", hasLocalCopy: false, storageClass: "GLACIER_IR" }),
+      fileEntry({
+        path: "photos/archive.zip",
+        status: "glacier",
+        hasLocalCopy: false,
+        storageClass: "GLACIER_IR",
+      }),
     ]);
     changeStorageClassMock.mockReturnValueOnce(change.promise);
 
@@ -4010,17 +4493,17 @@ describe("bootstrapStorageGoblin", () => {
   });
 
   it("reuses a single confirm modal instance across mutation actions", async () => {
-    listSyncLocationsMock.mockResolvedValueOnce([
-      baseSyncLocation("loc-1", "My photos"),
-    ]);
-    listFileEntriesMock.mockResolvedValueOnce([
-      fileEntry({ path: "photos/img001.jpg" }),
-    ]);
+    listSyncLocationsMock.mockResolvedValueOnce([baseSyncLocation("loc-1", "My photos")]);
+    listFileEntriesMock.mockResolvedValueOnce([fileEntry({ path: "photos/img001.jpg" })]);
 
     cleanup = await bootstrapStorageGoblin();
     await flushTasks();
 
-    document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/img001.jpg"] .tree-delete-btn')?.click();
+    document
+      .querySelector<HTMLButtonElement>(
+        '.tree-item[data-value="photos/img001.jpg"] .tree-delete-btn',
+      )
+      ?.click();
     await flushTasks();
 
     const firstModal = getAsyncConfirmModal();
@@ -4030,7 +4513,11 @@ describe("bootstrapStorageGoblin", () => {
     getAsyncConfirmRejectButton().click();
     await flushTasks();
 
-    document.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/img001.jpg"] .tree-delete-btn')?.click();
+    document
+      .querySelector<HTMLButtonElement>(
+        '.tree-item[data-value="photos/img001.jpg"] .tree-delete-btn',
+      )
+      ?.click();
     await flushTasks();
 
     expect(getAsyncConfirmModal()).toBe(firstModal);

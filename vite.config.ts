@@ -3,7 +3,7 @@ import { defineConfig } from "vite";
 
 const host = process.env.TAURI_DEV_HOST;
 
-export default defineConfig(async () => ({
+export default defineConfig(() => ({
   clearScreen: false,
   build: {
     rollupOptions: {
@@ -15,7 +15,7 @@ export default defineConfig(async () => ({
   server: {
     port: 1432,
     strictPort: true,
-    host: host || false,
+    host: host ?? false,
     hmr: host
       ? {
           protocol: "ws",

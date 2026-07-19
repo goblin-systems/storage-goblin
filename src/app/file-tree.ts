@@ -1,16 +1,14 @@
 import { applyIcons, bindCheckboxTree } from "@goblin-systems/goblin-design-system";
 import type { TreeHandle } from "@goblin-systems/goblin-design-system";
 import type { BinEntrySource } from "./types";
-import {
-  VIRTUAL_THRESHOLD,
-  renderFileTreeVirtual,
-} from "./file-tree-virtual";
+import { VIRTUAL_THRESHOLD, renderFileTreeVirtual } from "./file-tree-virtual";
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-export type FileEntryStatus = "synced" | "local-only" | "remote-only" | "review-required" | "conflict" | "glacier" | "deleted";
+export type FileEntryStatus =
+  "synced" | "local-only" | "remote-only" | "review-required" | "conflict" | "glacier" | "deleted";
 
 export type FileTreeMode = "live" | "bin";
 
@@ -62,22 +60,26 @@ export interface FileTreeOptions {
   mode?: FileTreeMode;
   onChange?: (checkedPaths: string[]) => void;
   checkedPaths?: string[];
-  onReveal?: (path: string) => void;
-  onDelete?: (target: DeleteTarget) => void;
+  onReveal?: (path: string) => void | Promise<void>;
+  onDelete?: (target: DeleteTarget) => void | Promise<void>;
   onRestore?: (entry: FileEntry) => void | Promise<void>;
-  onStorageClass?: (path: string, currentStorageClass: string | null) => void;
+  onStorageClass?: (path: string, currentStorageClass: string | null) => void | Promise<void>;
   getStorageClassActionState?: (entry: FileEntry) => { disabled: boolean; title: string };
-  onResolveConflict?: (entry: FileEntry) => void;
+  onResolveConflict?: (entry: FileEntry) => void | Promise<void>;
   /** Version counts per file path. When provided, version badges and history buttons are shown. */
   versionCounts?: Map<string, number>;
   /** Called when the user clicks the version history button for a file. */
-  onViewVersions?: (entry: FileEntry) => void;
+  onViewVersions?: (entry: FileEntry) => void | Promise<void>;
 }
 
 const RESTORE_BUTTON_LABEL = "Restore";
 const RESOLVE_BUTTON_LABEL = "Resolve";
 
-function createRestoreButtonHtml(escapedPath: string, escapedBinKey: string, escapedEntry: string): string {
+function createRestoreButtonHtml(
+  escapedPath: string,
+  escapedBinKey: string,
+  escapedEntry: string,
+): string {
   return [
     `<button class="secondary-btn slim-btn tree-restore-btn" type="button" data-restore-path="${escapedPath}" data-restore-bin-key="${escapedBinKey}" data-restore-entry="${escapedEntry}" aria-busy="false">`,
     `<span class="tree-action-spinner" aria-hidden="true" hidden></span>`,
@@ -96,7 +98,12 @@ function createResolveButtonHtml(escapedPath: string): string {
 }
 
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
-  return typeof value === "object" && value !== null && "then" in value && typeof value.then === "function";
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "then" in value &&
+    typeof value.then === "function"
+  );
 }
 
 export function setRestoreButtonBusy(button: HTMLButtonElement, busy: boolean) {
@@ -106,10 +113,7 @@ export function setRestoreButtonBusy(button: HTMLButtonElement, busy: boolean) {
   button.querySelector<HTMLElement>(".tree-action-spinner")?.toggleAttribute("hidden", !busy);
 }
 
-export function runRestoreAction(
-  button: HTMLButtonElement,
-  action: () => void | Promise<void>,
-) {
+export function runRestoreAction(button: HTMLButtonElement, action: () => void | Promise<void>) {
   if (button.disabled) {
     return;
   }
@@ -158,23 +162,23 @@ type FileTreeNode = TreeNode & { entry: FileEntry & { kind: "file" } };
 // ---------------------------------------------------------------------------
 
 export const STATUS_CLASS_MAP: Record<FileEntryStatus, string> = {
-  "synced": "connected",
+  synced: "connected",
   "local-only": "untested",
   "remote-only": "untested",
   "review-required": "untested",
-  "conflict": "error",
-  "glacier": "glacier",
-  "deleted": "error",
+  conflict: "error",
+  glacier: "glacier",
+  deleted: "error",
 };
 
 export const STATUS_TOOLTIP_MAP: Record<FileEntryStatus, string> = {
-  "synced": "Synced locally and in cloud",
+  synced: "Synced locally and in cloud",
   "local-only": "Only on this device",
   "remote-only": "Only in cloud storage",
   "review-required": "Requires review before syncing changes",
-  "conflict": "Sync conflict needs attention",
-  "glacier": "Archived in cold storage",
-  "deleted": "Deleted and available to restore",
+  conflict: "Sync conflict needs attention",
+  glacier: "Archived in cold storage",
+  deleted: "Deleted and available to restore",
 };
 
 export function getStatusTooltip(status: FileEntryStatus): string {
@@ -182,10 +186,12 @@ export function getStatusTooltip(status: FileEntryStatus): string {
 }
 
 export function isResolvableConflictFileEntry(entry: FileEntry): boolean {
-  return entry.kind === "file"
-    && (entry.status === "conflict" || entry.status === "review-required")
-    && entry.localKind === "file"
-    && entry.remoteKind === "file";
+  return (
+    entry.kind === "file" &&
+    (entry.status === "conflict" || entry.status === "review-required") &&
+    entry.localKind === "file" &&
+    entry.remoteKind === "file"
+  );
 }
 
 export function canMutateLiveFileEntry(entry: FileEntry): boolean {
@@ -195,19 +201,21 @@ export function canMutateLiveFileEntry(entry: FileEntry): boolean {
 export function canMutateLiveDirectoryNode(node: TreeNode): boolean {
   const statuses = collectLeafStatuses(node.children);
   const nodeStatus = node.entry?.status;
-  return nodeStatus !== "review-required"
-    && nodeStatus !== "conflict"
-    && !statuses.includes("review-required")
-    && !statuses.includes("conflict");
+  return (
+    nodeStatus !== "review-required" &&
+    nodeStatus !== "conflict" &&
+    !statuses.includes("review-required") &&
+    !statuses.includes("conflict")
+  );
 }
 
-export function isEntryCheckboxDisabled(entry: FileEntry, mode: FileTreeMode): boolean {
-  return entry.status === "glacier"
-    || entry.status === "review-required"
-    || entry.status === "conflict";
+export function isEntryCheckboxDisabled(entry: FileEntry, _mode: FileTreeMode): boolean {
+  return (
+    entry.status === "glacier" || entry.status === "review-required" || entry.status === "conflict"
+  );
 }
 
-function isDirectoryCheckboxDisabled(node: TreeNode, mode: FileTreeMode): boolean {
+function isDirectoryCheckboxDisabled(node: TreeNode, _mode: FileTreeMode): boolean {
   return node.entry?.status === "conflict" || node.entry?.status === "review-required";
 }
 
@@ -222,13 +230,13 @@ export function isDirectoryNode(node: TreeNode): boolean {
 export function deriveDirectoryStatus(node: TreeNode): string {
   const statuses = collectLeafStatuses(node.children);
   if (statuses.length === 0) {
-    return node.entry ? STATUS_CLASS_MAP[node.entry.status] : STATUS_CLASS_MAP["synced"];
+    return node.entry ? STATUS_CLASS_MAP[node.entry.status] : STATUS_CLASS_MAP.synced;
   }
-  if (statuses.some((s) => s === "conflict")) return STATUS_CLASS_MAP["conflict"];
-  if (statuses.every((s) => s === "deleted")) return STATUS_CLASS_MAP["deleted"];
-  if (statuses.every((s) => s === "synced")) return STATUS_CLASS_MAP["synced"];
+  if (statuses.some((s) => s === "conflict")) return STATUS_CLASS_MAP.conflict;
+  if (statuses.every((s) => s === "deleted")) return STATUS_CLASS_MAP.deleted;
+  if (statuses.every((s) => s === "synced")) return STATUS_CLASS_MAP.synced;
   if (statuses.some((s) => s === "review-required")) return STATUS_CLASS_MAP["review-required"];
-  if (statuses.some((s) => s === "glacier")) return STATUS_CLASS_MAP["glacier"];
+  if (statuses.some((s) => s === "glacier")) return STATUS_CLASS_MAP.glacier;
   return STATUS_CLASS_MAP["local-only"];
 }
 
@@ -257,15 +265,17 @@ function collectLeafStatuses(nodes: TreeNode[]): FileEntryStatus[] {
   return result;
 }
 
-function deriveDirectoryChecked(node: TreeNode, checkedLeafPaths: Set<string>, mode: FileTreeMode): boolean {
+function deriveDirectoryChecked(
+  node: TreeNode,
+  checkedLeafPaths: Set<string>,
+  mode: FileTreeMode,
+): boolean {
   const leafEntries = collectLeafEntries(node.children);
   if (leafEntries.length > 0) {
     return leafEntries.every((entry) => checkedLeafPaths.has(entry.path));
   }
 
-  return mode === "bin"
-    ? checkedLeafPaths.has(node.path)
-    : node.entry?.hasLocalCopy ?? false;
+  return mode === "bin" ? checkedLeafPaths.has(node.path) : (node.entry?.hasLocalCopy ?? false);
 }
 
 export function collectLeafEntries(nodes: TreeNode[]): FileEntry[] {
@@ -418,7 +428,11 @@ function renderBinLifecycleHtml(entry: FileEntry): string {
   return `<span class="tree-bin-lifecycle" title="${text}">${text}</span>`;
 }
 
-function getCheckedLeafPaths(entries: FileEntry[], checkedPaths: string[] | undefined, mode: FileTreeMode): Set<string> {
+function getCheckedLeafPaths(
+  entries: FileEntry[],
+  checkedPaths: string[] | undefined,
+  mode: FileTreeMode,
+): Set<string> {
   if (mode === "bin") {
     return new Set(checkedPaths ?? []);
   }
@@ -447,7 +461,11 @@ function renderVersionsButtonHtml(escapedPath: string): string {
   ].join("");
 }
 
-function renderStorageClassButtonHtml(escapedPath: string, title: string, disabled: boolean): string {
+function renderStorageClassButtonHtml(
+  escapedPath: string,
+  title: string,
+  disabled: boolean,
+): string {
   const escapedTitle = escapeHtml(title);
   return [
     `<button class="icon-btn icon-btn-sm tree-storage-class-btn" type="button" data-storage-class-path="${escapedPath}" title="${escapedTitle}" aria-label="${escapedTitle}"${disabled ? " disabled" : ""}>`,
@@ -456,7 +474,12 @@ function renderStorageClassButtonHtml(escapedPath: string, title: string, disabl
   ].join("");
 }
 
-function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<string>, versionCounts?: Map<string, number>): string {
+function renderNode(
+  node: TreeNode,
+  mode: FileTreeMode,
+  checkedLeafPaths: Set<string>,
+  versionCounts?: Map<string, number>,
+): string {
   const isLeaf = isFileNode(node);
   const escapedPath = escapeHtml(node.path);
   const escapedName = escapeHtml(node.name);
@@ -467,8 +490,10 @@ function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<st
     const checked = checkedLeafPaths.has(node.path) ? " checked" : "";
     const disabled = isEntryCheckboxDisabled(node.entry, mode) ? " disabled" : "";
     const versionCount = versionCounts?.get(node.path);
-    const storageClassAction = optionsForRender?.getStorageClassActionState?.(node.entry)
-      ?? { disabled: false, title: "Change archive storage tier" };
+    const storageClassAction = optionsForRender?.getStorageClassActionState?.(node.entry) ?? {
+      disabled: false,
+      title: "Change archive storage tier",
+    };
     return [
       `<li class="tree-item" data-value="${escapedPath}">`,
       `<div class="tree-row" style="--tree-depth: ${node.depth}">`,
@@ -487,24 +512,30 @@ function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<st
       ...(mode === "bin" ? [renderBinLifecycleHtml(node.entry)] : []),
       ...(mode === "bin"
         ? [
-          createRestoreButtonHtml(escapedPath, escapeHtml(node.entry.binKey ?? ""), encodeRestoreEntry(node.entry)),
-        ]
+            createRestoreButtonHtml(
+              escapedPath,
+              escapeHtml(node.entry.binKey ?? ""),
+              encodeRestoreEntry(node.entry),
+            ),
+          ]
         : [
-          ...(mode === "live" && versionCounts !== undefined
-            ? [renderVersionsButtonHtml(escapedPath)]
-            : []),
-          ...(isResolvableConflictFileEntry(node.entry)
-            ? [createResolveButtonHtml(escapedPath)]
-            : []),
-          ...(canMutateLiveFileEntry(node.entry)
-            ? [
-              renderStorageClassButtonHtml(escapedPath, storageClassAction.title, storageClassAction.disabled),
-              `<button class="icon-btn icon-btn-sm tree-delete-btn" type="button" data-delete-path="${escapedPath}" data-delete-kind="file">`,
-              `<i data-lucide="trash-2"></i>`,
-              `</button>`,
-            ]
-            : []),
-        ]),
+            ...(versionCounts !== undefined ? [renderVersionsButtonHtml(escapedPath)] : []),
+            ...(isResolvableConflictFileEntry(node.entry)
+              ? [createResolveButtonHtml(escapedPath)]
+              : []),
+            ...(canMutateLiveFileEntry(node.entry)
+              ? [
+                  renderStorageClassButtonHtml(
+                    escapedPath,
+                    storageClassAction.title,
+                    storageClassAction.disabled,
+                  ),
+                  `<button class="icon-btn icon-btn-sm tree-delete-btn" type="button" data-delete-path="${escapedPath}" data-delete-kind="file">`,
+                  `<i data-lucide="trash-2"></i>`,
+                  `</button>`,
+                ]
+              : []),
+          ]),
       `</div>`,
       `</li>`,
     ].join("");
@@ -515,7 +546,9 @@ function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<st
   const statusTooltip = deriveDirectoryStatusTooltip(node);
   const checked = deriveDirectoryChecked(node, checkedLeafPaths, mode) ? " checked" : "";
   const disabled = isDirectoryCheckboxDisabled(node, mode) ? " disabled" : "";
-  const childrenHtml = node.children.map((child) => renderNode(child, mode, checkedLeafPaths, versionCounts)).join("");
+  const childrenHtml = node.children
+    .map((child) => renderNode(child, mode, checkedLeafPaths, versionCounts))
+    .join("");
 
   const restoreEntry: FileEntry = node.entry ?? {
     path: node.path,
@@ -538,14 +571,20 @@ function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<st
     `</button>`,
     ...(mode === "bin" ? [renderBinLifecycleHtml(restoreEntry)] : []),
     ...(mode === "bin"
-      ? [createRestoreButtonHtml(escapedPath, escapeHtml(restoreEntry.binKey ?? ""), encodeRestoreEntry(restoreEntry))]
+      ? [
+          createRestoreButtonHtml(
+            escapedPath,
+            escapeHtml(restoreEntry.binKey ?? ""),
+            encodeRestoreEntry(restoreEntry),
+          ),
+        ]
       : []),
     ...(mode === "live" && canMutateLiveDirectoryNode(node)
       ? [
-        `<button class="icon-btn icon-btn-sm tree-delete-btn" type="button" data-delete-path="${escapedPath}" data-delete-kind="directory">`,
-        `<i data-lucide="trash-2"></i>`,
-        `</button>`,
-      ]
+          `<button class="icon-btn icon-btn-sm tree-delete-btn" type="button" data-delete-path="${escapedPath}" data-delete-kind="directory">`,
+          `<i data-lucide="trash-2"></i>`,
+          `</button>`,
+        ]
       : []),
     `</div>`,
     `<ul class="tree-branch">`,
@@ -557,7 +596,12 @@ function renderNode(node: TreeNode, mode: FileTreeMode, checkedLeafPaths: Set<st
 
 let optionsForRender: Pick<FileTreeOptions, "getStorageClassActionState"> | null = null;
 
-function renderTreeHtml(roots: TreeNode[], mode: FileTreeMode, checkedLeafPaths: Set<string>, versionCounts?: Map<string, number>): string {
+function renderTreeHtml(
+  roots: TreeNode[],
+  mode: FileTreeMode,
+  checkedLeafPaths: Set<string>,
+  versionCounts?: Map<string, number>,
+): string {
   return roots.map((node) => renderNode(node, mode, checkedLeafPaths, versionCounts)).join("");
 }
 
@@ -573,7 +617,7 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
     emptyStateEl.hidden = false;
     treeEl.hidden = true;
     treeEl.innerHTML = "";
-    return { destroy() {} };
+    return { destroy: () => undefined };
   }
 
   // Virtual scrolling for large trees
@@ -608,7 +652,7 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
     e.stopPropagation();
     const path = btn.dataset.revealPath;
     if (path && options.onReveal) {
-      options.onReveal(path);
+      void options.onReveal(path);
     }
   };
   treeEl.addEventListener("click", handleRevealClick);
@@ -620,7 +664,7 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
     const path = btn.dataset.deletePath;
     const kind = btn.dataset.deleteKind;
     if (path && (kind === "file" || kind === "directory") && options.onDelete) {
-      options.onDelete({ path, kind });
+      void options.onDelete({ path, kind });
     }
   };
   treeEl.addEventListener("click", handleDeleteClick);
@@ -645,7 +689,7 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
     const path = btn.dataset.storageClassPath;
     if (path && options.onStorageClass) {
       const entry = entries.find((entry) => entry.path === path);
-      options.onStorageClass(path, entry?.storageClass ?? null);
+      void options.onStorageClass(path, entry?.storageClass ?? null);
     }
   };
   treeEl.addEventListener("click", handleStorageClassClick);
@@ -658,7 +702,7 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
     if (path && options.onResolveConflict) {
       const entry = entries.find((candidate) => candidate.path === path);
       if (entry) {
-        options.onResolveConflict(entry);
+        void options.onResolveConflict(entry);
       }
     }
   };
@@ -672,7 +716,7 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
     if (path && options.onViewVersions) {
       const entry = entries.find((candidate) => candidate.path === path);
       if (entry) {
-        options.onViewVersions(entry);
+        void options.onViewVersions(entry);
       }
     }
   };
@@ -687,9 +731,7 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
   // Process deepest first by reversing document order (which is top-down)
   dirItems.reverse();
   for (const dirItem of dirItems) {
-    const parentCheck = dirItem.querySelector<HTMLInputElement>(
-      ":scope > .tree-row > .tree-check",
-    );
+    const parentCheck = dirItem.querySelector<HTMLInputElement>(":scope > .tree-row > .tree-check");
     if (!parentCheck) continue;
     const childChecks = Array.from(
       dirItem.querySelectorAll<HTMLInputElement>(
@@ -698,9 +740,7 @@ export function renderFileTree(options: FileTreeOptions): FileTreeHandle {
     );
     if (childChecks.length === 0) continue;
     const allChecked = childChecks.every((c) => c.checked && !c.indeterminate);
-    const noneChecked = childChecks.every(
-      (c) => !c.checked && !c.indeterminate,
-    );
+    const noneChecked = childChecks.every((c) => !c.checked && !c.indeterminate);
     if (allChecked) {
       parentCheck.checked = true;
       parentCheck.indeterminate = false;

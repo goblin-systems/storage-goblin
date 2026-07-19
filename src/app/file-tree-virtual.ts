@@ -1,9 +1,5 @@
 import { createIcon } from "@goblin-systems/goblin-design-system";
-import type {
-  FileEntry,
-  FileTreeHandle,
-  FileTreeOptions,
-} from "./file-tree";
+import type { FileEntry, FileTreeHandle, FileTreeOptions } from "./file-tree";
 import {
   buildTree,
   canMutateLiveFileEntry,
@@ -55,17 +51,21 @@ interface VirtualTreeState {
   rowHeight: number;
   renderedRange: { start: number; end: number };
   onChange?: (checkedPaths: string[]) => void;
-  onReveal?: (path: string) => void;
-  onDelete?: (target: { path: string; kind: "file" | "directory" }) => void;
-  onRestore?: (entry: FileEntry) => void;
-  onStorageClass?: (path: string, currentStorageClass: string | null) => void;
-  onResolveConflict?: (entry: FileEntry) => void;
-  onViewVersions?: (entry: FileEntry) => void;
+  onReveal?: (path: string) => void | Promise<void>;
+  onDelete?: (target: { path: string; kind: "file" | "directory" }) => void | Promise<void>;
+  onRestore?: (entry: FileEntry) => void | Promise<void>;
+  onStorageClass?: (path: string, currentStorageClass: string | null) => void | Promise<void>;
+  onResolveConflict?: (entry: FileEntry) => void | Promise<void>;
+  onViewVersions?: (entry: FileEntry) => void | Promise<void>;
   versionCounts?: Map<string, number>;
   mode: "live" | "bin";
 }
 
-function getInitialCheckedPaths(entries: FileEntry[], mode: "live" | "bin", provided?: string[]): Set<string> {
+function getInitialCheckedPaths(
+  entries: FileEntry[],
+  mode: "live" | "bin",
+  provided?: string[],
+): Set<string> {
   if (mode === "bin") {
     return new Set(provided ?? []);
   }
@@ -304,7 +304,11 @@ function getCheckedPathsForCallback(state: VirtualTreeState): string[] {
 // Row element creation
 // ---------------------------------------------------------------------------
 
-function createRowElement(row: FlatRow, mode: "live" | "bin", versionCounts?: Map<string, number>): HTMLElement {
+function createRowElement(
+  row: FlatRow,
+  mode: "live" | "bin",
+  versionCounts?: Map<string, number>,
+): HTMLElement {
   // .vtree-row container
   const vtreeRow = document.createElement("div");
   vtreeRow.className = "vtree-row";
@@ -320,9 +324,10 @@ function createRowElement(row: FlatRow, mode: "live" | "bin", versionCounts?: Ma
   // Status indicator
   const statusIndicator = document.createElement("span");
   statusIndicator.className = `status-indicator ${row.statusClass}`;
-  const statusTooltip = row.isDirectory
-    ? deriveDirectoryStatusTooltip(row.node)
-    : getStatusTooltip(row.node.entry!.status);
+  const statusTooltip =
+    row.isDirectory || !row.node.entry
+      ? deriveDirectoryStatusTooltip(row.node)
+      : getStatusTooltip(row.node.entry.status);
   statusIndicator.setAttribute("title", statusTooltip);
   statusIndicator.setAttribute("aria-label", statusTooltip);
   statusIndicator.setAttribute("role", "img");
@@ -347,7 +352,10 @@ function createRowElement(row: FlatRow, mode: "live" | "bin", versionCounts?: Ma
     checkbox.indeterminate = false;
   }
   // Disable checkbox for non-destructive review/conflict states and bin mode
-  if (row.isDirectory && (row.node.entry?.status === "conflict" || row.node.entry?.status === "review-required")) {
+  if (
+    row.isDirectory &&
+    (row.node.entry?.status === "conflict" || row.node.entry?.status === "review-required")
+  ) {
     checkbox.disabled = true;
   }
   if (!row.isDirectory && row.node.entry && isEntryCheckboxDisabled(row.node.entry, mode)) {
@@ -449,7 +457,12 @@ function createRowElement(row: FlatRow, mode: "live" | "bin", versionCounts?: Ma
   }
 
   // Delete button for file rows only in live mode
-  if (!row.isDirectory && mode === "live" && row.node.entry && canMutateLiveFileEntry(row.node.entry)) {
+  if (
+    !row.isDirectory &&
+    mode === "live" &&
+    row.node.entry &&
+    canMutateLiveFileEntry(row.node.entry)
+  ) {
     const deleteBtn = document.createElement("button");
     deleteBtn.className = "icon-btn icon-btn-sm tree-delete-btn";
     deleteBtn.type = "button";
@@ -499,12 +512,17 @@ function createRowElement(row: FlatRow, mode: "live" | "bin", versionCounts?: Ma
     restoreBtn.type = "button";
     restoreBtn.setAttribute("data-restore-path", row.node.path);
     restoreBtn.setAttribute("data-restore-bin-key", row.node.entry?.binKey ?? "");
-    restoreBtn.setAttribute("data-restore-entry", JSON.stringify(row.node.entry ?? {
-      path: row.node.path,
-      kind: "directory",
-      status: "deleted",
-      hasLocalCopy: false,
-    }));
+    restoreBtn.setAttribute(
+      "data-restore-entry",
+      JSON.stringify(
+        row.node.entry ?? {
+          path: row.node.path,
+          kind: "directory",
+          status: "deleted",
+          hasLocalCopy: false,
+        },
+      ),
+    );
     restoreBtn.setAttribute("aria-busy", "false");
 
     const restoreSpinner = document.createElement("span");
@@ -527,9 +545,7 @@ function createRowElement(row: FlatRow, mode: "live" | "bin", versionCounts?: Ma
 // Public API
 // ---------------------------------------------------------------------------
 
-export function renderFileTreeVirtual(
-  options: FileTreeOptions,
-): FileTreeHandle {
+export function renderFileTreeVirtual(options: FileTreeOptions): FileTreeHandle {
   const {
     treeEl,
     emptyStateEl,
@@ -558,7 +574,10 @@ export function renderFileTreeVirtual(
   const checkedPaths = getInitialCheckedPaths(entries, mode, providedCheckedPaths);
 
   // Create virtual container
-  const container = treeEl.parentElement!;
+  const container = treeEl.parentElement;
+  if (!container) {
+    throw new Error("Virtual file tree requires the tree element to have a parent.");
+  }
   const vtreeEl = document.createElement("div");
   vtreeEl.className = "vtree tree--dot-left";
   container.appendChild(vtreeEl);
@@ -626,10 +645,7 @@ export function renderFileTreeVirtual(
     );
 
     // Only re-render if range actually changed
-    if (
-      range.start === state.renderedRange.start &&
-      range.end === state.renderedRange.end
-    ) {
+    if (range.start === state.renderedRange.start && range.end === state.renderedRange.end) {
       return;
     }
 
@@ -665,8 +681,7 @@ export function renderFileTreeVirtual(
 
   // Update checkbox states for currently visible rows
   function updateVisibleCheckboxes(): void {
-    const checkboxes =
-      viewportEl.querySelectorAll<HTMLInputElement>(".tree-check");
+    const checkboxes = viewportEl.querySelectorAll<HTMLInputElement>(".tree-check");
     for (const cb of checkboxes) {
       const vtreeRow = cb.closest(".vtree-row");
       if (!vtreeRow) continue;
@@ -697,11 +712,13 @@ export function renderFileTreeVirtual(
     const storageClassBtn = target.closest(".tree-storage-class-btn");
     if (storageClassBtn) {
       e.stopPropagation();
-      const storageClassPath = (storageClassBtn as HTMLElement).getAttribute("data-storage-class-path");
+      const storageClassPath = (storageClassBtn as HTMLElement).getAttribute(
+        "data-storage-class-path",
+      );
       if (storageClassPath && state.onStorageClass) {
         const node = state.nodesByPath.get(storageClassPath);
         const currentStorageClass = node?.entry?.storageClass ?? null;
-        state.onStorageClass(storageClassPath, currentStorageClass);
+        void state.onStorageClass(storageClassPath, currentStorageClass);
       }
       return;
     }
@@ -711,7 +728,7 @@ export function renderFileTreeVirtual(
       e.stopPropagation();
       const revealPath = (revealBtn as HTMLElement).getAttribute("data-reveal-path");
       if (revealPath && state.onReveal) {
-        state.onReveal(revealPath);
+        void state.onReveal(revealPath);
       }
       return;
     }
@@ -723,7 +740,7 @@ export function renderFileTreeVirtual(
       const deletePath = (deleteBtn as HTMLElement).getAttribute("data-delete-path");
       const deleteKind = (deleteBtn as HTMLElement).getAttribute("data-delete-kind");
       if (deletePath && (deleteKind === "file" || deleteKind === "directory") && state.onDelete) {
-        state.onDelete({ path: deletePath, kind: deleteKind });
+        void state.onDelete({ path: deletePath, kind: deleteKind });
       }
       return;
     }
@@ -734,7 +751,9 @@ export function renderFileTreeVirtual(
       const restorePath = (restoreBtn as HTMLElement).getAttribute("data-restore-path");
       const restoreEntry = (restoreBtn as HTMLElement).getAttribute("data-restore-entry");
       if (restorePath && restoreEntry && state.onRestore) {
-        runRestoreAction(restoreBtn as HTMLButtonElement, () => state.onRestore?.(JSON.parse(restoreEntry) as FileEntry));
+        runRestoreAction(restoreBtn as HTMLButtonElement, () =>
+          state.onRestore?.(JSON.parse(restoreEntry) as FileEntry),
+        );
       }
       return;
     }
@@ -746,7 +765,7 @@ export function renderFileTreeVirtual(
       if (resolvePath && state.onResolveConflict) {
         const node = state.nodesByPath.get(resolvePath);
         if (node?.entry) {
-          state.onResolveConflict(node.entry as FileEntry);
+          void state.onResolveConflict(node.entry);
         }
       }
       return;
@@ -759,7 +778,7 @@ export function renderFileTreeVirtual(
       if (versionsPath && state.onViewVersions) {
         const node = state.nodesByPath.get(versionsPath);
         if (node?.entry) {
-          state.onViewVersions(node.entry as FileEntry);
+          void state.onViewVersions(node.entry);
         }
       }
       return;
@@ -807,9 +826,8 @@ export function renderFileTreeVirtual(
     const isChecked = checkbox.checked;
 
     if (isDir) {
-      const selectablePaths = state.mode === "bin"
-        ? collectSelectablePaths(node)
-        : collectLeafPaths(node);
+      const selectablePaths =
+        state.mode === "bin" ? collectSelectablePaths(node) : collectLeafPaths(node);
       for (const leafPath of selectablePaths) {
         if (isChecked) {
           state.checkedPaths.add(leafPath);

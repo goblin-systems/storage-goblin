@@ -87,9 +87,7 @@ describe("renderFileTree", () => {
   });
 
   it("hides empty state and shows tree when entries exist", () => {
-    const entries: FileEntry[] = [
-      fileEntry({ path: "readme.txt" }),
-    ];
+    const entries: FileEntry[] = [fileEntry({ path: "readme.txt" })];
 
     renderFileTree({ treeEl, emptyStateEl, entries });
 
@@ -120,9 +118,7 @@ describe("renderFileTree", () => {
   });
 
   it("renders nested directory structure from path segments", () => {
-    const entries: FileEntry[] = [
-      fileEntry({ path: "photos/vacation/img.jpg" }),
-    ];
+    const entries: FileEntry[] = [fileEntry({ path: "photos/vacation/img.jpg" })];
 
     renderFileTree({ treeEl, emptyStateEl, entries });
 
@@ -152,9 +148,7 @@ describe("renderFileTree", () => {
   });
 
   it("renders explicit empty directories", () => {
-    const entries: FileEntry[] = [
-      directoryEntry({ path: "photos/empty" }),
-    ];
+    const entries: FileEntry[] = [directoryEntry({ path: "photos/empty" })];
 
     renderFileTree({ treeEl, emptyStateEl, entries });
 
@@ -199,9 +193,7 @@ describe("renderFileTree", () => {
     renderFileTree({ treeEl, emptyStateEl, entries });
 
     const indicator = (path: string) =>
-      treeEl
-        .querySelector(`.tree-item[data-value="${path}"]`)!
-        .querySelector(".status-indicator")!;
+      treeEl.querySelector(`.tree-item[data-value="${path}"]`)!.querySelector(".status-indicator")!;
 
     expect(indicator("synced.txt").classList.contains("connected")).toBe(true);
     expect(indicator("local.txt").classList.contains("untested")).toBe(true);
@@ -237,7 +229,9 @@ describe("renderFileTree", () => {
     expect(indicator("conflict.txt").getAttribute("title")).toBe(getStatusTooltip("conflict"));
     expect(indicator("glacier.txt").getAttribute("title")).toBe(getStatusTooltip("glacier"));
     expect(indicator("deleted.txt").getAttribute("title")).toBe(getStatusTooltip("deleted"));
-    expect(indicator("deleted.txt").querySelector(".status-dot")?.getAttribute("aria-hidden")).toBe("true");
+    expect(indicator("deleted.txt").querySelector(".status-dot")?.getAttribute("aria-hidden")).toBe(
+      "true",
+    );
   });
 
   it("derives directory status from leaf descendants", () => {
@@ -298,25 +292,25 @@ describe("renderFileTree", () => {
       fileEntry({ path: "conflict/bad.txt", status: "conflict" }),
       fileEntry({ path: "conflict/cold.txt", status: "glacier", hasLocalCopy: false }),
     ]);
-    expect(deriveDirectoryStatus(conflictTree[0]!)).toBe("error");
+    expect(deriveDirectoryStatus(conflictTree[0])).toBe("error");
 
     const syncedTree = buildTree([
       fileEntry({ path: "synced/a.txt" }),
       fileEntry({ path: "synced/b.txt" }),
     ]);
-    expect(deriveDirectoryStatus(syncedTree[0]!)).toBe("connected");
+    expect(deriveDirectoryStatus(syncedTree[0])).toBe("connected");
 
     const glacierTree = buildTree([
       fileEntry({ path: "glacier/a.txt" }),
       fileEntry({ path: "glacier/b.txt", status: "glacier", hasLocalCopy: false }),
     ]);
-    expect(deriveDirectoryStatus(glacierTree[0]!)).toBe("glacier");
+    expect(deriveDirectoryStatus(glacierTree[0])).toBe("glacier");
 
     const unsyncedTree = buildTree([
       fileEntry({ path: "unsynced/local.txt", status: "local-only" }),
       fileEntry({ path: "unsynced/remote.txt", status: "remote-only", hasLocalCopy: false }),
     ]);
-    expect(deriveDirectoryStatus(unsyncedTree[0]!)).toBe("untested");
+    expect(deriveDirectoryStatus(unsyncedTree[0])).toBe("untested");
   });
 
   it("derives concise directory tooltip copy from descendant statuses", () => {
@@ -324,25 +318,25 @@ describe("renderFileTree", () => {
       fileEntry({ path: "conflict/ok.txt" }),
       fileEntry({ path: "conflict/bad.txt", status: "conflict" }),
     ]);
-    expect(deriveDirectoryStatusTooltip(conflictTree[0]!)).toBe("Contains sync conflicts");
+    expect(deriveDirectoryStatusTooltip(conflictTree[0])).toBe("Contains sync conflicts");
 
     const deletedTree = buildTree([
       fileEntry({ path: "deleted/a.txt", status: "deleted", hasLocalCopy: false, binKey: "bin-a" }),
       fileEntry({ path: "deleted/b.txt", status: "deleted", hasLocalCopy: false, binKey: "bin-b" }),
     ]);
-    expect(deriveDirectoryStatusTooltip(deletedTree[0]!)).toBe("All items deleted");
+    expect(deriveDirectoryStatusTooltip(deletedTree[0])).toBe("All items deleted");
 
     const glacierTree = buildTree([
       fileEntry({ path: "glacier/a.txt" }),
       fileEntry({ path: "glacier/b.txt", status: "glacier", hasLocalCopy: false }),
     ]);
-    expect(deriveDirectoryStatusTooltip(glacierTree[0]!)).toBe("Contains archived items");
+    expect(deriveDirectoryStatusTooltip(glacierTree[0])).toBe("Contains archived items");
 
     const reviewTree = buildTree([
       fileEntry({ path: "review/a.txt", status: "review-required", hasLocalCopy: false }),
       fileEntry({ path: "review/b.txt" }),
     ]);
-    expect(deriveDirectoryStatusTooltip(reviewTree[0]!)).toBe("Contains items requiring review");
+    expect(deriveDirectoryStatusTooltip(reviewTree[0])).toBe("Contains items requiring review");
   });
 
   it("disables glacier file checkboxes", () => {
@@ -360,9 +354,7 @@ describe("renderFileTree", () => {
   });
 
   it("disables conflict file checkboxes", () => {
-    const entries: FileEntry[] = [
-      fileEntry({ path: "conflict.txt", status: "conflict" }),
-    ];
+    const entries: FileEntry[] = [fileEntry({ path: "conflict.txt", status: "conflict" })];
 
     renderFileTree({ treeEl, emptyStateEl, entries });
 
@@ -371,7 +363,7 @@ describe("renderFileTree", () => {
       .querySelector<HTMLInputElement>(".tree-check")!;
 
     expect(checkbox.disabled).toBe(true);
-    expect(isEntryCheckboxDisabled(entries[0]!, "live")).toBe(true);
+    expect(isEntryCheckboxDisabled(entries[0], "live")).toBe(true);
   });
 
   it("renders review-required entries safely and disables their checkboxes", () => {
@@ -385,17 +377,18 @@ describe("renderFileTree", () => {
     const fileCheckbox = treeEl
       .querySelector('.tree-item[data-value="review.txt"]')!
       .querySelector<HTMLInputElement>(".tree-check")!;
-    const dirIndicator = treeEl
-      .querySelector('.tree-item[data-value="review-folder"] .status-indicator')!;
+    const dirIndicator = treeEl.querySelector(
+      '.tree-item[data-value="review-folder"] .status-indicator',
+    )!;
 
     expect(fileCheckbox.disabled).toBe(true);
     expect(fileCheckbox.checked).toBe(false);
-    expect(fileCheckbox.closest('.tree-item')?.querySelector('.tree-resolve-btn')).toBeNull();
-    expect(fileCheckbox.closest('.tree-item')?.querySelector('.tree-storage-class-btn')).toBeNull();
-    expect(fileCheckbox.closest('.tree-item')?.querySelector('.tree-delete-btn')).toBeNull();
+    expect(fileCheckbox.closest(".tree-item")?.querySelector(".tree-resolve-btn")).toBeNull();
+    expect(fileCheckbox.closest(".tree-item")?.querySelector(".tree-storage-class-btn")).toBeNull();
+    expect(fileCheckbox.closest(".tree-item")?.querySelector(".tree-delete-btn")).toBeNull();
     expect(dirIndicator.getAttribute("title")).toBe("Contains items requiring review");
-    expect(isEntryCheckboxDisabled(entries[0]!, "live")).toBe(true);
-    expect(canMutateLiveFileEntry(entries[0]!)).toBe(false);
+    expect(isEntryCheckboxDisabled(entries[0], "live")).toBe(true);
+    expect(canMutateLiveFileEntry(entries[0])).toBe(false);
   });
 
   it("preserves live mutating actions for non-review file rows", () => {
@@ -404,8 +397,8 @@ describe("renderFileTree", () => {
     renderFileTree({ treeEl, emptyStateEl, entries: [entry] });
 
     const row = treeEl.querySelector('.tree-item[data-value="normal.txt"]');
-    expect(row?.querySelector('.tree-storage-class-btn')).not.toBeNull();
-    expect(row?.querySelector('.tree-delete-btn')).not.toBeNull();
+    expect(row?.querySelector(".tree-storage-class-btn")).not.toBeNull();
+    expect(row?.querySelector(".tree-delete-btn")).not.toBeNull();
     expect(canMutateLiveFileEntry(entry)).toBe(true);
   });
 
@@ -422,7 +415,9 @@ describe("renderFileTree", () => {
       }),
     });
 
-    const button = treeEl.querySelector<HTMLButtonElement>('.tree-item[data-value="normal.txt"] .tree-storage-class-btn');
+    const button = treeEl.querySelector<HTMLButtonElement>(
+      '.tree-item[data-value="normal.txt"] .tree-storage-class-btn',
+    );
     expect(button?.disabled).toBe(true);
     expect(button?.title).toBe("Unsupported for this provider.");
   });
@@ -458,17 +453,37 @@ describe("renderFileTree", () => {
 
   it("renders resolve button for conflict file rows only", () => {
     const entries: FileEntry[] = [
-      fileEntry({ path: "conflict.txt", status: "conflict", localKind: "file", remoteKind: "file" }),
-      fileEntry({ path: "review.txt", status: "review-required", hasLocalCopy: false, localKind: "file", remoteKind: "file" }),
-      fileEntry({ path: "kind-mismatch.txt", status: "conflict", localKind: "file", remoteKind: "directory" }),
+      fileEntry({
+        path: "conflict.txt",
+        status: "conflict",
+        localKind: "file",
+        remoteKind: "file",
+      }),
+      fileEntry({
+        path: "review.txt",
+        status: "review-required",
+        hasLocalCopy: false,
+        localKind: "file",
+        remoteKind: "file",
+      }),
+      fileEntry({
+        path: "kind-mismatch.txt",
+        status: "conflict",
+        localKind: "file",
+        remoteKind: "directory",
+      }),
       fileEntry({ path: "ok.txt", status: "synced" }),
       fileEntry({ path: "folder/file.txt", status: "synced" }),
     ];
 
     renderFileTree({ treeEl, emptyStateEl, entries });
 
-    const conflictResolveButton = treeEl.querySelector<HTMLButtonElement>('.tree-item[data-value="conflict.txt"] .tree-resolve-btn');
-    const reviewResolveButton = treeEl.querySelector<HTMLButtonElement>('.tree-item[data-value="review.txt"] .tree-resolve-btn');
+    const conflictResolveButton = treeEl.querySelector<HTMLButtonElement>(
+      '.tree-item[data-value="conflict.txt"] .tree-resolve-btn',
+    );
+    const reviewResolveButton = treeEl.querySelector<HTMLButtonElement>(
+      '.tree-item[data-value="review.txt"] .tree-resolve-btn',
+    );
 
     expect(conflictResolveButton).not.toBeNull();
     expect(conflictResolveButton?.classList.contains("icon-btn")).toBe(true);
@@ -476,16 +491,18 @@ describe("renderFileTree", () => {
     expect(conflictResolveButton?.classList.contains("secondary-btn")).toBe(false);
     expect(conflictResolveButton?.getAttribute("title")).toBe("Resolve file conflict");
     expect(conflictResolveButton?.getAttribute("aria-label")).toBe("Resolve file conflict");
-    expect(conflictResolveButton?.querySelector("[data-lucide=\"triangle-alert\"]")).not.toBeNull();
+    expect(conflictResolveButton?.querySelector('[data-lucide="triangle-alert"]')).not.toBeNull();
     expect(conflictResolveButton?.querySelector(".tree-action-label")?.textContent).toBe("Resolve");
     expect(conflictResolveButton?.childElementCount).toBe(2);
     expect(reviewResolveButton).not.toBeNull();
-    expect(treeEl.querySelector('.tree-item[data-value="kind-mismatch.txt"] .tree-resolve-btn')).toBeNull();
+    expect(
+      treeEl.querySelector('.tree-item[data-value="kind-mismatch.txt"] .tree-resolve-btn'),
+    ).toBeNull();
     expect(treeEl.querySelector('.tree-item[data-value="ok.txt"] .tree-resolve-btn')).toBeNull();
     expect(treeEl.querySelector('.tree-item[data-value="folder"] .tree-resolve-btn')).toBeNull();
-    expect(isResolvableConflictFileEntry(entries[0]!)).toBe(true);
-    expect(isResolvableConflictFileEntry(entries[1]!)).toBe(true);
-    expect(isResolvableConflictFileEntry(entries[2]!)).toBe(false);
+    expect(isResolvableConflictFileEntry(entries[0])).toBe(true);
+    expect(isResolvableConflictFileEntry(entries[1])).toBe(true);
+    expect(isResolvableConflictFileEntry(entries[2])).toBe(false);
   });
 
   it("clicking resolve button calls onResolveConflict with the entry", () => {
@@ -542,12 +559,19 @@ describe("renderFileTree", () => {
 
   it("renders restore button instead of delete button in bin mode", () => {
     const entries: FileEntry[] = [
-      fileEntry({ path: "deleted.txt", status: "deleted", hasLocalCopy: false, binKey: "opaque-bin-key" }),
+      fileEntry({
+        path: "deleted.txt",
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: "opaque-bin-key",
+      }),
     ];
 
     renderFileTree({ treeEl, emptyStateEl, entries, mode: "bin" });
 
-    const restoreBtn = treeEl.querySelector<HTMLButtonElement>('.tree-item[data-value="deleted.txt"] .tree-restore-btn');
+    const restoreBtn = treeEl.querySelector<HTMLButtonElement>(
+      '.tree-item[data-value="deleted.txt"] .tree-restore-btn',
+    );
     expect(restoreBtn).not.toBeNull();
     expect(restoreBtn?.textContent).toBe("Restore");
     expect(restoreBtn?.dataset.restoreBinKey).toBe("opaque-bin-key");
@@ -557,12 +581,19 @@ describe("renderFileTree", () => {
 
   it("clicking restore button calls onRestore with the full entry", () => {
     const onRestore = vi.fn();
-    const entry = fileEntry({ path: "photos/img.jpg", status: "deleted", hasLocalCopy: false, binKey: "opaque-bin-key" });
+    const entry = fileEntry({
+      path: "photos/img.jpg",
+      status: "deleted",
+      hasLocalCopy: false,
+      binKey: "opaque-bin-key",
+    });
     const entries: FileEntry[] = [entry];
 
     renderFileTree({ treeEl, emptyStateEl, entries, mode: "bin", onRestore });
 
-    const restoreBtn = treeEl.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/img.jpg"] .tree-restore-btn');
+    const restoreBtn = treeEl.querySelector<HTMLButtonElement>(
+      '.tree-item[data-value="photos/img.jpg"] .tree-restore-btn',
+    );
     expect(restoreBtn).not.toBeNull();
     restoreBtn!.click();
 
@@ -597,18 +628,30 @@ describe("renderFileTree", () => {
       emptyStateEl,
       mode: "bin",
       entries: [
-        directoryEntry({ path: "photos", status: "deleted", hasLocalCopy: false, deletedFrom: "object-versioning" }),
+        directoryEntry({
+          path: "photos",
+          status: "deleted",
+          hasLocalCopy: false,
+          deletedFrom: "object-versioning",
+        }),
       ],
     });
 
-    expect(treeEl.querySelector('.tree-item[data-value="photos"] .tree-restore-btn')).not.toBeNull();
+    expect(
+      treeEl.querySelector('.tree-item[data-value="photos"] .tree-restore-btn'),
+    ).not.toBeNull();
   });
 
   it("shows restore button loading state while restore is pending", async () => {
     const restore = createDeferred<void>();
     const onRestore = vi.fn(() => restore.promise);
     const entries: FileEntry[] = [
-      fileEntry({ path: "photos/img.jpg", status: "deleted", hasLocalCopy: false, binKey: "opaque-bin-key" }),
+      fileEntry({
+        path: "photos/img.jpg",
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: "opaque-bin-key",
+      }),
     ];
 
     renderFileTree({ treeEl, emptyStateEl, entries, mode: "bin", onRestore });
@@ -641,7 +684,12 @@ describe("renderFileTree", () => {
     const restore = createDeferred<void>();
     const onRestore = vi.fn(() => restore.promise.catch(() => undefined));
     const entries: FileEntry[] = [
-      fileEntry({ path: "photos/img.jpg", status: "deleted", hasLocalCopy: false, binKey: "opaque-bin-key" }),
+      fileEntry({
+        path: "photos/img.jpg",
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: "opaque-bin-key",
+      }),
     ];
 
     renderFileTree({ treeEl, emptyStateEl, entries, mode: "bin", onRestore });
@@ -660,9 +708,7 @@ describe("renderFileTree", () => {
   });
 
   it("calls applyIcons after rendering", () => {
-    const entries: FileEntry[] = [
-      fileEntry({ path: "file.txt" }),
-    ];
+    const entries: FileEntry[] = [fileEntry({ path: "file.txt" })];
 
     renderFileTree({ treeEl, emptyStateEl, entries });
 
@@ -671,9 +717,7 @@ describe("renderFileTree", () => {
 
   it("calls bindCheckboxTree with the tree element", () => {
     const onChange = vi.fn();
-    const entries: FileEntry[] = [
-      fileEntry({ path: "file.txt" }),
-    ];
+    const entries: FileEntry[] = [fileEntry({ path: "file.txt" })];
 
     renderFileTree({ treeEl, emptyStateEl, entries, onChange });
 
@@ -693,9 +737,7 @@ describe("renderFileTree", () => {
       destroy: mockDestroy,
     });
 
-    const entries: FileEntry[] = [
-      fileEntry({ path: "file.txt" }),
-    ];
+    const entries: FileEntry[] = [fileEntry({ path: "file.txt" })];
 
     const handle = renderFileTree({ treeEl, emptyStateEl, entries });
     handle.destroy();
@@ -705,21 +747,19 @@ describe("renderFileTree", () => {
 
   describe("delete button", () => {
     it("renders for file rows with correct data-delete-path", () => {
-      const entries: FileEntry[] = [
-        fileEntry({ path: "readme.txt" }),
-      ];
+      const entries: FileEntry[] = [fileEntry({ path: "readme.txt" })];
 
       renderFileTree({ treeEl, emptyStateEl, entries });
 
-      const deleteBtn = treeEl.querySelector<HTMLButtonElement>('.tree-item[data-value="readme.txt"] .tree-delete-btn');
+      const deleteBtn = treeEl.querySelector<HTMLButtonElement>(
+        '.tree-item[data-value="readme.txt"] .tree-delete-btn',
+      );
       expect(deleteBtn).not.toBeNull();
       expect(deleteBtn!.getAttribute("data-delete-path")).toBe("readme.txt");
     });
 
     it("renders for safe directory rows with correct data-delete attributes", () => {
-      const entries: FileEntry[] = [
-        fileEntry({ path: "docs/file.txt" }),
-      ];
+      const entries: FileEntry[] = [fileEntry({ path: "docs/file.txt" })];
 
       renderFileTree({ treeEl, emptyStateEl, entries });
 
@@ -732,12 +772,16 @@ describe("renderFileTree", () => {
       expect(deleteBtn).not.toBeNull();
       expect(deleteBtn?.dataset.deletePath).toBe("docs");
       expect(deleteBtn?.dataset.deleteKind).toBe("directory");
-      expect(canMutateLiveDirectoryNode(buildTree(entries)[0]!)).toBe(true);
+      expect(canMutateLiveDirectoryNode(buildTree(entries)[0])).toBe(true);
     });
 
     it("does NOT render for blocked directory rows", () => {
       const entries: FileEntry[] = [
-        fileEntry({ path: "review-folder/file.txt", status: "review-required", hasLocalCopy: false }),
+        fileEntry({
+          path: "review-folder/file.txt",
+          status: "review-required",
+          hasLocalCopy: false,
+        }),
       ];
 
       renderFileTree({ treeEl, emptyStateEl, entries });
@@ -748,13 +792,13 @@ describe("renderFileTree", () => {
 
     it("clicking delete button calls onDelete with correct path", () => {
       const onDelete = vi.fn();
-      const entries: FileEntry[] = [
-        fileEntry({ path: "photos/img.jpg" }),
-      ];
+      const entries: FileEntry[] = [fileEntry({ path: "photos/img.jpg" })];
 
       renderFileTree({ treeEl, emptyStateEl, entries, onDelete });
 
-      const deleteBtn = treeEl.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/img.jpg"] .tree-delete-btn');
+      const deleteBtn = treeEl.querySelector<HTMLButtonElement>(
+        '.tree-item[data-value="photos/img.jpg"] .tree-delete-btn',
+      );
       expect(deleteBtn).not.toBeNull();
       deleteBtn!.click();
 
@@ -764,13 +808,13 @@ describe("renderFileTree", () => {
 
     it("clicking directory delete button calls onDelete with directory target", () => {
       const onDelete = vi.fn();
-      const entries: FileEntry[] = [
-        fileEntry({ path: "photos/img.jpg" }),
-      ];
+      const entries: FileEntry[] = [fileEntry({ path: "photos/img.jpg" })];
 
       renderFileTree({ treeEl, emptyStateEl, entries, onDelete });
 
-      const deleteBtn = treeEl.querySelector<HTMLButtonElement>('.tree-item[data-value="photos"] .tree-delete-btn');
+      const deleteBtn = treeEl.querySelector<HTMLButtonElement>(
+        '.tree-item[data-value="photos"] .tree-delete-btn',
+      );
       expect(deleteBtn).not.toBeNull();
       deleteBtn!.click();
 
@@ -779,28 +823,32 @@ describe("renderFileTree", () => {
     });
 
     it("does not throw when clicking delete button without onDelete handler", () => {
-      const entries: FileEntry[] = [
-        fileEntry({ path: "file.txt" }),
-      ];
+      const entries: FileEntry[] = [fileEntry({ path: "file.txt" })];
 
       renderFileTree({ treeEl, emptyStateEl, entries });
 
-      const deleteBtn = treeEl.querySelector<HTMLButtonElement>('.tree-item[data-value="file.txt"] .tree-delete-btn');
+      const deleteBtn = treeEl.querySelector<HTMLButtonElement>(
+        '.tree-item[data-value="file.txt"] .tree-delete-btn',
+      );
       expect(deleteBtn).not.toBeNull();
-      expect(() => deleteBtn!.click()).not.toThrow();
+      expect(() => {
+        deleteBtn!.click();
+      }).not.toThrow();
     });
   });
 
   describe("reveal button", () => {
     it("renders for file and directory rows with correct data-reveal-path", () => {
-      const entries: FileEntry[] = [
-        fileEntry({ path: "docs/readme.txt" }),
-      ];
+      const entries: FileEntry[] = [fileEntry({ path: "docs/readme.txt" })];
 
       renderFileTree({ treeEl, emptyStateEl, entries });
 
-      const docsRevealBtn = treeEl.querySelector<HTMLButtonElement>('.tree-item[data-value="docs"] .tree-reveal-btn');
-      const fileRevealBtn = treeEl.querySelector<HTMLButtonElement>('.tree-item[data-value="docs/readme.txt"] .tree-reveal-btn');
+      const docsRevealBtn = treeEl.querySelector<HTMLButtonElement>(
+        '.tree-item[data-value="docs"] .tree-reveal-btn',
+      );
+      const fileRevealBtn = treeEl.querySelector<HTMLButtonElement>(
+        '.tree-item[data-value="docs/readme.txt"] .tree-reveal-btn',
+      );
 
       expect(docsRevealBtn?.dataset.revealPath).toBe("docs");
       expect(fileRevealBtn?.dataset.revealPath).toBe("docs/readme.txt");
@@ -808,9 +856,7 @@ describe("renderFileTree", () => {
 
     it("clicking reveal button calls onReveal with correct path", () => {
       const onReveal = vi.fn();
-      const entries: FileEntry[] = [
-        fileEntry({ path: "photos/img.jpg" }),
-      ];
+      const entries: FileEntry[] = [fileEntry({ path: "photos/img.jpg" })];
 
       renderFileTree({ treeEl, emptyStateEl, entries, onReveal });
 
@@ -824,16 +870,16 @@ describe("renderFileTree", () => {
 
     it("does not duplicate reveal handlers after destroy and rerender", () => {
       const onReveal = vi.fn();
-      const entries: FileEntry[] = [
-        fileEntry({ path: "photos/img.jpg" }),
-      ];
+      const entries: FileEntry[] = [fileEntry({ path: "photos/img.jpg" })];
 
       const firstHandle = renderFileTree({ treeEl, emptyStateEl, entries, onReveal });
       firstHandle.destroy();
 
       renderFileTree({ treeEl, emptyStateEl, entries, onReveal });
 
-      const revealBtn = treeEl.querySelector<HTMLButtonElement>('.tree-item[data-value="photos/img.jpg"] .tree-reveal-btn');
+      const revealBtn = treeEl.querySelector<HTMLButtonElement>(
+        '.tree-item[data-value="photos/img.jpg"] .tree-reveal-btn',
+      );
       expect(revealBtn).not.toBeNull();
       revealBtn!.click();
 

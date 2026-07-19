@@ -11,8 +11,8 @@ export interface StatusPresentation {
 const ACTIONABLE_SYNC_ERROR_SUMMARY = "Sync failed. Open Activity for details.";
 
 function normalizeLastError(lastError: string | null | undefined): string | null {
-  const trimmed = lastError?.trim();
-  return trimmed ? trimmed : null;
+  const trimmed = lastError?.trim() ?? "";
+  return trimmed === "" ? null : trimmed;
 }
 
 function isGenericSyncError(lastError: string | null | undefined): boolean {
@@ -32,24 +32,28 @@ function isGenericSyncError(lastError: string | null | undefined): boolean {
 
 export function getSyncOverviewStats(status: SyncStatus | LocationSyncStatus): SyncOverviewStats {
   const overview = "overview" in status ? status.overview : undefined;
-  const actionableChangeCount = status.plan.pendingOperationCount ?? status.pendingOperations;
   return {
-    localFiles: overview?.localFiles ?? status.comparison.localFileCount ?? status.indexedFileCount,
-    remoteFiles: overview?.remoteFiles ?? status.comparison.remoteObjectCount ?? status.remoteObjectCount,
+    localFiles: overview?.localFiles ?? status.comparison.localFileCount,
+    remoteFiles: overview?.remoteFiles ?? status.comparison.remoteObjectCount,
     inSync: overview?.inSync ?? status.comparison.exactMatchCount,
-    notInSync: overview?.notInSync
-      ?? actionableChangeCount,
+    notInSync: overview?.notInSync ?? status.plan.pendingOperationCount,
   };
 }
 
 function titleCasePhase(phase: SyncPhase): string {
   switch (phase) {
-    case "unconfigured": return "Unconfigured";
-    case "idle": return "Idle";
-    case "polling": return "Polling";
-    case "syncing": return "Syncing";
-    case "paused": return "Paused";
-    case "error": return "Error";
+    case "unconfigured":
+      return "Unconfigured";
+    case "idle":
+      return "Idle";
+    case "polling":
+      return "Polling";
+    case "syncing":
+      return "Syncing";
+    case "paused":
+      return "Paused";
+    case "error":
+      return "Error";
   }
 }
 
@@ -69,7 +73,8 @@ export function describeSyncStatus(status: SyncStatus | LocationSyncStatus): Sta
         badgeTone: "success",
         indicatorClass: "connected",
         indicatorLabel: "Sync in progress",
-        summary: "Connected. Setup is saved and the desktop app is preparing or running sync work now.",
+        summary:
+          "Connected. Setup is saved and the desktop app is preparing or running sync work now.",
       };
     case "paused":
       return {
@@ -79,9 +84,10 @@ export function describeSyncStatus(status: SyncStatus | LocationSyncStatus): Sta
         indicatorLabel: "Sync paused",
         summary: "Setup is saved, but automatic sync work is paused right now.",
       };
-    case "error":
-      {
-        const meaningfulError = isGenericSyncError(status.lastError) ? null : normalizeLastError(status.lastError);
+    case "error": {
+      const meaningfulError = isGenericSyncError(status.lastError)
+        ? null
+        : normalizeLastError(status.lastError);
 
       return {
         badgeLabel: titleCasePhase(status.phase),
@@ -90,7 +96,7 @@ export function describeSyncStatus(status: SyncStatus | LocationSyncStatus): Sta
         indicatorLabel: meaningfulError ?? "Sync failed",
         summary: meaningfulError ?? ACTIONABLE_SYNC_ERROR_SUMMARY,
       };
-      }
+    }
     case "idle":
       return {
         badgeLabel: titleCasePhase(status.phase),

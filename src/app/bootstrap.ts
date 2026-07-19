@@ -12,7 +12,13 @@ import {
 import { createNativeActivity, createUiActivity } from "./activity";
 import { createStorageGoblinClient } from "./client";
 import { createAppDom, type AppDom } from "./dom";
-import { renderFileTree, type DeleteTarget, type FileEntry, type FileTreeHandle, type FileTreeMode } from "./file-tree";
+import {
+  renderFileTree,
+  type DeleteTarget,
+  type FileEntry,
+  type FileTreeHandle,
+  type FileTreeMode,
+} from "./file-tree";
 import {
   applyStoredProfile,
   DEFAULT_REMOTE_BIN_RETENTION_DAYS,
@@ -28,7 +34,6 @@ import {
   defaultProviderCapabilities,
   describeCapabilityAvailability,
   getProviderCredentialKind,
-  getProviderCredentialLabel,
   getProviderLabel,
   isCapabilityAvailable,
   normalizeProvider,
@@ -59,67 +64,68 @@ import type {
   VersionCountEntry,
 } from "./types";
 
-type DialogId = "credentials" | "locations" | "activity" | "polling" | "debug" | "conflict" | "about";
+type DialogId =
+  "credentials" | "locations" | "activity" | "polling" | "debug" | "conflict" | "about";
 
 type SyncStatusWithLocations = SyncStatus & {
   locations?: LocationSyncStatus[];
 };
 
-type LocationViewSelection = {
+interface LocationViewSelection {
   locationId: string | null;
   mode: FileTreeMode;
-};
+}
 
-type StatusMetric = {
+interface StatusMetric {
   label: string;
   value: string;
-};
+}
 
-type FileTreeSnapshot = {
+interface FileTreeSnapshot {
   viewKey: string;
   entries: FileEntry[];
   entriesJson: string;
   versionCounts?: Map<string, number>;
   versionCountsJson?: string;
-};
+}
 
-type AsyncConfirmOptions = {
+interface AsyncConfirmOptions {
   title: string;
   message: string;
   acceptLabel: string;
   rejectLabel: string;
   variant?: "danger";
   onAccept: () => Promise<void>;
-};
+}
 
-type AsyncConfirmController = {
+interface AsyncConfirmController {
   open: (options: AsyncConfirmOptions) => Promise<boolean>;
   destroy: () => void;
-};
+}
 
 type ConflictResolution = "keep-local" | "keep-remote";
 
 type InlineCompareMode = ConflictResolutionDetails["mode"];
 
-type InlineCompareState = {
+interface InlineCompareState {
   status: "idle" | "loading" | "ready" | "error";
   mode: InlineCompareMode | null;
   details: ConflictResolutionDetails | null;
   message: string;
-};
+}
 
-type ConflictResolutionModalOptions = {
+interface ConflictResolutionModalOptions {
   locationLabel: string;
   entry: FileEntry;
   onCompare: (entry: FileEntry) => Promise<ConflictResolutionDetails>;
   onResolve: (entry: FileEntry, resolution: ConflictResolution) => Promise<void>;
-};
+}
 
-type ConflictResolutionModalController = {
+interface ConflictResolutionModalController {
   open: (options: ConflictResolutionModalOptions) => void;
   close: () => void;
   destroy: () => void;
-};
+}
 
 class HandledAsyncConfirmError extends Error {}
 
@@ -150,17 +156,6 @@ function describeRemoteBinBehavior(enabled: boolean, retentionDays: number): str
   return retentionDays === 1
     ? "Deleting a file removes the local copy immediately and moves the remote object into the remote bin for 1 day."
     : `Deleting a file removes the local copy immediately and moves the remote object into the remote bin for ${retentionDays} days.`;
-}
-
-function describeDeleteBehavior(location: SyncLocation): string {
-  const provider = location.provider;
-  if (location.objectVersioningEnabled) {
-    return provider === "aws"
-      ? "Deleting a file removes the local copy immediately and adds an S3 delete marker. You can restore deleted objects from bucket version history."
-      : "Deleting a file removes the local copy immediately and creates a recoverable deleted object state in object version history.";
-  }
-
-  return describeRemoteBinBehavior(location.remoteBin.enabled, location.remoteBin.retentionDays);
 }
 
 function parseRemoteBinRetentionDays(value: string): number {
@@ -213,7 +208,10 @@ function canViewLocationBin(location: SyncLocation): boolean {
   return location.objectVersioningEnabled || isCapabilityAvailable(capabilities.remoteBin);
 }
 
-function getVersionedDeleteToastMessage(location: SyncLocation, subject: "file" | "folder"): string {
+function getVersionedDeleteToastMessage(
+  location: SyncLocation,
+  subject: "file" | "folder",
+): string {
   if (location.provider === "aws") {
     return subject === "file"
       ? "File deleted locally and marked deleted in S3 version history."
@@ -225,7 +223,10 @@ function getVersionedDeleteToastMessage(location: SyncLocation, subject: "file" 
     : "Folder deleted locally and marked deleted in object version history.";
 }
 
-function getVersionedDeleteActivityMessage(location: SyncLocation, subject: "file" | "folder"): string {
+function getVersionedDeleteActivityMessage(
+  location: SyncLocation,
+  subject: "file" | "folder",
+): string {
   if (location.provider === "aws") {
     return subject === "file"
       ? "Deleted file locally and added S3 delete marker"
@@ -324,10 +325,12 @@ function describeConflictKind(value: string | null | undefined): string {
 }
 
 function isResolvableConflictEntry(entry: FileEntry): boolean {
-  return entry.kind === "file"
-    && (entry.status === "conflict" || entry.status === "review-required")
-    && entry.localKind === "file"
-    && entry.remoteKind === "file";
+  return (
+    entry.kind === "file" &&
+    (entry.status === "conflict" || entry.status === "review-required") &&
+    entry.localKind === "file" &&
+    entry.remoteKind === "file"
+  );
 }
 
 function createInitialInlineCompareState(): InlineCompareState {
@@ -335,7 +338,8 @@ function createInitialInlineCompareState(): InlineCompareState {
     status: "idle",
     mode: null,
     details: null,
-    message: "Select Compare to load inline previews or open external apps when inline compare is unavailable.",
+    message:
+      "Select Compare to load inline previews or open external apps when inline compare is unavailable.",
   };
 }
 
@@ -344,8 +348,7 @@ function getInlineCompareLoadingMessage(): string {
 }
 
 function getInlineCompareExternalMessage(details: ConflictResolutionDetails | null): string {
-  return details?.fallbackReason
-    ?? "This file type uses your OS default app for comparison.";
+  return details?.fallbackReason ?? "This file type uses your OS default app for comparison.";
 }
 
 function getInlineCompareErrorMessage(message: string): string {
@@ -360,7 +363,8 @@ function createConflictResolutionModalController(
   backdrop.hidden = true;
 
   const dialog = document.createElement("div");
-  dialog.className = "modal-card storage-modal-card storage-modal-card-wide storage-conflict-modal-card";
+  dialog.className =
+    "modal-card storage-modal-card storage-modal-card-wide storage-conflict-modal-card";
 
   const titleId = `storage-conflict-title-${Math.random().toString(36).slice(2)}`;
   dialog.setAttribute("role", "dialog");
@@ -501,10 +505,7 @@ function createConflictResolutionModalController(
   let currentOptions: ConflictResolutionModalOptions | null = null;
   let inlineCompareState: InlineCompareState = createInitialInlineCompareState();
 
-  const renderMetaList = (
-    list: HTMLUListElement,
-    values: Array<[string, string]>,
-  ) => {
+  const renderMetaList = (list: HTMLUListElement, values: [string, string][]) => {
     list.innerHTML = "";
     for (const [label, value] of values) {
       const item = document.createElement("li");
@@ -540,7 +541,8 @@ function createConflictResolutionModalController(
   const renderInlineCompareState = () => {
     compareState.textContent = inlineCompareState.message;
     compareState.classList.toggle("danger", inlineCompareState.status === "error");
-    compareSurface.hidden = inlineCompareState.status !== "ready" || inlineCompareState.mode === "external";
+    compareSurface.hidden =
+      inlineCompareState.status !== "ready" || inlineCompareState.mode === "external";
 
     if (inlineCompareState.status !== "ready" || !inlineCompareState.details) {
       localCompareContent.innerHTML = "";
@@ -618,11 +620,12 @@ function createConflictResolutionModalController(
           status: "ready",
           mode: details.mode,
           details,
-          message: details.mode === "image"
-            ? "Showing inline image previews."
-            : details.mode === "text"
-              ? "Showing inline text comparison."
-              : getInlineCompareExternalMessage(details),
+          message:
+            details.mode === "image"
+              ? "Showing inline image previews."
+              : details.mode === "text"
+                ? "Showing inline text comparison."
+                : getInlineCompareExternalMessage(details),
         };
         renderInlineCompareState();
       } else {
@@ -681,9 +684,11 @@ function createConflictResolutionModalController(
         ["ETag", formatConflictEtag(options.entry.remoteEtag)],
       ]);
 
-      const compareEnabled = options.entry.localKind === "file" && options.entry.remoteKind === "file";
+      const compareEnabled =
+        options.entry.localKind === "file" && options.entry.remoteKind === "file";
       compareButton.dataset.compareEnabled = compareEnabled ? "true" : "false";
-      compareHint.textContent = "Compare loads inline image/text previews when available and otherwise opens the local file plus a downloaded remote temp copy externally.";
+      compareHint.textContent =
+        "Compare loads inline image/text previews when available and otherwise opens the local file plus a downloaded remote temp copy externally.";
       inlineCompareState = createInitialInlineCompareState();
       renderInlineCompareState();
 
@@ -823,22 +828,26 @@ function createAsyncConfirmController(): AsyncConfirmController {
     resolveAndHide(false);
   });
 
-  acceptButton.addEventListener("click", async () => {
-    if (!visible || busy || !currentOnAccept) return;
+  acceptButton.addEventListener(
+    "click",
+    () =>
+      void (async () => {
+        if (!visible || busy || !currentOnAccept) return;
 
-    busy = true;
-    syncBusyState();
+        busy = true;
+        syncBusyState();
 
-    try {
-      await currentOnAccept();
-      const resolve = currentResolve;
-      hide();
-      resolve?.(true);
-    } catch {
-      busy = false;
-      syncBusyState();
-    }
-  });
+        try {
+          await currentOnAccept();
+          const resolve = currentResolve;
+          hide();
+          resolve?.(true);
+        } catch {
+          busy = false;
+          syncBusyState();
+        }
+      })(),
+  );
 
   document.addEventListener("keydown", handleKeyDown, true);
 
@@ -877,28 +886,21 @@ function createAsyncConfirmController(): AsyncConfirmController {
   };
 }
 
-function createUnavailableCredential(id: string, provider: Provider, name?: string | null): CredentialSummary {
-  return provider === "gcs"
-    ? {
-        id,
-        name: name?.trim() || "Missing credential",
-        provider,
-        ready: false,
-        validationStatus: "untested",
-        lastTestedAt: null,
-        lastTestMessage: null,
-        summary: null,
-      }
-    : {
-        id,
-        name: name?.trim() || "Missing credential",
-        provider,
-        ready: false,
-        validationStatus: "untested",
-        lastTestedAt: null,
-        lastTestMessage: null,
-        summary: null,
-      };
+function createUnavailableCredential(
+  id: string,
+  provider: Provider,
+  name?: string | null,
+): CredentialSummary {
+  return {
+    id,
+    name: (name ?? "").trim() || "Missing credential",
+    provider,
+    ready: false,
+    validationStatus: "untested",
+    lastTestedAt: null,
+    lastTestMessage: null,
+    summary: null,
+  };
 }
 
 function describeCredentialSummary(credential: CredentialSummary): string | null {
@@ -906,9 +908,7 @@ function describeCredentialSummary(credential: CredentialSummary): string | null
     return credential.summary?.accessKeyIdPreview ?? null;
   }
 
-  return credential.summary?.clientEmail
-    ?? credential.summary?.projectId
-    ?? null;
+  return credential.summary?.clientEmail ?? credential.summary?.projectId ?? null;
 }
 
 function getSelectedCredentialContextLabel(profile: StorageProfileDraft): string {
@@ -916,19 +916,24 @@ function getSelectedCredentialContextLabel(profile: StorageProfileDraft): string
 }
 
 function getEffectiveProfileProvider(profile: StorageProfileDraft): Provider {
-  return profile.selectedCredential?.provider ?? profile.provider ?? "aws";
+  return profile.selectedCredential?.provider ?? profile.provider;
 }
 
-function getLocationCapabilities(location: Pick<SyncLocationDraft, "provider" | "providerDefinition" | "capabilities">): ProviderCapabilities {
-  return location.capabilities
-    ?? capabilitiesFromProviderDefinition(
+function getLocationCapabilities(
+  location: Pick<SyncLocationDraft, "provider" | "providerDefinition" | "capabilities">,
+): ProviderCapabilities {
+  return (
+    location.capabilities ??
+    capabilitiesFromProviderDefinition(
       location.providerDefinition ?? defaultProviderDefinition(location.provider),
       location.provider,
     )
-    ?? defaultProviderCapabilities(location.provider);
+  );
 }
 
-function getLocationProviderDefinition(location: Pick<SyncLocationDraft, "provider" | "providerDefinition" | "capabilities">): ProviderDefinition {
+function getLocationProviderDefinition(
+  location: Pick<SyncLocationDraft, "provider" | "providerDefinition" | "capabilities">,
+): ProviderDefinition {
   return location.providerDefinition ?? defaultProviderDefinition(location.provider);
 }
 
@@ -940,10 +945,6 @@ function getProviderLocationHelp(provider: Provider): string {
   return provider === "aws"
     ? "Choose the AWS region for this bucket when creation or validation requires it."
     : "Use the bucket location or leave blank when Google Cloud Storage can infer it automatically.";
-}
-
-function getProviderLocationPlaceholder(provider: Provider): string {
-  return provider === "aws" ? "Auto-detect" : "Auto-detect or enter a GCS location such as US, EU, us-central1, or europe-west2";
 }
 
 function describeCapabilityState(label: string, capability: ProviderCapabilityStatus): string {
@@ -972,7 +973,9 @@ function getArchiveActionLabel(provider: Provider): string {
 
 function setControlDisabledState(control: HTMLElement, disabled: boolean, reason?: string | null) {
   if ("disabled" in control) {
-    (control as HTMLInputElement | HTMLButtonElement | HTMLSelectElement | HTMLTextAreaElement).disabled = disabled;
+    (
+      control as HTMLInputElement | HTMLButtonElement | HTMLSelectElement | HTMLTextAreaElement
+    ).disabled = disabled;
   }
   if (disabled && reason) {
     control.setAttribute("title", reason);
@@ -998,17 +1001,25 @@ function renderCredentialFormState(dom: AppDom, provider: Provider) {
 
 function getCapabilityBadgeText(capability: ProviderCapabilityStatus): string {
   switch (capability.status) {
-    case "unsupported": return "Unsupported";
-    case "permission-unavailable": return "Permission required";
-    case "config-unavailable": return "Setup required";
-    case "runtime-unavailable": return "Temporarily unavailable";
+    case "unsupported":
+      return "Unsupported";
+    case "permission-unavailable":
+      return "Permission required";
+    case "config-unavailable":
+      return "Setup required";
+    case "runtime-unavailable":
+      return "Temporarily unavailable";
     case "supported":
     default:
       return "Available";
   }
 }
 
-function setLocationOptions(select: HTMLSelectElement, options: Array<{ value: string; label: string }>, currentValue: string) {
+function setLocationOptions(
+  select: HTMLSelectElement,
+  options: { value: string; label: string }[],
+  currentValue: string,
+) {
   const normalizedCurrent = currentValue.trim();
   select.innerHTML = "";
   for (const optionDef of options) {
@@ -1035,7 +1046,9 @@ function setLocationOptions(select: HTMLSelectElement, options: Array<{ value: s
   select.value = options[0]?.value ?? "";
 }
 
-function getProviderLocationOptions(definition: ProviderDefinition): Array<{ value: string; label: string }> {
+function getProviderLocationOptions(
+  definition: ProviderDefinition,
+): { value: string; label: string }[] {
   if (definition.provider === "gcs") {
     return [
       { value: "", label: "Auto-detect from bucket" },
@@ -1083,7 +1096,7 @@ function getCredentialValidationLabel(credential: CredentialSummary): string {
       return "test passed";
     case "failed":
       return "test failed";
-    default:
+    case "untested":
       return "untested";
   }
 }
@@ -1104,23 +1117,14 @@ function getCredentialStorageBadgeTone(credential: CredentialSummary): "success"
   return credential.ready ? "success" : "danger";
 }
 
-function getCredentialValidationBadgeTone(credential: CredentialSummary): "success" | "danger" | "default" {
+function getCredentialValidationBadgeTone(
+  credential: CredentialSummary,
+): "success" | "danger" | "default" {
   return credential.validationStatus === "passed"
     ? "success"
     : credential.validationStatus === "failed"
       ? "danger"
       : "default";
-}
-
-function getCredentialTestSentence(credential: CredentialSummary): string {
-  switch (credential.validationStatus) {
-    case "passed":
-      return "Its last test passed.";
-    case "failed":
-      return "Its last test failed.";
-    default:
-      return "It has not been tested yet.";
-  }
 }
 
 function formatPermissionSummary(permissions: PermissionProbeSummary | null): string {
@@ -1142,18 +1146,6 @@ function formatPermissionSummary(permissions: PermissionProbeSummary | null): st
     .map((p) => `${probeLabels[p.name] ?? p.name} ${p.allowed ? "✓" : "✗"}`);
 
   return labels.length > 0 ? `Permissions: ${labels.join(" · ")}` : "";
-}
-
-function describeSelectedCredentialState(profile: StorageProfileDraft): string {
-  if (!profile.credentialProfileId || !profile.selectedCredential) {
-    return "Choose a saved credential before connecting";
-  }
-
-  if (!profile.selectedCredential.ready) {
-    return "Selected credential reference exists, but its stored secret is missing. Recreate or replace it.";
-  }
-
-  return `Selected credential is stored securely for ${getProviderCredentialLabel(profile.selectedCredential.provider)}. ${getCredentialTestSentence(profile.selectedCredential)}`;
 }
 
 function buildCredentialTestContext(profile: StorageProfileDraft): CredentialTestContext {
@@ -1180,25 +1172,12 @@ function buildCredentialCreateMessage(credential: CredentialSummary): string {
   return `${savedState} It was tested and failed.`;
 }
 
-function getCredentialDisplayName(profile: StorageProfileDraft): string {
-  if (!profile.credentialProfileId) {
-    return "No credential selected";
-  }
-
-  if (profile.selectedCredential) {
-    return profile.selectedCredential.ready
-      ? profile.selectedCredential.name
-      : `${profile.selectedCredential.name} (stored secret missing)`;
-  }
-
-  return "Selected credential missing";
-}
-
 function syncProfileCredentialState(
   profile: StorageProfileDraft,
   credentials: CredentialSummary[],
 ): StorageProfileDraft {
-  const credentialProfileId = profile.credentialProfileId?.trim() || null;
+  const trimmedCredentialProfileId = profile.credentialProfileId?.trim() ?? "";
+  const credentialProfileId = trimmedCredentialProfileId === "" ? null : trimmedCredentialProfileId;
 
   if (!credentialProfileId) {
     return normalizeProfileDraft({
@@ -1210,13 +1189,20 @@ function syncProfileCredentialState(
     });
   }
 
-  const availableCredential = credentials.find((credential) => credential.id === credentialProfileId) ?? null;
-  const fallbackProvider = profile.selectedCredential?.id === credentialProfileId
-    ? profile.selectedCredential.provider
-    : profile.provider;
-  const selectedCredential = availableCredential
-    ?? (profile.selectedCredential?.id === credentialProfileId
-      ? createUnavailableCredential(credentialProfileId, fallbackProvider, profile.selectedCredential.name)
+  const availableCredential =
+    credentials.find((credential) => credential.id === credentialProfileId) ?? null;
+  const fallbackProvider =
+    profile.selectedCredential?.id === credentialProfileId
+      ? profile.selectedCredential.provider
+      : profile.provider;
+  const selectedCredential =
+    availableCredential ??
+    (profile.selectedCredential?.id === credentialProfileId
+      ? createUnavailableCredential(
+          credentialProfileId,
+          fallbackProvider,
+          profile.selectedCredential.name,
+        )
       : createUnavailableCredential(credentialProfileId, fallbackProvider));
 
   return normalizeProfileDraft({
@@ -1295,7 +1281,10 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const debounced = ((...args: unknown[]) => {
       if (timer !== null) clearTimeout(timer);
-      timer = setTimeout(() => { timer = null; fn(...args); }, ms);
+      timer = setTimeout(() => {
+        timer = null;
+        fn(...args);
+      }, ms);
     }) as DebouncedFn<T>;
 
     debounced.cancel = () => {
@@ -1315,7 +1304,10 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     return new Intl.NumberFormat().format(value);
   }
 
-  function getFileTreeViewKey(locationId: string | null = state.activeLocationId, mode: FileTreeMode = state.activeLocationViewMode): string {
+  function getFileTreeViewKey(
+    locationId: string | null = state.activeLocationId,
+    mode: FileTreeMode = state.activeLocationViewMode,
+  ): string {
     return `${locationId ?? "none"}:${mode}`;
   }
 
@@ -1326,17 +1318,24 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   }
 
   function findProviderDefinition(provider: Provider): ProviderDefinition {
-    return state.providerDefinitions.find((definition) => definition.provider === provider)
-      ?? (state.profile.providerDefinition?.provider === provider ? state.profile.providerDefinition : null)
-      ?? defaultProviderDefinition(provider);
+    return (
+      state.providerDefinitions.find((definition) => definition.provider === provider) ??
+      (state.profile.providerDefinition?.provider === provider
+        ? state.profile.providerDefinition
+        : null) ??
+      defaultProviderDefinition(provider)
+    );
   }
 
   function hydrateSyncLocationMetadata(location: SyncLocation): SyncLocation {
-    const providerDefinition = location.providerDefinition ?? findProviderDefinition(location.provider);
+    const providerDefinition =
+      location.providerDefinition ?? findProviderDefinition(location.provider);
     return {
       ...location,
       providerDefinition,
-      capabilities: location.capabilities ?? capabilitiesFromProviderDefinition(providerDefinition, location.provider),
+      capabilities:
+        location.capabilities ??
+        capabilitiesFromProviderDefinition(providerDefinition, location.provider),
     };
   }
 
@@ -1348,7 +1347,9 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
   function getActiveLocationStatus() {
     return state.activeLocationId
-      ? state.status.locations?.find((location) => getLocationSyncStatusId(location) === state.activeLocationId)
+      ? state.status.locations?.find(
+          (location) => getLocationSyncStatusId(location) === state.activeLocationId,
+        )
       : undefined;
   }
 
@@ -1360,19 +1361,10 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     return getViewSnapshot()?.entries ?? null;
   }
 
-  function serializeVersionCounts(versionCounts: Map<string, number> | undefined): string | undefined {
+  function serializeVersionCounts(
+    versionCounts: Map<string, number> | undefined,
+  ): string | undefined {
     return versionCounts ? JSON.stringify(Array.from(versionCounts.entries())) : undefined;
-  }
-
-  function setCurrentViewEntries(entries: FileEntry[], viewKey: string = getFileTreeViewKey()) {
-    const versionCounts = state.activeLocationViewMode === "live" ? activeVersionCounts : undefined;
-    fileTreeSnapshots.set(viewKey, {
-      viewKey,
-      entries,
-      entriesJson: JSON.stringify(entries),
-      versionCounts,
-      versionCountsJson: serializeVersionCounts(versionCounts),
-    });
   }
 
   function clearViewSnapshot(viewKey: string) {
@@ -1439,7 +1431,9 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   function renderFileTreeEntries(
     entries: FileEntry[],
     mode: FileTreeMode,
-    versionCounts: Map<string, number> | undefined = mode === "live" ? activeVersionCounts : undefined,
+    versionCounts: Map<string, number> | undefined = mode === "live"
+      ? activeVersionCounts
+      : undefined,
   ) {
     const activeLocation = getActiveLocation();
     destroyFileTree();
@@ -1449,40 +1443,36 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       entries,
       mode,
       checkedPaths: mode === "bin" ? Array.from(selectedBinPaths) : undefined,
-      onChange: mode === "live"
-        ? debouncedFileTreeChange
-        : (checkedPaths) => {
-          selectedBinPaths = new Set(checkedPaths);
-          renderBinToolbar();
-        },
+      onChange:
+        mode === "live"
+          ? debouncedFileTreeChange
+          : (checkedPaths) => {
+              selectedBinPaths = new Set(checkedPaths);
+              renderBinToolbar();
+            },
       onReveal: handleReveal,
       onDelete: mode === "live" ? handleDelete : undefined,
       onRestore: mode === "bin" ? handleBinRestore : undefined,
       onStorageClass: mode === "live" ? handleStorageClassChange : undefined,
-      getStorageClassActionState: mode === "live"
-        ? (entry) => {
-          const archiveCapability = activeLocation
-            ? getLocationCapabilities(activeLocation).archiveStorage
-            : defaultProviderCapabilities("aws").archiveStorage;
-          return {
-            disabled: !isCapabilityAvailable(archiveCapability),
-            title: isCapabilityAvailable(archiveCapability)
-              ? `Change ${getArchiveActionLabel(activeLocation?.provider ?? "aws").toLowerCase()}`
-              : describeCapabilityAvailability(archiveCapability),
-          };
-        }
-        : undefined,
+      getStorageClassActionState:
+        mode === "live"
+          ? (_entry) => {
+              const archiveCapability = activeLocation
+                ? getLocationCapabilities(activeLocation).archiveStorage
+                : defaultProviderCapabilities("aws").archiveStorage;
+              return {
+                disabled: !isCapabilityAvailable(archiveCapability),
+                title: isCapabilityAvailable(archiveCapability)
+                  ? `Change ${getArchiveActionLabel(activeLocation?.provider ?? "aws").toLowerCase()}`
+                  : describeCapabilityAvailability(archiveCapability),
+              };
+            }
+          : undefined,
       onResolveConflict: mode === "live" ? handleResolveConflict : undefined,
       versionCounts: mode === "live" ? versionCounts : undefined,
       onViewVersions: mode === "live" ? handleViewVersions : undefined,
     });
     renderBinToolbar();
-  }
-
-  function updateCurrentViewEntries(entries: FileEntry[]) {
-    setCurrentViewEntries(entries);
-    renderFileTreeEntries(entries, state.activeLocationViewMode);
-    renderStatus();
   }
 
   function renderStatusMetrics(metrics: [StatusMetric, StatusMetric, StatusMetric, StatusMetric]) {
@@ -1497,7 +1487,9 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     dom.statusOverviewNotInSync.textContent = notInSync.value;
   }
 
-  function getLiveStatusMetrics(status: SyncStatus | LocationSyncStatus): [StatusMetric, StatusMetric, StatusMetric, StatusMetric] {
+  function getLiveStatusMetrics(
+    status: SyncStatus | LocationSyncStatus,
+  ): [StatusMetric, StatusMetric, StatusMetric, StatusMetric] {
     const overview = getSyncOverviewStats(status);
     return [
       { label: "Local", value: formatCount(overview.localFiles) },
@@ -1508,13 +1500,17 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   }
 
   function isActionableLiveEntry(entry: FileEntry): boolean {
-    return entry.status === "local-only"
-      || entry.status === "remote-only"
-      || entry.status === "review-required"
-      || entry.status === "conflict";
+    return (
+      entry.status === "local-only" ||
+      entry.status === "remote-only" ||
+      entry.status === "review-required" ||
+      entry.status === "conflict"
+    );
   }
 
-  function getLiveStatusMetricsFromEntries(entries: FileEntry[]): [StatusMetric, StatusMetric, StatusMetric, StatusMetric] {
+  function getLiveStatusMetricsFromEntries(
+    entries: FileEntry[],
+  ): [StatusMetric, StatusMetric, StatusMetric, StatusMetric] {
     const files = entries.filter((entry) => entry.kind === "file");
     const localFiles = files.filter((entry) => entry.hasLocalCopy).length;
     const remoteFiles = files.filter((entry) => entry.status !== "local-only").length;
@@ -1534,18 +1530,17 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     const savedActiveLocation = getSavedActiveLocation();
     const activeLocationStatus = getActiveLocationStatus();
     const binEntries = state.activeLocationId
-      ? getViewSnapshot(getFileTreeViewKey(state.activeLocationId, "bin"))?.entries ?? null
+      ? (getViewSnapshot(getFileTreeViewKey(state.activeLocationId, "bin"))?.entries ?? null)
       : null;
     const remoteBinConfig = savedActiveLocation?.remoteBin ?? activeLocation?.remoteBin;
-    const retentionValue = remoteBinConfig?.enabled
-      ? `${remoteBinConfig.retentionDays}d`
-      : "Off";
+    const retentionValue = remoteBinConfig?.enabled ? `${remoteBinConfig.retentionDays}d` : "Off";
     const livePhase = activeLocationStatus
       ? describeSyncStatus(activeLocationStatus).badgeLabel
       : describeSyncStatus(state.status).badgeLabel;
-    const pendingCount = activeLocationStatus?.plan.pendingOperationCount
-      ?? activeLocationStatus?.pendingOperations
-      ?? 0;
+    const pendingCount =
+      activeLocationStatus?.plan.pendingOperationCount ??
+      activeLocationStatus?.pendingOperations ??
+      0;
 
     return [
       { label: "Bin items", value: formatCount(binEntries?.length ?? 0) },
@@ -1557,7 +1552,11 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
   function getSelectedBinEntries(): FileEntry[] {
     const entries = getCurrentViewEntries() ?? [];
-    return entries.filter((entry) => selectedBinPaths.has(entry.path) || (entry.kind === "directory" && selectedBinPaths.has(entry.path)));
+    return entries.filter(
+      (entry) =>
+        selectedBinPaths.has(entry.path) ||
+        (entry.kind === "directory" && selectedBinPaths.has(entry.path)),
+    );
   }
 
   function getBinSelectionSummaryText(): string {
@@ -1566,9 +1565,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       return "Select bin entries to restore or purge.";
     }
 
-    return count === 1
-      ? "1 bin entry selected."
-      : `${formatCount(count)} bin entries selected.`;
+    return count === 1 ? "1 bin entry selected." : `${formatCount(count)} bin entries selected.`;
   }
 
   function renderBinToolbar() {
@@ -1597,10 +1594,12 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   }
 
   function isBinMutationSummary(value: unknown): value is BinEntryMutationSummary {
-    return typeof value === "object"
-      && value !== null
-      && "results" in value
-      && Array.isArray((value as { results?: unknown }).results);
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      "results" in value &&
+      Array.isArray((value as { results?: unknown }).results)
+    );
   }
 
   function partitionBinMutationResults(
@@ -1632,7 +1631,11 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     requestedCount: number;
     successCount: number;
     failureCount: number;
-  }): { toastMessage: string; toastVariant: "success" | "error" | "info"; activityMessage: string } {
+  }): {
+    toastMessage: string;
+    toastVariant: "success" | "error" | "info";
+    activityMessage: string;
+  } {
     const { action, location, requestedCount, successCount, failureCount } = options;
     const noun = requestedCount === 1 ? "entry" : "entries";
 
@@ -1646,7 +1649,10 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       }
 
       return {
-        toastMessage: successCount === 1 ? "Purged 1 bin entry permanently." : `Purged ${successCount} bin entries permanently.`,
+        toastMessage:
+          successCount === 1
+            ? "Purged 1 bin entry permanently."
+            : `Purged ${successCount} bin entries permanently.`,
         toastVariant: "success",
         activityMessage: `Purged ${successCount} bin ${noun} permanently`,
       };
@@ -1654,24 +1660,26 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
     if (successCount === 0) {
       return {
-        toastMessage: action === "restore"
-          ? `Restore failed for ${failureCount} bin ${noun}.`
-          : `Purge failed for ${failureCount} bin ${noun}.`,
+        toastMessage:
+          action === "restore"
+            ? `Restore failed for ${failureCount} bin ${noun}.`
+            : `Purge failed for ${failureCount} bin ${noun}.`,
         toastVariant: "error",
-        activityMessage: action === "restore"
-          ? `Restore failed for ${failureCount} bin ${noun}`
-          : `Purge failed for ${failureCount} bin ${noun}`,
+        activityMessage:
+          action === "restore"
+            ? `Restore failed for ${failureCount} bin ${noun}`
+            : `Purge failed for ${failureCount} bin ${noun}`,
       };
     }
 
     return {
-      toastMessage: action === "restore"
-        ? `Restored ${successCount} of ${requestedCount} bin ${noun}; ${failureCount} failed.`
-        : `Purged ${successCount} of ${requestedCount} bin ${noun}; ${failureCount} failed.`,
+      toastMessage:
+        action === "restore"
+          ? `Restored ${successCount} of ${requestedCount} bin ${noun}; ${failureCount} failed.`
+          : `Purged ${successCount} of ${requestedCount} bin ${noun}; ${failureCount} failed.`,
       toastVariant: "info",
-      activityMessage: action === "restore"
-        ? `Partially restored bin ${noun}`
-        : `Partially purged bin ${noun}`,
+      activityMessage:
+        action === "restore" ? `Partially restored bin ${noun}` : `Partially purged bin ${noun}`,
     };
   }
 
@@ -1680,9 +1688,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       return null;
     }
 
-    return failed
-      .map((result) => `${result.path}: ${result.error ?? "Unknown error"}`)
-      .join("\n");
+    return failed.map((result) => `${result.path}: ${result.error ?? "Unknown error"}`).join("\n");
   }
 
   function getBinSourceLabel(source: BinEntrySource | null | undefined): string {
@@ -1755,7 +1761,11 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     const { enabled, logDirectoryPath, logFilePath } = state.debugLogState;
 
     dom.activityDebugModeInput.checked = state.profile.activityDebugModeEnabled;
-    dom.debugLogStatusBadge.textContent = enabled ? "Enabled" : client.supportsNativeProfilePersistence ? "Disabled" : "Unavailable";
+    dom.debugLogStatusBadge.textContent = enabled
+      ? "Enabled"
+      : client.supportsNativeProfilePersistence
+        ? "Disabled"
+        : "Unavailable";
     dom.debugLogStatusBadge.className = `badge ${enabled ? "success" : "default"}`;
     dom.debugLogStatusText.textContent = client.supportsNativeProfilePersistence
       ? enabled
@@ -1811,7 +1821,9 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     const count = state.credentials.length;
     const selectedCredentialProvider = normalizeProvider(dom.credentialProviderSelect.value);
     dom.credentialsCountBadge.textContent = `${count} saved`;
-    dom.credentialsSupportBadge.textContent = client.supportsNativeProfilePersistence ? "Desktop app" : "Preview only";
+    dom.credentialsSupportBadge.textContent = client.supportsNativeProfilePersistence
+      ? "Desktop app"
+      : "Preview only";
     dom.credentialsSupportBadge.className = `badge ${client.supportsNativeProfilePersistence ? "success" : "default"}`;
     dom.credentialsSupportText.textContent = client.supportsNativeProfilePersistence
       ? "Create provider-specific named credentials once, then reuse them across sync locations without re-entering secrets."
@@ -1819,11 +1831,12 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     dom.createCredentialBtn.disabled = !client.supportsNativeProfilePersistence;
     renderCredentialFormState(dom, selectedCredentialProvider);
 
-    dom.credentialsListStatus.textContent = count > 0
-      ? "Saved credentials show secure storage state and test state separately."
-      : client.supportsNativeProfilePersistence
-        ? "Create your first named credential, then assign it to a sync location."
-        : "Open the desktop app to create and manage credentials.";
+    dom.credentialsListStatus.textContent =
+      count > 0
+        ? "Saved credentials show secure storage state and test state separately."
+        : client.supportsNativeProfilePersistence
+          ? "Create your first named credential, then assign it to a sync location."
+          : "Open the desktop app to create and manage credentials.";
 
     dom.credentialsEmptyState.hidden = count > 0;
     dom.credentialsList.hidden = count === 0;
@@ -1842,9 +1855,10 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       hint.className = "hint";
       const providerLabel = getProviderLabel(credential.provider);
       const summaryText = describeCredentialSummary(credential);
-      hint.textContent = credential.id === state.profile.credentialProfileId
-        ? `${getSelectedCredentialContextLabel(state.profile)} · ${providerLabel} · ${getCredentialStorageLabel(credential)} · ${getCredentialValidationLabel(credential)}${summaryText ? ` · ${summaryText}` : ""}`
-        : `${providerLabel} · ${getCredentialStorageLabel(credential)} · ${getCredentialValidationLabel(credential)}${summaryText ? ` · ${summaryText}` : ""}`;
+      hint.textContent =
+        credential.id === state.profile.credentialProfileId
+          ? `${getSelectedCredentialContextLabel(state.profile)} · ${providerLabel} · ${getCredentialStorageLabel(credential)} · ${getCredentialValidationLabel(credential)}${summaryText ? ` · ${summaryText}` : ""}`
+          : `${providerLabel} · ${getCredentialStorageLabel(credential)} · ${getCredentialValidationLabel(credential)}${summaryText ? ` · ${summaryText}` : ""}`;
 
       meta.append(name, hint);
 
@@ -1876,48 +1890,60 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       testButton.title = !client.supportsNativeProfilePersistence
         ? "Credential testing is only available in the desktop app."
         : "";
-      testButton.addEventListener("click", async () => {
-        setButtonBusy(testButton, true);
+      testButton.addEventListener(
+        "click",
+        () =>
+          void (async () => {
+            setButtonBusy(testButton, true);
 
-        try {
-          const result = await client.testCredential({
-            credentialId: credential.id,
-            context: buildCredentialTestContext(state.profile),
-          });
+            try {
+              const result = await client.testCredential({
+                credentialId: credential.id,
+                context: buildCredentialTestContext(state.profile),
+              });
 
-          state.credentials = state.credentials.map((item) => item.id === result.credential.id ? result.credential : item);
-          if (!state.credentials.some((item) => item.id === result.credential.id)) {
-            state.credentials = [...state.credentials, result.credential];
-          }
+              state.credentials = state.credentials.map((item) =>
+                item.id === result.credential.id ? result.credential : item,
+              );
+              if (!state.credentials.some((item) => item.id === result.credential.id)) {
+                state.credentials = [...state.credentials, result.credential];
+              }
 
-          state.profile = syncProfileCredentialState(normalizeProfileDraft({
-            ...state.profile,
-            selectedCredential: state.profile.credentialProfileId === result.credential.id
-              ? result.credential
-              : state.profile.selectedCredential,
-          }), state.credentials);
-          renderProfileSummary();
+              state.profile = syncProfileCredentialState(
+                normalizeProfileDraft({
+                  ...state.profile,
+                  selectedCredential:
+                    state.profile.credentialProfileId === result.credential.id
+                      ? result.credential
+                      : state.profile.selectedCredential,
+                }),
+                state.credentials,
+              );
+              renderProfileSummary();
 
-          const baseMessage = result.ok
-            ? `Credential "${result.credential.name}" test passed. Can access ${result.bucketCount} bucket(s).`
-            : `Credential "${result.credential.name}" test failed.`;
+              const baseMessage = result.ok
+                ? `Credential "${result.credential.name}" test passed. Can access ${result.bucketCount} bucket(s).`
+                : `Credential "${result.credential.name}" test failed.`;
 
-          const permissionLine = formatPermissionSummary(result.permissions);
-          const displayMessage = permissionLine ? `${baseMessage} ${permissionLine}` : baseMessage;
+              const permissionLine = formatPermissionSummary(result.permissions);
+              const displayMessage = permissionLine
+                ? `${baseMessage} ${permissionLine}`
+                : baseMessage;
 
-          dom.credentialsResult.textContent = displayMessage;
-          toast(displayMessage, result.ok ? "success" : "error");
-          addActivity(result.ok ? "success" : "error", displayMessage);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          const surfacedMessage = `Credential test failed: ${message}`;
-          dom.credentialsResult.textContent = surfacedMessage;
-          toast(surfacedMessage, "error");
-          addActivity("error", surfacedMessage);
-        } finally {
-          setButtonBusy(testButton, false);
-        }
-      });
+              dom.credentialsResult.textContent = displayMessage;
+              toast(displayMessage, result.ok ? "success" : "error");
+              addActivity(result.ok ? "success" : "error", displayMessage);
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              const surfacedMessage = `Credential test failed: ${message}`;
+              dom.credentialsResult.textContent = surfacedMessage;
+              toast(surfacedMessage, "error");
+              addActivity("error", surfacedMessage);
+            } finally {
+              setButtonBusy(testButton, false);
+            }
+          })(),
+      );
       actions.append(testButton);
 
       const deleteButton = document.createElement("button");
@@ -1925,9 +1951,9 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       deleteButton.type = "button";
       deleteButton.textContent = "Delete";
       deleteButton.disabled = !client.supportsNativeProfilePersistence;
-      deleteButton.addEventListener("click", async () => {
+      deleteButton.addEventListener("click", () => {
         const wasSelected = credential.id === state.profile.credentialProfileId;
-        await asyncConfirm.open({
+        void asyncConfirm.open({
           title: "Delete credential?",
           message: wasSelected
             ? `"${credential.name}" will be deleted. This bucket will need a different credential before it can sync again.`
@@ -1940,7 +1966,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
               const result = await client.deleteCredential(credential.id);
               if (!result.deleted) {
                 const message = client.supportsNativeProfilePersistence
-                  ? `Could not delete credential \"${credential.name}\".`
+                  ? `Could not delete credential "${credential.name}".`
                   : "Credential deletion is only available in the desktop app.";
                 dom.credentialsResult.textContent = message;
                 toast(message, "info");
@@ -1948,16 +1974,19 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
               }
 
               if (wasSelected) {
-                state.profile = syncProfileCredentialState(normalizeProfileDraft({
-                  ...state.profile,
-                  credentialProfileId: result.profile.credentialProfileId,
-                  selectedCredential: result.profile.selectedCredential,
-                  selectedCredentialAvailable: result.profile.selectedCredentialAvailable,
-                  credentialsStoredSecurely: result.profile.credentialsStoredSecurely,
-                }), state.credentials.filter((item) => item.id !== credential.id));
+                state.profile = syncProfileCredentialState(
+                  normalizeProfileDraft({
+                    ...state.profile,
+                    credentialProfileId: result.profile.credentialProfileId,
+                    selectedCredential: result.profile.selectedCredential,
+                    selectedCredentialAvailable: result.profile.selectedCredentialAvailable,
+                    credentialsStoredSecurely: result.profile.credentialsStoredSecurely,
+                  }),
+                  state.credentials.filter((item) => item.id !== credential.id),
+                );
               }
 
-              const message = `Deleted credential \"${credential.name}\".`;
+              const message = `Deleted credential "${credential.name}".`;
               dom.credentialsResult.textContent = message;
               addActivity("info", message);
               toast(message, "success");
@@ -2001,7 +2030,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     dom.windowSubtitle.textContent = headerPresentation.summary;
 
     const cachedLiveEntries = state.activeLocationId
-      ? getViewSnapshot(getFileTreeViewKey(state.activeLocationId, "live"))?.entries ?? null
+      ? (getViewSnapshot(getFileTreeViewKey(state.activeLocationId, "live"))?.entries ?? null)
       : null;
 
     renderStatusMetrics(
@@ -2011,8 +2040,12 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     );
 
     if (state.activeLocationViewMode === "bin" && state.activeLocationId) {
-      const label = activeLocation?.label || activeLocation?.bucket || "selected location";
-      dom.statusPhaseInline.textContent = activeLocation ? getLocationBinLabel(activeLocation) : "Deleted";
+      const label = activeLocation
+        ? activeLocation.label || activeLocation.bucket
+        : "selected location";
+      dom.statusPhaseInline.textContent = activeLocation
+        ? getLocationBinLabel(activeLocation)
+        : "Deleted";
       dom.statusPhaseInline.className = "badge danger";
       const binLabel = activeLocation ? getLocationBinLabel(activeLocation) : "Deleted";
       dom.statusSummary.textContent = `Viewing ${label} ${binLabel}. Restore entries back into the live sync location.`;
@@ -2024,9 +2057,10 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   function renderFileTreeViewState() {
     dom.fileTreeSection.classList.toggle("is-bin-view", state.activeLocationViewMode === "bin");
     renderBinToolbar();
-    const emptyStateText = state.activeLocationViewMode === "bin"
-      ? "Select a deleted-items view to browse recoverable files."
-      : "Select a sync location to browse files.";
+    const emptyStateText =
+      state.activeLocationViewMode === "bin"
+        ? "Select a deleted-items view to browse recoverable files."
+        : "Select a sync location to browse files.";
     const emptyStateCard = dom.fileTreeEmptyState.querySelector<HTMLElement>(".empty-state-card");
     if (emptyStateCard) {
       emptyStateCard.textContent = emptyStateText;
@@ -2043,39 +2077,54 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
     const credentialId = dom.locationCredentialSelect.value || null;
     const credential = state.credentials.find((item) => item.id === credentialId);
-    return credential?.provider ?? normalizeProvider(dom.locationProviderSelect.value || getEffectiveProfileProvider(state.profile));
+    return (
+      credential?.provider ??
+      normalizeProvider(
+        dom.locationProviderSelect.value || getEffectiveProfileProvider(state.profile),
+      )
+    );
   }
 
   function getSelectedLocationCapabilities(): ProviderCapabilities {
     const provider = getSelectedLocationProvider();
     const editingLocation = getEditingLocation();
 
-    return editingLocation && editingLocation.provider === provider
+    return editingLocation?.provider === provider
       ? getLocationCapabilities(editingLocation)
       : capabilitiesFromProviderDefinition(
-        state.providerDefinitions.find((definition) => definition.provider === provider)
-        ?? state.profile.providerDefinition
-        ?? null,
-        provider,
-      );
+          state.providerDefinitions.find((definition) => definition.provider === provider) ??
+            state.profile.providerDefinition ??
+            null,
+          provider,
+        );
   }
 
   function getSelectedLocationProviderDefinition(): ProviderDefinition {
     const provider = getSelectedLocationProvider();
     const editingLocation = getEditingLocation();
 
-    return editingLocation && editingLocation.provider === provider
+    return editingLocation?.provider === provider
       ? getLocationProviderDefinition(editingLocation)
-      : state.providerDefinitions.find((definition) => definition.provider === provider)
-        ?? (state.profile.providerDefinition?.provider === provider ? state.profile.providerDefinition : null)
-        ?? defaultProviderDefinition(provider);
+      : (state.providerDefinitions.find((definition) => definition.provider === provider) ??
+          (state.profile.providerDefinition?.provider === provider
+            ? state.profile.providerDefinition
+            : null) ??
+          defaultProviderDefinition(provider));
   }
 
-  function renderLocationCapabilities(providerDefinition: ProviderDefinition, capabilities: ProviderCapabilities) {
-    dom.locationCapabilityVersioningLabel.textContent = providerDefinition.provider === "aws" ? "Object versioning" : "Object versioning";
+  function renderLocationCapabilities(
+    providerDefinition: ProviderDefinition,
+    capabilities: ProviderCapabilities,
+  ) {
+    dom.locationCapabilityVersioningLabel.textContent =
+      providerDefinition.provider === "aws" ? "Object versioning" : "Object versioning";
     dom.locationCapabilityRemoteBinLabel.textContent = "Remote bin";
-    dom.locationCapabilityArchiveLabel.textContent = getArchiveActionLabel(providerDefinition.provider);
-    dom.locationCapabilityVersioning.textContent = getCapabilityBadgeText(capabilities.objectVersioning);
+    dom.locationCapabilityArchiveLabel.textContent = getArchiveActionLabel(
+      providerDefinition.provider,
+    );
+    dom.locationCapabilityVersioning.textContent = getCapabilityBadgeText(
+      capabilities.objectVersioning,
+    );
     dom.locationCapabilityRemoteBin.textContent = getCapabilityBadgeText(capabilities.remoteBin);
     dom.locationCapabilityArchive.textContent = getCapabilityBadgeText(capabilities.archiveStorage);
 
@@ -2088,29 +2137,42 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     dom.locationCapabilityHelp.textContent = [
       describeCapabilityState("Object versioning", capabilities.objectVersioning),
       describeCapabilityState("Remote bin", capabilities.remoteBin),
-      describeCapabilityState(getArchiveActionLabel(providerDefinition.provider), capabilities.archiveStorage),
+      describeCapabilityState(
+        getArchiveActionLabel(providerDefinition.provider),
+        capabilities.archiveStorage,
+      ),
     ].join(" · ");
-    dom.locationProviderHelp.textContent = providerDefinition.provider === "aws"
-      ? "AWS sync locations use S3 regions and S3-specific features when the backend reports them as available."
-      : "GCS sync locations use bucket locations and GCS-native storage classes instead of AWS region semantics.";
+    dom.locationProviderHelp.textContent =
+      providerDefinition.provider === "aws"
+        ? "AWS sync locations use S3 regions and S3-specific features when the backend reports them as available."
+        : "GCS sync locations use bucket locations and GCS-native storage classes instead of AWS region semantics.";
   }
 
   function renderLocationProviderState() {
     const providerDefinition = getSelectedLocationProviderDefinition();
     const provider = providerDefinition.provider;
     const capabilities = getSelectedLocationCapabilities();
-    const objectVersioningEnabled = isObjectVersioningEnabled();
     const versioningAvailable = isCapabilityAvailable(capabilities.objectVersioning);
     const remoteBinAvailable = isCapabilityAvailable(capabilities.remoteBin);
 
     dom.locationRegionLabel.textContent = getProviderLocationLabel(provider);
     dom.locationRegionSelect.title = getProviderLocationHelp(provider);
-    setLocationOptions(dom.locationRegionSelect, getProviderLocationOptions(providerDefinition), dom.locationRegionSelect.value);
+    setLocationOptions(
+      dom.locationRegionSelect,
+      getProviderLocationOptions(providerDefinition),
+      dom.locationRegionSelect.value,
+    );
     renderLocationCapabilities(providerDefinition, capabilities);
     const archiveUnavailable = !isCapabilityAvailable(capabilities.archiveStorage);
-    dom.locationCapabilitiesList.querySelector("#location-capability-archive")?.parentElement?.classList.toggle("is-disabled", archiveUnavailable);
-    dom.locationCapabilitiesList.querySelector("#location-capability-versioning")?.parentElement?.classList.toggle("is-disabled", !versioningAvailable);
-    dom.locationCapabilitiesList.querySelector("#location-capability-remote-bin")?.parentElement?.classList.toggle("is-disabled", !remoteBinAvailable);
+    dom.locationCapabilitiesList
+      .querySelector("#location-capability-archive")
+      ?.parentElement?.classList.toggle("is-disabled", archiveUnavailable);
+    dom.locationCapabilitiesList
+      .querySelector("#location-capability-versioning")
+      ?.parentElement?.classList.toggle("is-disabled", !versioningAvailable);
+    dom.locationCapabilitiesList
+      .querySelector("#location-capability-remote-bin")
+      ?.parentElement?.classList.toggle("is-disabled", !remoteBinAvailable);
   }
 
   function renderProfileSummary() {
@@ -2123,7 +2185,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   function getEditingLocation(): SyncLocation | null {
     const editingId = dom.locationEditingId.value.trim();
     return editingId
-      ? state.syncLocations.find((location) => location.id === editingId) ?? null
+      ? (state.syncLocations.find((location) => location.id === editingId) ?? null)
       : null;
   }
 
@@ -2175,8 +2237,13 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
   function renderObjectVersioningBtn() {
     const enabled = isObjectVersioningEnabled();
-    dom.locationVersioningBtnIcon.setAttribute("data-lucide", enabled ? "shield-off" : "shield-check");
-    dom.locationVersioningBtnLabel.textContent = enabled ? "Disable object versioning" : "Enable object versioning";
+    dom.locationVersioningBtnIcon.setAttribute(
+      "data-lucide",
+      enabled ? "shield-off" : "shield-check",
+    );
+    dom.locationVersioningBtnLabel.textContent = enabled
+      ? "Disable object versioning"
+      : "Enable object versioning";
     dom.locationObjectVersioningBtn.classList.toggle("danger", enabled);
     applyIcons();
   }
@@ -2187,23 +2254,43 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     const objectVersioningEnabled = isObjectVersioningEnabled();
     const objectVersioningAvailable = isCapabilityAvailable(capabilities.objectVersioning);
     const remoteBinAvailable = isCapabilityAvailable(capabilities.remoteBin);
-    const enabled = objectVersioningEnabled || !remoteBinAvailable ? false : dom.locationRemoteBinEnabledInput.checked;
+    const enabled =
+      objectVersioningEnabled || !remoteBinAvailable
+        ? false
+        : dom.locationRemoteBinEnabledInput.checked;
     const retentionDays = parseRemoteBinRetentionDays(dom.locationRemoteBinRetentionInput.value);
     if (objectVersioningEnabled || !remoteBinAvailable) {
       dom.locationRemoteBinEnabledInput.checked = false;
     }
     dom.locationRemoteBinEnabledInput.disabled = objectVersioningEnabled || !remoteBinAvailable;
     dom.locationRemoteBinRetentionInput.value = String(retentionDays);
-    dom.locationRemoteBinRetentionInput.disabled = objectVersioningEnabled || !remoteBinAvailable || !enabled;
+    dom.locationRemoteBinRetentionInput.disabled =
+      objectVersioningEnabled || !remoteBinAvailable || !enabled;
     dom.locationRemoteBinHint.textContent = !remoteBinAvailable
       ? describeCapabilityAvailability(capabilities.remoteBin)
       : objectVersioningEnabled
         ? `Object versioning is enabled for this sync location. Remote bin is unavailable in this mode; deleted objects will be recovered from ${describeVersionHistoryLabel(provider)} instead.`
         : describeRemoteBinBehavior(enabled, retentionDays);
-    setControlDisabledState(dom.locationVersioningCheckbox, !objectVersioningAvailable, describeCapabilityAvailability(capabilities.objectVersioning));
-    setControlDisabledState(dom.locationObjectVersioningBtn, !objectVersioningAvailable, describeCapabilityAvailability(capabilities.objectVersioning));
-    setControlDisabledState(dom.locationRemoteBinEnabledInput, objectVersioningEnabled || !remoteBinAvailable, describeCapabilityAvailability(capabilities.remoteBin));
-    setControlDisabledState(dom.locationRemoteBinRetentionInput, objectVersioningEnabled || !remoteBinAvailable || !enabled, describeCapabilityAvailability(capabilities.remoteBin));
+    setControlDisabledState(
+      dom.locationVersioningCheckbox,
+      !objectVersioningAvailable,
+      describeCapabilityAvailability(capabilities.objectVersioning),
+    );
+    setControlDisabledState(
+      dom.locationObjectVersioningBtn,
+      !objectVersioningAvailable,
+      describeCapabilityAvailability(capabilities.objectVersioning),
+    );
+    setControlDisabledState(
+      dom.locationRemoteBinEnabledInput,
+      objectVersioningEnabled || !remoteBinAvailable,
+      describeCapabilityAvailability(capabilities.remoteBin),
+    );
+    setControlDisabledState(
+      dom.locationRemoteBinRetentionInput,
+      objectVersioningEnabled || !remoteBinAvailable || !enabled,
+      describeCapabilityAvailability(capabilities.remoteBin),
+    );
   }
 
   async function refreshStatus() {
@@ -2220,12 +2307,18 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     const definitions = await client.listProviderCapabilities();
     state.providerDefinitions = definitions;
     const currentProvider = state.profile.provider;
-    const currentDefinition = definitions.find((definition) => definition.provider === currentProvider) ?? defaultProviderDefinition(currentProvider);
+    const currentDefinition =
+      definitions.find((definition) => definition.provider === currentProvider) ??
+      defaultProviderDefinition(currentProvider);
     state.profile = normalizeProfileDraft({
       ...state.profile,
       providerDefinition: currentDefinition,
-      capabilities: state.profile.capabilities ?? capabilitiesFromProviderDefinition(currentDefinition, currentProvider),
-      syncLocations: state.profile.syncLocations.map((location) => hydrateSyncLocationMetadata(location)),
+      capabilities:
+        state.profile.capabilities ??
+        capabilitiesFromProviderDefinition(currentDefinition, currentProvider),
+      syncLocations: state.profile.syncLocations.map((location) =>
+        hydrateSyncLocationMetadata(location),
+      ),
     });
   }
 
@@ -2238,7 +2331,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   }
 
   function mergeSyncLocationsWithStoredProfile(listedLocations: SyncLocation[]): SyncLocation[] {
-    const storedLocations = state.profile.syncLocations ?? [];
+    const storedLocations = state.profile.syncLocations;
     const storedLocationIds = new Set(storedLocations.map((location) => location.id));
 
     if (storedLocationIds.size === 0 && !state.profile.activeLocationId) {
@@ -2256,29 +2349,46 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
         ...listedLocation,
         objectVersioningEnabled: storedLocation.objectVersioningEnabled,
         remoteBin: storedLocation.remoteBin,
-        providerDefinition: listedLocation.providerDefinition ?? storedLocation.providerDefinition ?? defaultProviderDefinition(listedLocation.provider),
-        capabilities: listedLocation.capabilities ?? storedLocation.capabilities ?? getLocationCapabilities(listedLocation),
+        providerDefinition:
+          listedLocation.providerDefinition ??
+          storedLocation.providerDefinition ??
+          defaultProviderDefinition(listedLocation.provider),
+        capabilities:
+          listedLocation.capabilities ??
+          storedLocation.capabilities ??
+          getLocationCapabilities(listedLocation),
       });
     });
   }
 
-  function applySyncLocationState(syncLocations: SyncLocation[], preferredActiveLocationId: string | null = state.activeLocationId) {
+  function applySyncLocationState(
+    syncLocations: SyncLocation[],
+    preferredActiveLocationId: string | null = state.activeLocationId,
+  ) {
     const activeLocationExists = preferredActiveLocationId
       ? syncLocations.some((location) => location.id === preferredActiveLocationId)
       : false;
 
-    const hydratedSyncLocations = syncLocations.map((location) => hydrateSyncLocationMetadata(location));
+    const hydratedSyncLocations = syncLocations.map((location) =>
+      hydrateSyncLocationMetadata(location),
+    );
     state.syncLocations = hydratedSyncLocations;
-    state.activeLocationId = syncLocations.length === 0
-      ? null
-      : activeLocationExists
-        ? preferredActiveLocationId
-        : hydratedSyncLocations[0].id;
+    state.activeLocationId =
+      syncLocations.length === 0
+        ? null
+        : activeLocationExists
+          ? preferredActiveLocationId
+          : hydratedSyncLocations[0].id;
     if (state.activeLocationId === null) {
       state.activeLocationViewMode = "live";
     } else {
-      const activeLocation = hydratedSyncLocations.find((location) => location.id === state.activeLocationId) ?? null;
-      if (state.activeLocationViewMode === "bin" && activeLocation && !canViewLocationBin(activeLocation)) {
+      const activeLocation =
+        hydratedSyncLocations.find((location) => location.id === state.activeLocationId) ?? null;
+      if (
+        state.activeLocationViewMode === "bin" &&
+        activeLocation &&
+        !canViewLocationBin(activeLocation)
+      ) {
         state.activeLocationViewMode = "live";
       }
     }
@@ -2301,7 +2411,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     for (const location of state.syncLocations) {
       const liveOption = document.createElement("option");
       liveOption.value = encodeLocationSelectValue(location.id, "live");
-      liveOption.textContent = location.label || `${location.bucket}`;
+      liveOption.textContent = location.label || location.bucket;
       select.append(liveOption);
 
       if (canViewLocationBin(location)) {
@@ -2328,10 +2438,13 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
     try {
       const stored = await persistence.saveSettings(toStoredProfile(state.profile));
-      state.profile = syncProfileCredentialState(normalizeProfileDraft({
-        ...state.profile,
-        ...stored,
-      }), state.credentials);
+      state.profile = syncProfileCredentialState(
+        normalizeProfileDraft({
+          ...state.profile,
+          ...stored,
+        }),
+        state.credentials,
+      );
       writeSettingsToDom();
       renderProfileSummary();
       await refreshStatus();
@@ -2352,21 +2465,22 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   async function handleCreateCredential() {
     const provider = normalizeProvider(dom.credentialProviderSelect.value);
     const name = dom.credentialNameInput.value.trim();
-    const draft: CredentialDraft = provider === "aws"
-      ? {
-        name,
-        provider: "aws",
-        accessKeyId: dom.credentialAccessKeyInput.value.trim(),
-        secretAccessKey: dom.credentialSecretKeyInput.value.trim(),
-      }
-      : {
-        name,
-        provider: "gcs",
-        credential: {
-          kind: "gcsServiceAccount",
-          serviceAccountJson: dom.credentialServiceAccountInput.value.trim(),
-        },
-      };
+    const draft: CredentialDraft =
+      provider === "aws"
+        ? {
+            name,
+            provider: "aws",
+            accessKeyId: dom.credentialAccessKeyInput.value.trim(),
+            secretAccessKey: dom.credentialSecretKeyInput.value.trim(),
+          }
+        : {
+            name,
+            provider: "gcs",
+            credential: {
+              kind: "gcsServiceAccount",
+              serviceAccountJson: dom.credentialServiceAccountInput.value.trim(),
+            },
+          };
 
     if (!client.supportsNativeProfilePersistence) {
       const message = "Credential management is only available in the desktop app.";
@@ -2375,13 +2489,15 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       return;
     }
 
-    const invalidAwsDraft = draft.provider === "aws" && (!draft.name || !draft.accessKeyId || !draft.secretAccessKey);
-    const invalidGcsDraft = draft.provider === "gcs"
-      && (!draft.name || !draft.credential.serviceAccountJson);
+    const invalidAwsDraft =
+      draft.provider === "aws" && (!draft.name || !draft.accessKeyId || !draft.secretAccessKey);
+    const invalidGcsDraft =
+      draft.provider === "gcs" && (!draft.name || !draft.credential.serviceAccountJson);
     if (invalidAwsDraft || invalidGcsDraft) {
-      const message = draft.provider === "aws"
-        ? "Enter a name, access key ID, and secret access key to create an AWS credential."
-        : "Enter a name and paste the full service account JSON to create a GCS credential.";
+      const message =
+        draft.provider === "aws"
+          ? "Enter a name, access key ID, and secret access key to create an AWS credential."
+          : "Enter a name and paste the full service account JSON to create a GCS credential.";
       dom.credentialsResult.textContent = message;
       toast(message, "error");
       return;
@@ -2396,20 +2512,23 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       dom.credentialSecretKeyInput.value = "";
       dom.credentialServiceAccountInput.value = "";
       await refreshCredentials();
-      state.profile = syncProfileCredentialState(normalizeProfileDraft({
-        ...state.profile,
-        provider: created.provider,
-        credentialProfileId: created.id,
-        selectedCredential: created,
-      }), state.credentials);
+      state.profile = syncProfileCredentialState(
+        normalizeProfileDraft({
+          ...state.profile,
+          provider: created.provider,
+          credentialProfileId: created.id,
+          selectedCredential: created,
+        }),
+        state.credentials,
+      );
       syncCreateLocationFormProviderFromProfile();
       renderProfileSummary();
       renderLocationRemoteBinState();
 
       const message = buildCredentialCreateMessage(created);
       dom.credentialsResult.textContent = `${message} It is now selected for this setup.`;
-      toast(`Created credential \"${created.name}\".`, "success");
-      addActivity("success", `Created credential \"${created.name}\".`);
+      toast(`Created credential "${created.name}".`, "success");
+      addActivity("success", `Created credential "${created.name}".`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const surfacedMessage = `Create credential failed: ${message}`;
@@ -2421,7 +2540,9 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     }
   }
 
-  function renderLocationCredentialOptions(preferredValue: string | null = dom.locationCredentialSelect.value || null) {
+  function renderLocationCredentialOptions(
+    preferredValue: string | null = dom.locationCredentialSelect.value || null,
+  ) {
     const select = dom.locationCredentialSelect;
     const editingLocation = getEditingLocation();
     select.innerHTML = "";
@@ -2441,9 +2562,10 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       select.append(option);
     }
 
-    select.value = preferredValue && Array.from(select.options).some((option) => option.value === preferredValue)
-      ? preferredValue
-      : "";
+    select.value =
+      preferredValue && Array.from(select.options).some((option) => option.value === preferredValue)
+        ? preferredValue
+        : "";
     select.disabled = select.options.length <= 1;
   }
 
@@ -2480,7 +2602,9 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   }
 
   function updateLocationProviderLabel(provider: Provider) {
-    dom.locationProviderLabel.textContent = state.providerDefinitions.find((definition) => definition.provider === provider)?.displayName ?? getProviderLabel(provider);
+    dom.locationProviderLabel.textContent =
+      state.providerDefinitions.find((definition) => definition.provider === provider)
+        ?.displayName ?? getProviderLabel(provider);
     dom.locationProviderInfo.hidden = false;
   }
 
@@ -2535,7 +2659,8 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       enabled: dom.locationEnabledInput.checked,
       remotePollingEnabled: dom.locationPollingInput.checked,
       pollIntervalSeconds: Number(dom.locationPollIntervalInput.value) || 60,
-      conflictStrategy: dom.locationConflictStrategySelect.value as SyncLocationDraft["conflictStrategy"],
+      conflictStrategy: dom.locationConflictStrategySelect
+        .value as SyncLocationDraft["conflictStrategy"],
       remoteBin: {
         enabled: isObjectVersioningEnabled() ? false : dom.locationRemoteBinEnabledInput.checked,
         retentionDays: parseRemoteBinRetentionDays(dom.locationRemoteBinRetentionInput.value),
@@ -2562,7 +2687,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       meta.className = "credential-item-meta";
 
       const name = document.createElement("strong");
-      name.textContent = location.label || `${location.bucket}`;
+      name.textContent = location.label || location.bucket;
 
       const hint = document.createElement("span");
       hint.className = "hint";
@@ -2588,7 +2713,9 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       const remoteBinBadge = document.createElement("span");
       remoteBinBadge.className = `badge ${location.objectVersioningEnabled || location.remoteBin.enabled ? "success" : "default"}`;
       remoteBinBadge.textContent = location.objectVersioningEnabled
-        ? (location.provider === "aws" ? "bucket versioning" : "object versioning")
+        ? location.provider === "aws"
+          ? "bucket versioning"
+          : "object versioning"
         : location.remoteBin.enabled
           ? `remote bin ${location.remoteBin.retentionDays}d`
           : canViewLocationBin(location)
@@ -2614,35 +2741,40 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       deleteButton.className = "secondary-btn slim-btn";
       deleteButton.type = "button";
       deleteButton.textContent = "Delete";
-      deleteButton.addEventListener("click", async () => {
-        await asyncConfirm.open({
-          title: "Delete sync location?",
-          message: `"${location.label || location.bucket}" will be permanently deleted.`,
-          acceptLabel: "Delete",
-          rejectLabel: "Cancel",
-          variant: "danger",
-          onAccept: async () => {
-            try {
-              const updatedProfile = await client.removeSyncLocation(location.id);
-              applySyncLocationState(updatedProfile.syncLocations, updatedProfile.activeLocationId ?? state.activeLocationId);
-              renderLocationsList();
-              renderLocationDropdown();
-              resetLocationForm();
+      deleteButton.addEventListener(
+        "click",
+        () =>
+          void asyncConfirm.open({
+            title: "Delete sync location?",
+            message: `"${location.label || location.bucket}" will be permanently deleted.`,
+            acceptLabel: "Delete",
+            rejectLabel: "Cancel",
+            variant: "danger",
+            onAccept: async () => {
+              try {
+                const updatedProfile = await client.removeSyncLocation(location.id);
+                applySyncLocationState(
+                  updatedProfile.syncLocations,
+                  updatedProfile.activeLocationId ?? state.activeLocationId,
+                );
+                renderLocationsList();
+                renderLocationDropdown();
+                resetLocationForm();
 
-              const message = `Deleted sync location "${location.label || location.bucket}".`;
-              dom.locationsResult.textContent = message;
-              toast(message, "success");
-              addActivity("info", message);
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              dom.locationsResult.textContent = `Delete failed: ${message}`;
-              toast(`Delete failed: ${message}`, "error");
-              addActivity("error", `Delete sync location failed: ${message}`);
-              throw createHandledAsyncConfirmError(message);
-            }
-          },
-        });
-      });
+                const message = `Deleted sync location "${location.label || location.bucket}".`;
+                dom.locationsResult.textContent = message;
+                toast(message, "success");
+                addActivity("info", message);
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                dom.locationsResult.textContent = `Delete failed: ${message}`;
+                toast(`Delete failed: ${message}`, "error");
+                addActivity("error", `Delete sync location failed: ${message}`);
+                throw createHandledAsyncConfirmError(message);
+              }
+            },
+          }),
+      );
       actions.append(deleteButton);
 
       li.append(meta, actions);
@@ -2663,9 +2795,11 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     }
 
     if (draft.credentialProfileId) {
-      const selectedCredential = state.credentials.find((credential) => credential.id === draft.credentialProfileId) ?? null;
+      const selectedCredential =
+        state.credentials.find((credential) => credential.id === draft.credentialProfileId) ?? null;
       if (!selectedCredential) {
-        const message = "Choose a saved credential for the selected provider or leave the location unassigned for now.";
+        const message =
+          "Choose a saved credential for the selected provider or leave the location unassigned for now.";
         dom.locationsResult.textContent = message;
         toast(message, "error");
         return;
@@ -2685,7 +2819,10 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
         ? await client.updateSyncLocation(draft)
         : await client.addSyncLocation(draft);
 
-      applySyncLocationState(updatedProfile.syncLocations, updatedProfile.activeLocationId ?? state.activeLocationId);
+      applySyncLocationState(
+        updatedProfile.syncLocations,
+        updatedProfile.activeLocationId ?? state.activeLocationId,
+      );
       renderLocationsList();
       renderLocationDropdown();
       resetLocationForm();
@@ -2730,7 +2867,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
     try {
       const updatedProfile = await client.setSyncLocationVersioning(editingId, newEnabled);
-      state.syncLocations = updatedProfile.syncLocations ?? state.syncLocations;
+      state.syncLocations = updatedProfile.syncLocations;
       renderLocationsList();
       renderLocationDropdown();
       setObjectVersioningEnabled(newEnabled);
@@ -2763,7 +2900,10 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
         state.profile.activeLocationId ?? state.activeLocationId,
       );
     } catch (error) {
-      applySyncLocationState(state.profile.syncLocations ?? [], state.profile.activeLocationId ?? state.activeLocationId);
+      applySyncLocationState(
+        state.profile.syncLocations,
+        state.profile.activeLocationId ?? state.activeLocationId,
+      );
       const message = error instanceof Error ? error.message : String(error);
       const surfacedMessage = `Load sync locations failed: ${message}`;
       dom.locationsResult.textContent = surfacedMessage;
@@ -2781,12 +2921,16 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
     // Get current entries to know the full set of file paths
     const cachedEntries = getCurrentViewEntries();
-    const entries: FileEntry[] = cachedEntries ?? await client.listFileEntries(state.activeLocationId);
+    const entries: FileEntry[] =
+      cachedEntries ?? (await client.listFileEntries(state.activeLocationId));
     const checkedSet = new Set(checkedPaths);
-    const mutableEntries = entries.filter((entry) => entry.kind === "file"
-      && entry.status !== "conflict"
-      && entry.status !== "review-required"
-      && entry.status !== "glacier");
+    const mutableEntries = entries.filter(
+      (entry) =>
+        entry.kind === "file" &&
+        entry.status !== "conflict" &&
+        entry.status !== "review-required" &&
+        entry.status !== "glacier",
+    );
 
     // Files that are newly checked (want local copy) - were remote-only before
     const toDownload = mutableEntries
@@ -2810,7 +2954,10 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
         addActivity("info", `Removed ${toRemove.length} local file(s).`);
       }
     } catch (err) {
-      addActivity("error", `Local copy toggle error: ${err}`);
+      addActivity(
+        "error",
+        `Local copy toggle error: ${err instanceof Error ? err.message : String(err)}`,
+      );
       await refreshLocationViews(state.activeLocationId, { clearCache: true });
       return;
     }
@@ -2853,14 +3000,17 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       addActivity(
         failed.length > 0 ? (successful.length > 0 ? "info" : "error") : "info",
         outcome.activityMessage,
-        formatBinMutationFailureDetails(failed) ?? options.entries.map((entry) => entry.path).join("\n"),
+        formatBinMutationFailureDetails(failed) ??
+          options.entries.map((entry) => entry.path).join("\n"),
       );
 
       if (failed.length === 0) {
         clearBinSelection();
       } else {
         selectedBinPaths = getSelectedBinPathsForEntries(
-          options.entries.filter((entry) => failed.some((result) => result.path === entry.path && result.kind === entry.kind)),
+          options.entries.filter((entry) =>
+            failed.some((result) => result.path === entry.path && result.kind === entry.kind),
+          ),
         );
         renderBinToolbar();
       }
@@ -2900,7 +3050,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
   async function handleFileDelete(path: string) {
     const activeLocation = state.activeLocationId
-      ? state.syncLocations.find((location) => location.id === state.activeLocationId) ?? null
+      ? (state.syncLocations.find((location) => location.id === state.activeLocationId) ?? null)
       : null;
 
     if (!activeLocation) {
@@ -2942,7 +3092,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
   async function handleFolderDelete(path: string) {
     const activeLocation = state.activeLocationId
-      ? state.syncLocations.find((location) => location.id === state.activeLocationId) ?? null
+      ? (state.syncLocations.find((location) => location.id === state.activeLocationId) ?? null)
       : null;
 
     if (!activeLocation) {
@@ -2984,7 +3134,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
   async function handleBinRestore(entry: FileEntry) {
     const activeLocation = state.activeLocationId
-      ? state.syncLocations.find((location) => location.id === state.activeLocationId) ?? null
+      ? (state.syncLocations.find((location) => location.id === state.activeLocationId) ?? null)
       : null;
 
     if (!activeLocation) {
@@ -2996,7 +3146,11 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       try {
         await client.restoreBinEntry(activeLocation.id, entry.binKey);
         toast(`Restored ${entry.kind} from ${getBinSourceLabel(entry.deletedFrom)}.`, "success");
-        addActivity("info", `Restored ${entry.kind} from ${getBinSourceLabel(entry.deletedFrom)}`, entry.path);
+        addActivity(
+          "info",
+          `Restored ${entry.kind} from ${getBinSourceLabel(entry.deletedFrom)}`,
+          entry.path,
+        );
         clearBinSelection();
         await refreshLocationViews(activeLocation.id, { clearCache: true });
       } catch (error) {
@@ -3018,7 +3172,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
   async function handleBulkBinRestore() {
     const activeLocation = state.activeLocationId
-      ? state.syncLocations.find((location) => location.id === state.activeLocationId) ?? null
+      ? (state.syncLocations.find((location) => location.id === state.activeLocationId) ?? null)
       : null;
     if (!activeLocation) {
       toast("No active sync location selected.", "error");
@@ -3042,7 +3196,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
   async function handleBulkBinPurge() {
     const activeLocation = state.activeLocationId
-      ? state.syncLocations.find((location) => location.id === state.activeLocationId) ?? null
+      ? (state.syncLocations.find((location) => location.id === state.activeLocationId) ?? null)
       : null;
     if (!activeLocation) {
       toast("No active sync location selected.", "error");
@@ -3061,7 +3215,9 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       entries,
       location: activeLocation,
       confirmMessage: getBinPurgeConfirmationMessage(activeLocation, entries.length),
-      acceptLabel: activeLocation.objectVersioningEnabled ? "Purge permanently" : "Delete permanently",
+      acceptLabel: activeLocation.objectVersioningEnabled
+        ? "Purge permanently"
+        : "Delete permanently",
       variant: "danger",
       action: (requests) => client.purgeBinEntries(activeLocation.id, requests),
     });
@@ -3097,14 +3253,14 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     return details;
   }
 
-  async function handleResolveConflict(entry: FileEntry) {
+  function handleResolveConflict(entry: FileEntry) {
     if (!isResolvableConflictEntry(entry)) {
       toast("This MVP only resolves file-vs-file conflict or review-required entries.", "info");
       return;
     }
 
     const activeLocation = state.activeLocationId
-      ? state.syncLocations.find((location) => location.id === state.activeLocationId) ?? null
+      ? (state.syncLocations.find((location) => location.id === state.activeLocationId) ?? null)
       : null;
 
     if (!activeLocation) {
@@ -3129,12 +3285,12 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       },
       onResolve: async (currentEntry, resolution) => {
         await client.resolveConflict(activeLocation.id, currentEntry.path, resolution);
-        const entryLabel = currentEntry.status === "review-required"
-          ? "Review cleared"
-          : "Conflict resolved";
-        const message = resolution === "keep-local"
-          ? `${entryLabel} by keeping the local version.`
-          : `${entryLabel} by keeping the remote version.`;
+        const entryLabel =
+          currentEntry.status === "review-required" ? "Review cleared" : "Conflict resolved";
+        const message =
+          resolution === "keep-local"
+            ? `${entryLabel} by keeping the local version.`
+            : `${entryLabel} by keeping the remote version.`;
         toast(message, "success");
         addActivity("success", message, currentEntry.path);
         await refreshLocationViews(activeLocation.id, { clearCache: true });
@@ -3144,7 +3300,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
   async function handleReveal(path: string) {
     const activeLocation = state.activeLocationId
-      ? state.syncLocations.find((location) => location.id === state.activeLocationId) ?? null
+      ? (state.syncLocations.find((location) => location.id === state.activeLocationId) ?? null)
       : null;
 
     if (!activeLocation) {
@@ -3177,7 +3333,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       return;
     }
 
-    const provider = activeLocation.provider ?? "aws";
+    const provider = activeLocation.provider;
 
     const isColdStorage =
       currentStorageClass === "GLACIER_IR" ||
@@ -3187,37 +3343,38 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       currentStorageClass === "COLDLINE" ||
       currentStorageClass === "ARCHIVE";
 
-    const coldConfig = provider === "gcs"
-      ? {
-          restoreTitle: "Restore to Standard?",
-          restoreMessage: `"${path}" is currently in ${currentStorageClass} storage. Restore it to Standard storage?`,
-          restoreAccept: "Restore to Standard",
-          restoreToast: "File restored to Standard storage.",
-          restoreActivity: "Restored file to Standard storage",
-          restoreErrorLabel: "restore file",
-          archiveTitle: "Move to Coldline storage?",
-          archiveMessage: `"${path}" will be moved to Google Cloud Storage Coldline. The local copy will not be available after this transition.`,
-          archiveAccept: "Move to Coldline",
-          archiveTarget: "COLDLINE" as const,
-          archiveToast: "File moved to Coldline storage.",
-          archiveActivity: "Moved file to Coldline storage",
-          archiveErrorLabel: "move file to Coldline",
-        }
-      : {
-          restoreTitle: "Restore from Glacier?",
-          restoreMessage: `"${path}" is currently in Glacier storage. Restore it to Standard storage? This will make the file available for syncing again.`,
-          restoreAccept: "Restore to Standard",
-          restoreToast: "File restored to Standard storage.",
-          restoreActivity: "Restored file from Glacier",
-          restoreErrorLabel: "restore file",
-          archiveTitle: "Move to Glacier storage?",
-          archiveMessage: `"${path}" will be moved to Amazon S3 Glacier Instant Retrieval. The local copy will not be available after this transition. The file will remain accessible on-demand from Glacier.`,
-          archiveAccept: "Move to Glacier",
-          archiveTarget: "GLACIER_IR" as const,
-          archiveToast: "File moved to Glacier storage.",
-          archiveActivity: "Moved file to Glacier storage",
-          archiveErrorLabel: "move file to Glacier",
-        };
+    const coldConfig =
+      provider === "gcs"
+        ? {
+            restoreTitle: "Restore to Standard?",
+            restoreMessage: `"${path}" is currently in ${currentStorageClass} storage. Restore it to Standard storage?`,
+            restoreAccept: "Restore to Standard",
+            restoreToast: "File restored to Standard storage.",
+            restoreActivity: "Restored file to Standard storage",
+            restoreErrorLabel: "restore file",
+            archiveTitle: "Move to Coldline storage?",
+            archiveMessage: `"${path}" will be moved to Google Cloud Storage Coldline. The local copy will not be available after this transition.`,
+            archiveAccept: "Move to Coldline",
+            archiveTarget: "COLDLINE" as const,
+            archiveToast: "File moved to Coldline storage.",
+            archiveActivity: "Moved file to Coldline storage",
+            archiveErrorLabel: "move file to Coldline",
+          }
+        : {
+            restoreTitle: "Restore from Glacier?",
+            restoreMessage: `"${path}" is currently in Glacier storage. Restore it to Standard storage? This will make the file available for syncing again.`,
+            restoreAccept: "Restore to Standard",
+            restoreToast: "File restored to Standard storage.",
+            restoreActivity: "Restored file from Glacier",
+            restoreErrorLabel: "restore file",
+            archiveTitle: "Move to Glacier storage?",
+            archiveMessage: `"${path}" will be moved to Amazon S3 Glacier Instant Retrieval. The local copy will not be available after this transition. The file will remain accessible on-demand from Glacier.`,
+            archiveAccept: "Move to Glacier",
+            archiveTarget: "GLACIER_IR" as const,
+            archiveToast: "File moved to Glacier storage.",
+            archiveActivity: "Moved file to Glacier storage",
+            archiveErrorLabel: "move file to Glacier",
+          };
 
     if (isColdStorage) {
       // Currently in cold storage — offer to restore to Standard
@@ -3302,26 +3459,22 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     return value?.trim() ? value : "Unavailable";
   }
 
-  function escapeHtml(text: string): string {
-    return text
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#039;");
-  }
-
-  type VersionComparisonModalOptions = {
+  interface VersionComparisonModalOptions {
     entryPath: string;
     versionA: FileVersionEntry;
     versionB: FileVersionEntry;
     onCompare: () => Promise<VersionComparisonDetails>;
-  };
+  }
 
   type VersionCompareState =
     | { status: "idle"; mode: null; details: null; message: string }
     | { status: "loading"; mode: null; details: null; message: string }
-    | { status: "ready"; mode: "text" | "image" | "external"; details: VersionComparisonDetails; message: string }
+    | {
+        status: "ready";
+        mode: "text" | "image" | "external";
+        details: VersionComparisonDetails;
+        message: string;
+      }
     | { status: "error"; mode: null; details: null; message: string };
 
   function createVersionComparisonModalController(
@@ -3332,7 +3485,8 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     backdrop.hidden = true;
 
     const dialog = document.createElement("div");
-    dialog.className = "modal-card storage-modal-card storage-modal-card-wide storage-conflict-modal-card";
+    dialog.className =
+      "modal-card storage-modal-card storage-modal-card-wide storage-conflict-modal-card";
 
     const titleId = `storage-version-compare-title-${Math.random().toString(36).slice(2)}`;
     dialog.setAttribute("role", "dialog");
@@ -3453,12 +3607,14 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     let visible = false;
     let isComparing = false;
     let currentOptions: VersionComparisonModalOptions | null = null;
-    let inlineCompareState: VersionCompareState = { status: "idle", mode: null, details: null, message: "Click Compare to load inline previews or open external diff tools." };
+    let inlineCompareState: VersionCompareState = {
+      status: "idle",
+      mode: null,
+      details: null,
+      message: "Click Compare to load inline previews or open external diff tools.",
+    };
 
-    const renderMetaList = (
-      list: HTMLUListElement,
-      values: Array<[string, string]>,
-    ) => {
+    const renderMetaList = (list: HTMLUListElement, values: [string, string][]) => {
       list.innerHTML = "";
       for (const [label, value] of values) {
         const item = document.createElement("li");
@@ -3494,9 +3650,10 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     const renderInlineCompareState = () => {
       compareState.textContent = inlineCompareState.message;
       compareState.classList.toggle("danger", inlineCompareState.status === "error");
-      compareSurface.hidden = inlineCompareState.status !== "ready" || inlineCompareState.mode === "external";
+      compareSurface.hidden =
+        inlineCompareState.status !== "ready" || inlineCompareState.mode === "external";
 
-      if (inlineCompareState.status !== "ready" || !inlineCompareState.details) {
+      if (inlineCompareState.status !== "ready") {
         versionAContent.innerHTML = "";
         versionBContent.innerHTML = "";
         return;
@@ -3539,7 +3696,12 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       if (!visible || isComparing) return;
       visible = false;
       currentOptions = null;
-      inlineCompareState = { status: "idle", mode: null, details: null, message: "Click Compare to load inline previews or open external diff tools." };
+      inlineCompareState = {
+        status: "idle",
+        mode: null,
+        details: null,
+        message: "Click Compare to load inline previews or open external diff tools.",
+      };
       renderInlineCompareState();
       closeModal({ backdrop });
     };
@@ -3562,15 +3724,18 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
           status: "ready",
           mode: details.mode,
           details,
-          message: details.mode === "image"
-            ? "Showing inline image previews."
-            : details.mode === "text"
-              ? "Showing inline text comparison."
-              : details.fallbackReason ?? "Opened for external comparison.",
+          message:
+            details.mode === "image"
+              ? "Showing inline image previews."
+              : details.mode === "text"
+                ? "Showing inline text comparison."
+                : (details.fallbackReason ?? "Opened for external comparison."),
         };
         if (details.mode === "external") {
-            if (details.versionATempPath) client.openPath(details.versionATempPath).catch(console.error);
-            if (details.versionBTempPath) client.openPath(details.versionBTempPath).catch(console.error);
+          if (details.versionATempPath)
+            client.openPath(details.versionATempPath).catch(console.error);
+          if (details.versionBTempPath)
+            client.openPath(details.versionBTempPath).catch(console.error);
         }
         renderInlineCompareState();
       } catch (error) {
@@ -3618,8 +3783,14 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
           ["ETag", formatVersionEtag(options.versionB.etag)],
         ]);
 
-        compareHint.textContent = "Compare loads inline image/text previews when available and otherwise opens the downloaded remote temp copies externally.";
-        inlineCompareState = { status: "idle", mode: null, details: null, message: "Click Compare to load inline previews or open external diff tools." };
+        compareHint.textContent =
+          "Compare loads inline image/text previews when available and otherwise opens the downloaded remote temp copies externally.";
+        inlineCompareState = {
+          status: "idle",
+          mode: null,
+          details: null,
+          message: "Click Compare to load inline previews or open external diff tools.",
+        };
         renderInlineCompareState();
 
         syncBusyState();
@@ -3641,7 +3812,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   function renderVersionsList(versions: FileVersionEntry[], locationId: string, filePath: string) {
     dom.fileVersionsDrawerList.innerHTML = "";
     dom.fileVersionsDrawerEmpty.hidden = versions.length > 0;
-    
+
     dom.fileVersionsDrawerCompareToolbar.hidden = false;
 
     const selectedVersions = new Set<string>();
@@ -3652,21 +3823,23 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
     updateCompareToolbar();
 
-    dom.fileVersionsDrawerCompareBtn.onclick = async () => {
+    dom.fileVersionsDrawerCompareBtn.onclick = () => {
       const sortedSelected = Array.from(selectedVersions).sort((a, b) => {
-        const indexA = versions.findIndex(v => v.versionId === a);
-        const indexB = versions.findIndex(v => v.versionId === b);
+        const indexA = versions.findIndex((v) => v.versionId === a);
+        const indexB = versions.findIndex((v) => v.versionId === b);
         return indexA - indexB;
       });
       const [versionAId, versionBId] = sortedSelected;
-      const versionA = versions.find(v => v.versionId === versionAId)!;
-      const versionB = versions.find(v => v.versionId === versionBId)!;
+      const versionA = versions.find((v) => v.versionId === versionAId);
+      const versionB = versions.find((v) => v.versionId === versionBId);
+      if (!versionA || !versionB) return;
 
       versionComparisonModal.open({
         entryPath: filePath,
         versionA,
         versionB,
-        onCompare: () => client.prepareVersionComparison(locationId, filePath, versionAId, versionBId),
+        onCompare: () =>
+          client.prepareVersionComparison(locationId, filePath, versionAId, versionBId),
       });
     };
 
@@ -3719,31 +3892,39 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
         restoreBtn.className = "secondary-btn slim-btn";
         restoreBtn.type = "button";
         restoreBtn.textContent = "Restore";
-        restoreBtn.addEventListener("click", async () => {
-          const ok = await confirmModal({
-            title: "Restore this version?",
-            message: `This will make the version from ${formatVersionDate(version.lastModifiedAt)} the new latest version of "${filePath}". The current version will be kept as a previous version.`,
-            acceptLabel: "Restore",
-            rejectLabel: "Cancel",
-          });
-          if (!ok) return;
+        restoreBtn.addEventListener(
+          "click",
+          () =>
+            void (async () => {
+              const ok = await confirmModal({
+                title: "Restore this version?",
+                message: `This will make the version from ${formatVersionDate(version.lastModifiedAt)} the new latest version of "${filePath}". The current version will be kept as a previous version.`,
+                acceptLabel: "Restore",
+                rejectLabel: "Cancel",
+              });
+              if (!ok) return;
 
-          restoreBtn.disabled = true;
-          restoreBtn.textContent = "Restoring…";
-          try {
-            await client.restoreFileVersion(locationId, filePath, version.versionId);
-            toast("Version restored successfully.", "success");
-            addActivity("success", `Restored version of "${filePath}"`, `Version from ${formatVersionDate(version.lastModifiedAt)}`);
-            closeDrawer({ drawer: dom.fileVersionsDrawer });
-            await refreshLocationViews(locationId, { clearCache: true });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            toast(`Failed to restore version: ${message}`, "error");
-            addActivity("error", `Failed to restore version of "${filePath}"`, message);
-            restoreBtn.disabled = false;
-            restoreBtn.textContent = "Restore";
-          }
-        });
+              restoreBtn.disabled = true;
+              restoreBtn.textContent = "Restoring…";
+              try {
+                await client.restoreFileVersion(locationId, filePath, version.versionId);
+                toast("Version restored successfully.", "success");
+                addActivity(
+                  "success",
+                  `Restored version of "${filePath}"`,
+                  `Version from ${formatVersionDate(version.lastModifiedAt)}`,
+                );
+                closeDrawer({ drawer: dom.fileVersionsDrawer });
+                await refreshLocationViews(locationId, { clearCache: true });
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                toast(`Failed to restore version: ${message}`, "error");
+                addActivity("error", `Failed to restore version of "${filePath}"`, message);
+                restoreBtn.disabled = false;
+                restoreBtn.textContent = "Restore";
+              }
+            })(),
+        );
         actionDiv.appendChild(restoreBtn);
       }
 
@@ -3752,36 +3933,44 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       deleteBtn.type = "button";
       deleteBtn.title = "Delete version";
       deleteBtn.innerHTML = '<i data-lucide="trash-2"></i>';
-      deleteBtn.addEventListener("click", async () => {
-        const ok = await confirmModal({
-          title: "Delete this version?",
-          message: `Are you sure you want to permanently delete the version from ${formatVersionDate(version.lastModifiedAt)}? This cannot be undone.`,
-          acceptLabel: "Delete",
-          rejectLabel: "Cancel",
-        });
-        if (!ok) return;
-        
-        deleteBtn.disabled = true;
-        try {
-          await client.deleteFileVersion(locationId, filePath, version.versionId);
-          toast("Version deleted successfully.", "success");
-          addActivity("success", `Deleted version of "${filePath}"`, `Version from ${formatVersionDate(version.lastModifiedAt)}`);
-          
-          dom.fileVersionsDrawerLoading.hidden = false;
-          dom.fileVersionsDrawerEmpty.hidden = true;
-          dom.fileVersionsDrawerList.innerHTML = "";
-          const updatedVersions = await client.listFileVersions(locationId, filePath);
-          dom.fileVersionsDrawerLoading.hidden = true;
-          renderVersionsList(updatedVersions, locationId, filePath);
-          
-          await refreshLocationViews(locationId, { clearCache: true });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          toast(`Failed to delete version: ${message}`, "error");
-          addActivity("error", `Failed to delete version of "${filePath}"`, message);
-          deleteBtn.disabled = false;
-        }
-      });
+      deleteBtn.addEventListener(
+        "click",
+        () =>
+          void (async () => {
+            const ok = await confirmModal({
+              title: "Delete this version?",
+              message: `Are you sure you want to permanently delete the version from ${formatVersionDate(version.lastModifiedAt)}? This cannot be undone.`,
+              acceptLabel: "Delete",
+              rejectLabel: "Cancel",
+            });
+            if (!ok) return;
+
+            deleteBtn.disabled = true;
+            try {
+              await client.deleteFileVersion(locationId, filePath, version.versionId);
+              toast("Version deleted successfully.", "success");
+              addActivity(
+                "success",
+                `Deleted version of "${filePath}"`,
+                `Version from ${formatVersionDate(version.lastModifiedAt)}`,
+              );
+
+              dom.fileVersionsDrawerLoading.hidden = false;
+              dom.fileVersionsDrawerEmpty.hidden = true;
+              dom.fileVersionsDrawerList.innerHTML = "";
+              const updatedVersions = await client.listFileVersions(locationId, filePath);
+              dom.fileVersionsDrawerLoading.hidden = true;
+              renderVersionsList(updatedVersions, locationId, filePath);
+
+              await refreshLocationViews(locationId, { clearCache: true });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              toast(`Failed to delete version: ${message}`, "error");
+              addActivity("error", `Failed to delete version of "${filePath}"`, message);
+              deleteBtn.disabled = false;
+            }
+          })(),
+      );
       actionDiv.appendChild(deleteBtn);
 
       li.appendChild(actionDiv);
@@ -3852,12 +4041,11 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
     try {
       const activeLocation = getActiveLocation() ?? getSavedActiveLocation();
-      const isVersioningEnabled = mode === "live" && (activeLocation?.objectVersioningEnabled ?? false);
+      const isVersioningEnabled =
+        mode === "live" && (activeLocation?.objectVersioningEnabled ?? false);
 
       const [entries, versionCountEntries] = await Promise.all([
-        mode === "bin"
-          ? client.listBinEntries(locationId)
-          : client.listFileEntries(locationId),
+        mode === "bin" ? client.listBinEntries(locationId) : client.listFileEntries(locationId),
         isVersioningEnabled
           ? client.listVersionCounts(locationId).catch(() => [] as VersionCountEntry[])
           : Promise.resolve([] as VersionCountEntry[]),
@@ -3880,9 +4068,9 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       const entriesJson = JSON.stringify(entries);
       const cachedSnapshot = getViewSnapshot(viewKey);
       if (
-        cachedSnapshot?.entriesJson === entriesJson
-        && cachedSnapshot.versionCountsJson === nextVersionCountsJson
-        && fileTreeHandle
+        cachedSnapshot?.entriesJson === entriesJson &&
+        cachedSnapshot.versionCountsJson === nextVersionCountsJson &&
+        fileTreeHandle
       ) {
         renderStatus();
         return;
@@ -3908,18 +4096,23 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     clearBinSelection();
     state.activeLocationId = selection.locationId;
     const selectedLocation = selection.locationId
-      ? state.syncLocations.find((location) => location.id === selection.locationId) ?? null
+      ? (state.syncLocations.find((location) => location.id === selection.locationId) ?? null)
       : null;
-    state.activeLocationViewMode = selection.mode === "bin" && selectedLocation && !canViewLocationBin(selectedLocation)
-      ? "live"
-      : selection.mode;
+    state.activeLocationViewMode =
+      selection.mode === "bin" && selectedLocation && !canViewLocationBin(selectedLocation)
+        ? "live"
+        : selection.mode;
     state.profile = { ...state.profile, activeLocationId: state.activeLocationId };
     void persistence.saveSettings(toStoredProfile(state.profile));
     renderProfileSummary();
     renderFileTreeViewState();
     const cachedSnapshot = getViewSnapshot();
     if (cachedSnapshot) {
-      renderFileTreeEntries(cachedSnapshot.entries, state.activeLocationViewMode, cachedSnapshot.versionCounts);
+      renderFileTreeEntries(
+        cachedSnapshot.entries,
+        state.activeLocationViewMode,
+        cachedSnapshot.versionCounts,
+      );
       renderStatus();
     }
     void refreshFileTree();
@@ -3931,9 +4124,18 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   });
   dom.restoreSelectedBtn.addEventListener("click", () => void handleBulkBinRestore());
   dom.purgeSelectedBtn.addEventListener("click", () => void handleBulkBinPurge());
-  dom.savePollingBtn.addEventListener("click", () => void handleSaveSettings(dom.savePollingBtn, dom.pollingResult));
-  dom.saveDebugBtn.addEventListener("click", () => void handleSaveSettings(dom.saveDebugBtn, dom.debugResult));
-  dom.saveConflictBtn.addEventListener("click", () => void handleSaveSettings(dom.saveConflictBtn, dom.conflictResult));
+  dom.savePollingBtn.addEventListener(
+    "click",
+    () => void handleSaveSettings(dom.savePollingBtn, dom.pollingResult),
+  );
+  dom.saveDebugBtn.addEventListener(
+    "click",
+    () => void handleSaveSettings(dom.saveDebugBtn, dom.debugResult),
+  );
+  dom.saveConflictBtn.addEventListener(
+    "click",
+    () => void handleSaveSettings(dom.saveConflictBtn, dom.conflictResult),
+  );
   dom.locationProviderSelect.addEventListener("change", () => {
     renderLocationProviderState();
     renderLocationRemoteBinState();
@@ -3955,36 +4157,57 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     dom.locationsResult.textContent = "Edit cancelled.";
   });
   dom.locationVersioningCheckbox.addEventListener("change", () => {
-    dom.locationObjectVersioningEnabledInput.value = dom.locationVersioningCheckbox.checked ? "true" : "false";
+    dom.locationObjectVersioningEnabledInput.value = dom.locationVersioningCheckbox.checked
+      ? "true"
+      : "false";
     renderLocationRemoteBinState();
   });
   dom.locationObjectVersioningBtn.addEventListener("click", () => void handleVersioningToggle());
   dom.locationRemoteBinEnabledInput.addEventListener("change", renderLocationRemoteBinState);
   dom.locationRemoteBinRetentionInput.addEventListener("input", renderLocationRemoteBinState);
   resetLocationForm();
-  dom.locationBrowseFolderBtn.addEventListener("click", async () => {
-    const selected = await client.chooseLocalFolder();
-    if (!selected) {
-      toast("Folder picker is available in the desktop app.", "info");
-      return;
-    }
-    dom.locationLocalFolderInput.value = selected;
-  });
-  dom.openDebugLogFolderBtn.addEventListener("click", async () => {
-    await client.openActivityDebugLogFolder();
-  });
+  dom.locationBrowseFolderBtn.addEventListener(
+    "click",
+    () =>
+      void (async () => {
+        const selected = await client.chooseLocalFolder();
+        if (!selected) {
+          toast("Folder picker is available in the desktop app.", "info");
+          return;
+        }
+        dom.locationLocalFolderInput.value = selected;
+      })(),
+  );
+  dom.openDebugLogFolderBtn.addEventListener(
+    "click",
+    () => void client.openActivityDebugLogFolder(),
+  );
 
   bindNavigation({
     root: dom.nav,
     onSelect: (id) => {
       switch (id) {
-        case "nav-home": closeAllDialogs(); break;
-        case "nav-credentials": openDialog("credentials"); break;
-        case "nav-locations": openDialog("locations"); break;
-        case "nav-activity": openDialog("activity"); break;
-        case "nav-polling-settings": openDialog("polling"); break;
-        case "nav-debug-settings": openDialog("debug"); break;
-        case "nav-conflict-settings": openDialog("conflict"); break;
+        case "nav-home":
+          closeAllDialogs();
+          break;
+        case "nav-credentials":
+          openDialog("credentials");
+          break;
+        case "nav-locations":
+          openDialog("locations");
+          break;
+        case "nav-activity":
+          openDialog("activity");
+          break;
+        case "nav-polling-settings":
+          openDialog("polling");
+          break;
+        case "nav-debug-settings":
+          openDialog("debug");
+          break;
+        case "nav-conflict-settings":
+          openDialog("conflict");
+          break;
         case "open-debug-folder":
           client.openActivityDebugLogFolder().catch(console.error);
           break;
@@ -4007,7 +4230,10 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   const unlistenStatus = await client.listenSyncStatus((status) => {
     state.status = status;
     renderStatus();
-    addActivity("info", `Status updated: ${describeSyncStatus(status).badgeLabel}. ${new Intl.NumberFormat().format(getSyncOverviewStats(status).inSync)} files are in sync.`);
+    addActivity(
+      "info",
+      `Status updated: ${describeSyncStatus(status).badgeLabel}. ${new Intl.NumberFormat().format(getSyncOverviewStats(status).inSync)} files are in sync.`,
+    );
     debouncedRefreshFileTree();
   });
 
@@ -4016,8 +4242,8 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   });
 
   const handleBeforeUnload = () => {
-    void unlistenStatus();
-    void unlistenActivity();
+    unlistenStatus();
+    unlistenActivity();
   };
 
   window.addEventListener("beforeunload", handleBeforeUnload);
@@ -4050,9 +4276,12 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       : "Sync location management is shown here for preview, but real sync locations are desktop-only.";
   }
 
-  addActivity("info", client.supportsNativeProfilePersistence
-    ? "Ready to connect a folder, remote bucket, and named credential."
-    : "Browser preview loaded. Credential management and sync stay desktop-only here.");
+  addActivity(
+    "info",
+    client.supportsNativeProfilePersistence
+      ? "Ready to connect a folder, remote bucket, and named credential."
+      : "Browser preview loaded. Credential management and sync stay desktop-only here.",
+  );
 
   return () => {
     debouncedRefreshFileTree.cancel();
@@ -4068,9 +4297,9 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     destroyFileTree();
     asyncConfirm.destroy();
     conflictResolutionModal.destroy();
-  
+
     window.removeEventListener("beforeunload", handleBeforeUnload);
-    void unlistenStatus();
-    void unlistenActivity();
+    unlistenStatus();
+    unlistenActivity();
   };
 }

@@ -1,14 +1,19 @@
 export const CONFLICT_STRATEGIES = ["preserve-both", "prefer-local", "prefer-remote"] as const;
 
-export type ConflictStrategy = typeof CONFLICT_STRATEGIES[number];
+export type ConflictStrategy = (typeof CONFLICT_STRATEGIES)[number];
 
 export const PROVIDERS = ["aws", "gcs"] as const;
 
-export type Provider = typeof PROVIDERS[number];
+export type Provider = (typeof PROVIDERS)[number];
 
 export type LegacyProvider = Provider | "gcp" | "google-cloud-storage" | "google cloud storage";
 
-const GCS_PROVIDER_ALIASES = new Set(["gcp", "gcs", "google-cloud-storage", "google cloud storage"]);
+const GCS_PROVIDER_ALIASES = new Set([
+  "gcp",
+  "gcs",
+  "google-cloud-storage",
+  "google cloud storage",
+]);
 
 export type ProviderCapabilityStatusKind =
   | "supported"
@@ -66,29 +71,29 @@ interface CredentialSummaryBase {
 
 export type CredentialSummary =
   | (CredentialSummaryBase & {
-    provider: "aws";
-    summary?: AwsCredentialSummaryDetails | null;
-  })
+      provider: "aws";
+      summary?: AwsCredentialSummaryDetails | null;
+    })
   | (CredentialSummaryBase & {
-    provider: "gcs";
-    summary?: GcsCredentialSummaryDetails | null;
-  });
+      provider: "gcs";
+      summary?: GcsCredentialSummaryDetails | null;
+    });
 
 export type CredentialDraft =
   | {
-    name: string;
-    provider: "aws";
-    accessKeyId: string;
-    secretAccessKey: string;
-  }
+      name: string;
+      provider: "aws";
+      accessKeyId: string;
+      secretAccessKey: string;
+    }
   | {
-    name: string;
-    provider: "gcs";
-    credential: {
-      kind: "gcsServiceAccount";
-      serviceAccountJson: string;
+      name: string;
+      provider: "gcs";
+      credential: {
+        kind: "gcsServiceAccount";
+        serviceAccountJson: string;
+      };
     };
-  };
 
 const CAPABILITY_STATUS_ALIASES: Record<string, ProviderCapabilityStatusKind> = {
   available: "supported",
@@ -130,7 +135,10 @@ function createSupportedCapability(message: string | null = null): ProviderCapab
   };
 }
 
-function normalizeSingleCapability(value: unknown, fallback: ProviderCapabilityStatus): ProviderCapabilityStatus {
+function normalizeSingleCapability(
+  value: unknown,
+  fallback: ProviderCapabilityStatus,
+): ProviderCapabilityStatus {
   if (typeof value === "string") {
     return {
       status: normalizeCapabilityStatusKind(value) ?? fallback.status,
@@ -144,42 +152,29 @@ function normalizeSingleCapability(value: unknown, fallback: ProviderCapabilityS
 
   const record = value as Record<string, unknown>;
   return {
-    status: normalizeCapabilityStatusKind(record.status ?? record.state ?? record.availability) ?? fallback.status,
-    message: normalizeCapabilityMessage(record.message ?? record.reason ?? record.detail) ?? fallback.message,
+    status:
+      normalizeCapabilityStatusKind(record.status ?? record.state ?? record.availability) ??
+      fallback.status,
+    message:
+      normalizeCapabilityMessage(record.message ?? record.reason ?? record.detail) ??
+      fallback.message,
   };
 }
 
-function getDefaultArchiveCapability(provider: Provider): ProviderCapabilityStatus {
-  return provider === "aws" || provider === "gcs"
-    ? createSupportedCapability()
-    : {
-      status: "runtime-unavailable",
-      message: "Storage class changes are not yet available for this provider.",
-    };
+function getDefaultArchiveCapability(_provider: Provider): ProviderCapabilityStatus {
+  return createSupportedCapability();
 }
 
-function getDefaultObjectVersioningCapability(provider: Provider): ProviderCapabilityStatus {
-  return provider === "aws" || provider === "gcs"
-    ? createSupportedCapability()
-    : {
-      status: "runtime-unavailable",
-      message: "Object versioning is not yet available for this provider.",
-    };
+function getDefaultObjectVersioningCapability(_provider: Provider): ProviderCapabilityStatus {
+  return createSupportedCapability();
 }
 
-function getDefaultRemoteBinCapability(provider: Provider): ProviderCapabilityStatus {
-  return provider === "aws" || provider === "gcs"
-    ? createSupportedCapability()
-    : {
-      status: "unsupported",
-      message: "Remote bin is not yet available for this provider.",
-    };
+function getDefaultRemoteBinCapability(_provider: Provider): ProviderCapabilityStatus {
+  return createSupportedCapability();
 }
 
 export function normalizeProvider(value: string | null | undefined): Provider {
-  return GCS_PROVIDER_ALIASES.has(value?.trim().toLowerCase() ?? "")
-    ? "gcs"
-    : "aws";
+  return GCS_PROVIDER_ALIASES.has(value?.trim().toLowerCase() ?? "") ? "gcs" : "aws";
 }
 
 export function getProviderLabel(provider: Provider): string {
@@ -201,21 +196,21 @@ export function defaultProviderDefinition(provider: Provider): ProviderDefinitio
         supportsBucketLifecycle: true,
         supportsManualCredentials: true,
         supportsNativeValidation: true,
-    }
+      }
     : {
-      provider: "aws",
-      displayName: "Amazon S3",
-      aliases: ["s3"],
-      credentialKind: "aws-access-key",
-      supportsBucketCreation: true,
-      supportsObjectVersioning: true,
-      supportsRemoteBin: true,
-      supportsStorageClass: true,
-      supportsFileVersions: true,
-      supportsBucketLifecycle: true,
-      supportsManualCredentials: true,
-      supportsNativeValidation: true,
-    };
+        provider: "aws",
+        displayName: "Amazon S3",
+        aliases: ["s3"],
+        credentialKind: "aws-access-key",
+        supportsBucketCreation: true,
+        supportsObjectVersioning: true,
+        supportsRemoteBin: true,
+        supportsStorageClass: true,
+        supportsFileVersions: true,
+        supportsBucketLifecycle: true,
+        supportsManualCredentials: true,
+        supportsNativeValidation: true,
+      };
 }
 
 export function normalizeProviderDefinition(value: unknown): ProviderDefinition | null {
@@ -227,59 +222,70 @@ export function normalizeProviderDefinition(value: unknown): ProviderDefinition 
   const provider = normalizeProvider(normalizeText(record.provider) ?? undefined);
   const fallback = defaultProviderDefinition(provider);
   const aliases = Array.isArray(record.aliases)
-    ? record.aliases.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    ? record.aliases.filter(
+        (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
+      )
     : fallback.aliases;
-  const credentialKind = record.credentialKind === "gcsServiceAccount" || record.credentialKind === "gcs-service-account"
-    ? "gcs-service-account"
-    : record.credentialKind === "awsAccessKey" || record.credentialKind === "aws-access-key"
-      ? "aws-access-key"
-      : fallback.credentialKind;
+  const credentialKind =
+    record.credentialKind === "gcsServiceAccount" || record.credentialKind === "gcs-service-account"
+      ? "gcs-service-account"
+      : record.credentialKind === "awsAccessKey" || record.credentialKind === "aws-access-key"
+        ? "aws-access-key"
+        : fallback.credentialKind;
 
   return {
     provider,
     displayName: normalizeText(record.displayName ?? record.display_name) ?? fallback.displayName,
     aliases,
     credentialKind,
-    supportsBucketCreation: typeof record.supportsBucketCreation === "boolean"
-      ? record.supportsBucketCreation
-      : typeof record.supports_bucket_creation === "boolean"
-        ? record.supports_bucket_creation
-        : fallback.supportsBucketCreation,
-    supportsObjectVersioning: typeof record.supportsObjectVersioning === "boolean"
-      ? record.supportsObjectVersioning
-      : typeof record.supports_object_versioning === "boolean"
-        ? record.supports_object_versioning
-        : fallback.supportsObjectVersioning,
-    supportsRemoteBin: typeof record.supportsRemoteBin === "boolean"
-      ? record.supportsRemoteBin
-      : typeof record.supports_remote_bin === "boolean"
-        ? record.supports_remote_bin
-        : fallback.supportsRemoteBin,
-    supportsStorageClass: typeof record.supportsStorageClass === "boolean"
-      ? record.supportsStorageClass
-      : typeof record.supports_storage_class === "boolean"
-        ? record.supports_storage_class
-        : fallback.supportsStorageClass,
-    supportsFileVersions: typeof record.supportsFileVersions === "boolean"
-      ? record.supportsFileVersions
-      : typeof record.supports_file_versions === "boolean"
-        ? record.supports_file_versions
-        : fallback.supportsFileVersions,
-    supportsBucketLifecycle: typeof record.supportsBucketLifecycle === "boolean"
-      ? record.supportsBucketLifecycle
-      : typeof record.supports_bucket_lifecycle === "boolean"
-        ? record.supports_bucket_lifecycle
-        : fallback.supportsBucketLifecycle,
-    supportsManualCredentials: typeof record.supportsManualCredentials === "boolean"
-      ? record.supportsManualCredentials
-      : typeof record.supports_manual_credentials === "boolean"
-        ? record.supports_manual_credentials
-        : fallback.supportsManualCredentials,
-    supportsNativeValidation: typeof record.supportsNativeValidation === "boolean"
-      ? record.supportsNativeValidation
-      : typeof record.supports_native_validation === "boolean"
-        ? record.supports_native_validation
-        : fallback.supportsNativeValidation,
+    supportsBucketCreation:
+      typeof record.supportsBucketCreation === "boolean"
+        ? record.supportsBucketCreation
+        : typeof record.supports_bucket_creation === "boolean"
+          ? record.supports_bucket_creation
+          : fallback.supportsBucketCreation,
+    supportsObjectVersioning:
+      typeof record.supportsObjectVersioning === "boolean"
+        ? record.supportsObjectVersioning
+        : typeof record.supports_object_versioning === "boolean"
+          ? record.supports_object_versioning
+          : fallback.supportsObjectVersioning,
+    supportsRemoteBin:
+      typeof record.supportsRemoteBin === "boolean"
+        ? record.supportsRemoteBin
+        : typeof record.supports_remote_bin === "boolean"
+          ? record.supports_remote_bin
+          : fallback.supportsRemoteBin,
+    supportsStorageClass:
+      typeof record.supportsStorageClass === "boolean"
+        ? record.supportsStorageClass
+        : typeof record.supports_storage_class === "boolean"
+          ? record.supports_storage_class
+          : fallback.supportsStorageClass,
+    supportsFileVersions:
+      typeof record.supportsFileVersions === "boolean"
+        ? record.supportsFileVersions
+        : typeof record.supports_file_versions === "boolean"
+          ? record.supports_file_versions
+          : fallback.supportsFileVersions,
+    supportsBucketLifecycle:
+      typeof record.supportsBucketLifecycle === "boolean"
+        ? record.supportsBucketLifecycle
+        : typeof record.supports_bucket_lifecycle === "boolean"
+          ? record.supports_bucket_lifecycle
+          : fallback.supportsBucketLifecycle,
+    supportsManualCredentials:
+      typeof record.supportsManualCredentials === "boolean"
+        ? record.supportsManualCredentials
+        : typeof record.supports_manual_credentials === "boolean"
+          ? record.supports_manual_credentials
+          : fallback.supportsManualCredentials,
+    supportsNativeValidation:
+      typeof record.supportsNativeValidation === "boolean"
+        ? record.supportsNativeValidation
+        : typeof record.supports_native_validation === "boolean"
+          ? record.supports_native_validation
+          : fallback.supportsNativeValidation,
   };
 }
 
@@ -299,16 +305,22 @@ export function defaultProviderCapabilities(provider: Provider): ProviderCapabil
   };
 }
 
-function capabilityFromBoolean(value: boolean, unsupportedMessage: string): ProviderCapabilityStatus {
+function capabilityFromBoolean(
+  value: boolean,
+  unsupportedMessage: string,
+): ProviderCapabilityStatus {
   return value
     ? createSupportedCapability()
     : {
-      status: "unsupported",
-      message: unsupportedMessage,
-    };
+        status: "unsupported",
+        message: unsupportedMessage,
+      };
 }
 
-export function normalizeProviderCapabilities(value: unknown, provider: Provider): ProviderCapabilities {
+export function normalizeProviderCapabilities(
+  value: unknown,
+  provider: Provider,
+): ProviderCapabilities {
   const defaults = defaultProviderCapabilities(provider);
   if (!value || typeof value !== "object") {
     return defaults;
@@ -317,33 +329,42 @@ export function normalizeProviderCapabilities(value: unknown, provider: Provider
   const record = value as Record<string, unknown>;
 
   if (
-    typeof record.supportsObjectVersioning === "boolean"
-    || typeof record.supports_object_versioning === "boolean"
-    || typeof record.supportsRemoteBin === "boolean"
-    || typeof record.supports_remote_bin === "boolean"
-    || typeof record.supportsStorageClass === "boolean"
-    || typeof record.supports_storage_class === "boolean"
+    typeof record.supportsObjectVersioning === "boolean" ||
+    typeof record.supports_object_versioning === "boolean" ||
+    typeof record.supportsRemoteBin === "boolean" ||
+    typeof record.supports_remote_bin === "boolean" ||
+    typeof record.supportsStorageClass === "boolean" ||
+    typeof record.supports_storage_class === "boolean"
   ) {
-    const supportsObjectVersioning = typeof record.supportsObjectVersioning === "boolean"
-      ? record.supportsObjectVersioning
-      : typeof record.supports_object_versioning === "boolean"
-        ? record.supports_object_versioning
-        : provider === "aws" || provider === "gcs";
-    const supportsRemoteBin = typeof record.supportsRemoteBin === "boolean"
-      ? record.supportsRemoteBin
-      : typeof record.supports_remote_bin === "boolean"
-        ? record.supports_remote_bin
-        : provider === "aws" || provider === "gcs";
-    const supportsStorageClass = typeof record.supportsStorageClass === "boolean"
-      ? record.supportsStorageClass
-      : typeof record.supports_storage_class === "boolean"
-        ? record.supports_storage_class
-        : provider === "aws" || provider === "gcs";
+    const supportsObjectVersioning =
+      typeof record.supportsObjectVersioning === "boolean"
+        ? record.supportsObjectVersioning
+        : typeof record.supports_object_versioning === "boolean"
+          ? record.supports_object_versioning
+          : true;
+    const supportsRemoteBin =
+      typeof record.supportsRemoteBin === "boolean"
+        ? record.supportsRemoteBin
+        : typeof record.supports_remote_bin === "boolean"
+          ? record.supports_remote_bin
+          : true;
+    const supportsStorageClass =
+      typeof record.supportsStorageClass === "boolean"
+        ? record.supportsStorageClass
+        : typeof record.supports_storage_class === "boolean"
+          ? record.supports_storage_class
+          : true;
 
     return {
-      objectVersioning: supportsObjectVersioning ? defaults.objectVersioning : capabilityFromBoolean(false, "Not supported for this provider."),
-      remoteBin: supportsRemoteBin ? defaults.remoteBin : capabilityFromBoolean(false, "Not supported for this provider."),
-      archiveStorage: supportsStorageClass ? defaults.archiveStorage : capabilityFromBoolean(false, "Not supported for this provider."),
+      objectVersioning: supportsObjectVersioning
+        ? defaults.objectVersioning
+        : capabilityFromBoolean(false, "Not supported for this provider."),
+      remoteBin: supportsRemoteBin
+        ? defaults.remoteBin
+        : capabilityFromBoolean(false, "Not supported for this provider."),
+      archiveStorage: supportsStorageClass
+        ? defaults.archiveStorage
+        : capabilityFromBoolean(false, "Not supported for this provider."),
     };
   }
 
@@ -352,18 +373,22 @@ export function normalizeProviderCapabilities(value: unknown, provider: Provider
       record.objectVersioning ?? record.object_versioning ?? record.versioning,
       defaults.objectVersioning,
     ),
-    remoteBin: normalizeSingleCapability(
-      record.remoteBin ?? record.remote_bin,
-      defaults.remoteBin,
-    ),
+    remoteBin: normalizeSingleCapability(record.remoteBin ?? record.remote_bin, defaults.remoteBin),
     archiveStorage: normalizeSingleCapability(
-      record.archiveStorage ?? record.archive_storage ?? record.storageClass ?? record.storageClasses ?? record.glacier,
+      record.archiveStorage ??
+        record.archive_storage ??
+        record.storageClass ??
+        record.storageClasses ??
+        record.glacier,
       defaults.archiveStorage,
     ),
   };
 }
 
-export function capabilitiesFromProviderDefinition(definition: ProviderDefinition | null | undefined, provider: Provider): ProviderCapabilities {
+export function capabilitiesFromProviderDefinition(
+  definition: ProviderDefinition | null | undefined,
+  provider: Provider,
+): ProviderCapabilities {
   if (!definition) {
     return defaultProviderCapabilities(provider);
   }
@@ -420,9 +445,10 @@ export function normalizeCredentialSummaryRecord(value: unknown): CredentialSumm
     name: normalizeText(record.name) ?? "",
     provider,
     ready: Boolean(record.ready),
-    validationStatus: record.validationStatus === "passed" || record.validationStatus === "failed"
-      ? record.validationStatus
-      : "untested",
+    validationStatus:
+      record.validationStatus === "passed" || record.validationStatus === "failed"
+        ? record.validationStatus
+        : "untested",
     lastTestedAt: normalizeText(record.lastTestedAt),
     lastTestMessage: normalizeText(record.lastTestMessage),
   } as const;
@@ -434,10 +460,10 @@ export function normalizeCredentialSummaryRecord(value: unknown): CredentialSumm
       provider,
       summary: {
         accessKeyIdPreview: createAccessKeyPreview(
-          summaryRecord?.accessKeyIdPreview
-          ?? summaryRecord?.accessKeyId
-          ?? record.accessKeyIdPreview
-          ?? record.accessKeyId,
+          summaryRecord?.accessKeyIdPreview ??
+            summaryRecord?.accessKeyId ??
+            record.accessKeyIdPreview ??
+            record.accessKeyId,
         ),
       },
     };
@@ -448,28 +474,22 @@ export function normalizeCredentialSummaryRecord(value: unknown): CredentialSumm
     provider,
     summary: {
       clientEmail: normalizeText(
-        summaryRecord?.clientEmail
-        ?? summaryRecord?.client_email
-        ?? record.clientEmail
-        ?? record.client_email,
+        summaryRecord?.clientEmail ??
+          summaryRecord?.client_email ??
+          record.clientEmail ??
+          record.client_email,
       ),
       projectId: normalizeText(
-        summaryRecord?.projectId
-        ?? summaryRecord?.project_id
-        ?? record.projectId
-        ?? record.project_id,
+        summaryRecord?.projectId ??
+          summaryRecord?.project_id ??
+          record.projectId ??
+          record.project_id,
       ),
     },
   };
 }
 
-export type SyncPhase =
-  | "unconfigured"
-  | "idle"
-  | "polling"
-  | "syncing"
-  | "paused"
-  | "error";
+export type SyncPhase = "unconfigured" | "idle" | "polling" | "syncing" | "paused" | "error";
 
 export interface CredentialTestContext {
   provider: Provider;
@@ -723,17 +743,17 @@ export interface SyncStatusStats {
 
 type LocationSyncStatusIdentity =
   | {
-    pairId: string;
-    pairLabel: string;
-    locationId?: string;
-    locationLabel?: string;
-  }
+      pairId: string;
+      pairLabel: string;
+      locationId?: string;
+      locationLabel?: string;
+    }
   | {
-    locationId: string;
-    locationLabel: string;
-    pairId?: string;
-    pairLabel?: string;
-  };
+      locationId: string;
+      locationLabel: string;
+      pairId?: string;
+      pairLabel?: string;
+    };
 
 export type LocationSyncStatus = LocationSyncStatusIdentity & {
   phase: SyncPhase;

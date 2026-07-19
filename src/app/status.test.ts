@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { describeSyncStatus, formatByteCount, formatTimestamp, getSyncOverviewStats } from "./status";
+import {
+  describeSyncStatus,
+  formatByteCount,
+  formatTimestamp,
+  getSyncOverviewStats,
+} from "./status";
 
 describe("status presentation", () => {
   it("maps polling state to connected presentation", () => {
@@ -18,28 +23,28 @@ describe("status presentation", () => {
       indexedFileCount: 12,
       indexedDirectoryCount: 3,
       indexedTotalBytes: 1024,
-        remoteObjectCount: 8,
-        remoteTotalBytes: 2048,
-        comparison: {
+      remoteObjectCount: 8,
+      remoteTotalBytes: 2048,
+      comparison: {
         comparedAt: "2026-04-03T00:00:00.000Z",
         localFileCount: 12,
         remoteObjectCount: 8,
         exactMatchCount: 7,
         localOnlyCount: 5,
-          remoteOnlyCount: 1,
-          sizeMismatchCount: 0,
-        },
-        plan: {
-          lastPlannedAt: "2026-04-03T00:00:00.000Z",
-          observedPathCount: 13,
-          uploadCount: 5,
-          downloadCount: 1,
-          conflictCount: 0,
-          noopCount: 7,
-          pendingOperationCount: 6,
-          credentialsAvailable: true,
-        },
-      });
+        remoteOnlyCount: 1,
+        sizeMismatchCount: 0,
+      },
+      plan: {
+        lastPlannedAt: "2026-04-03T00:00:00.000Z",
+        observedPathCount: 13,
+        uploadCount: 5,
+        downloadCount: 1,
+        conflictCount: 0,
+        noopCount: 7,
+        pendingOperationCount: 6,
+        credentialsAvailable: true,
+      },
+    });
 
     expect(view.badgeTone).toBe("success");
     expect(view.indicatorClass).toBe("connected");
@@ -201,28 +206,28 @@ describe("status presentation", () => {
       indexedFileCount: 0,
       indexedDirectoryCount: 0,
       indexedTotalBytes: 0,
-        remoteObjectCount: 0,
-        remoteTotalBytes: 0,
-        comparison: {
+      remoteObjectCount: 0,
+      remoteTotalBytes: 0,
+      comparison: {
         comparedAt: "2026-04-03T00:00:00.000Z",
         localFileCount: 0,
         remoteObjectCount: 0,
         exactMatchCount: 0,
         localOnlyCount: 0,
-          remoteOnlyCount: 0,
-          sizeMismatchCount: 0,
-        },
-        plan: {
-          lastPlannedAt: null,
-          observedPathCount: 0,
-          uploadCount: 0,
-          downloadCount: 0,
-          conflictCount: 0,
-          noopCount: 0,
-          pendingOperationCount: 0,
-          credentialsAvailable: false,
-        },
-      });
+        remoteOnlyCount: 0,
+        sizeMismatchCount: 0,
+      },
+      plan: {
+        lastPlannedAt: null,
+        observedPathCount: 0,
+        uploadCount: 0,
+        downloadCount: 0,
+        conflictCount: 0,
+        noopCount: 0,
+        pendingOperationCount: 0,
+        credentialsAvailable: false,
+      },
+    });
 
     expect(view.badgeTone).toBe("error");
     expect(view.summary).toBe("Authentication failed");

@@ -4,22 +4,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Mock the design system BEFORE any imports that use it
 // ---------------------------------------------------------------------------
 
-const { applyIconsMock, bindCheckboxTreeMock, createIconMock } = vi.hoisted(
-  () => ({
-    applyIconsMock: vi.fn(),
-    bindCheckboxTreeMock: vi.fn(() => ({
-      expand: vi.fn(),
-      collapse: vi.fn(),
-      expandAll: vi.fn(),
-      collapseAll: vi.fn(),
-      destroy: vi.fn(),
-    })),
-    createIconMock: vi.fn(() => {
-      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      return svg;
-    }),
+const { applyIconsMock, bindCheckboxTreeMock, createIconMock } = vi.hoisted(() => ({
+  applyIconsMock: vi.fn(),
+  bindCheckboxTreeMock: vi.fn(() => ({
+    expand: vi.fn(),
+    collapse: vi.fn(),
+    expandAll: vi.fn(),
+    collapseAll: vi.fn(),
+    destroy: vi.fn(),
+  })),
+  createIconMock: vi.fn(() => {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    return svg;
   }),
-);
+}));
 
 vi.mock("@goblin-systems/goblin-design-system", () => ({
   applyIcons: applyIconsMock,
@@ -31,12 +29,7 @@ vi.mock("@goblin-systems/goblin-design-system", () => ({
 // Imports under test
 // ---------------------------------------------------------------------------
 
-import {
-  flattenVisible,
-  computeVisibleRange,
-  VIRTUAL_THRESHOLD,
-  renderFileTreeVirtual,
-} from "./file-tree-virtual";
+import { flattenVisible, computeVisibleRange, VIRTUAL_THRESHOLD } from "./file-tree-virtual";
 import { getStatusTooltip, renderFileTree, type FileEntry } from "./file-tree";
 import { buildTree } from "./file-tree";
 
@@ -63,10 +56,12 @@ function directoryEntry(overrides: Partial<FileEntry> & Pick<FileEntry, "path">)
 }
 
 function generateEntries(count: number): FileEntry[] {
-  return Array.from({ length: count }, (_, i) => fileEntry({
-    path: `dir-${Math.floor(i / 100)}/file-${i}.txt`,
-    hasLocalCopy: i % 2 === 0,
-  }));
+  return Array.from({ length: count }, (_, i) =>
+    fileEntry({
+      path: `dir-${Math.floor(i / 100)}/file-${i}.txt`,
+      hasLocalCopy: i % 2 === 0,
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -210,9 +205,7 @@ describe("renderFileTreeVirtual", () => {
   });
 
   it("uses classic path for small entry sets", () => {
-    const entries: FileEntry[] = [
-      fileEntry({ path: "readme.txt" }),
-    ];
+    const entries: FileEntry[] = [fileEntry({ path: "readme.txt" })];
 
     renderFileTree({ treeEl, emptyStateEl, entries });
 
@@ -259,19 +252,20 @@ describe("renderFileTreeVirtual", () => {
     const entries = Array.from({ length: 2500 }, (_, i) =>
       fileEntry({
         path: `file-${i}.txt`,
-        status: i === 0
-          ? "synced"
-          : i === 1
-            ? "local-only"
-            : i === 2
-              ? "remote-only"
-              : i === 3
-                ? "review-required"
-                : i === 4
-                  ? "conflict"
-                  : i === 5
-                    ? "glacier"
-                    : "deleted",
+        status:
+          i === 0
+            ? "synced"
+            : i === 1
+              ? "local-only"
+              : i === 2
+                ? "remote-only"
+                : i === 3
+                  ? "review-required"
+                  : i === 4
+                    ? "conflict"
+                    : i === 5
+                      ? "glacier"
+                      : "deleted",
         hasLocalCopy: i === 2 || i >= 3 ? false : true,
         binKey: i >= 6 ? `bin-${i}` : undefined,
       }),
@@ -280,18 +274,21 @@ describe("renderFileTreeVirtual", () => {
     renderFileTree({ treeEl, emptyStateEl, entries, mode: "bin" });
 
     const indicator = (path: string) =>
-      containerEl
-        .querySelector(`.vtree-row[data-value="${path}"] .status-indicator`) as HTMLElement;
+      containerEl.querySelector(`.vtree-row[data-value="${path}"] .status-indicator`)!;
 
     expect(indicator("file-0.txt")?.getAttribute("title")).toBe(getStatusTooltip("synced"));
     expect(indicator("file-1.txt")?.getAttribute("title")).toBe(getStatusTooltip("local-only"));
     expect(indicator("file-2.txt")?.getAttribute("title")).toBe(getStatusTooltip("remote-only"));
-    expect(indicator("file-3.txt")?.getAttribute("title")).toBe(getStatusTooltip("review-required"));
+    expect(indicator("file-3.txt")?.getAttribute("title")).toBe(
+      getStatusTooltip("review-required"),
+    );
     expect(indicator("file-4.txt")?.getAttribute("title")).toBe(getStatusTooltip("conflict"));
     expect(indicator("file-5.txt")?.getAttribute("title")).toBe(getStatusTooltip("glacier"));
     expect(indicator("file-6.txt")?.getAttribute("title")).toBe(getStatusTooltip("deleted"));
     expect(indicator("file-0.txt")?.getAttribute("aria-label")).toBe(getStatusTooltip("synced"));
-    expect(indicator("file-0.txt")?.querySelector(".status-dot")?.getAttribute("aria-hidden")).toBe("true");
+    expect(indicator("file-0.txt")?.querySelector(".status-dot")?.getAttribute("aria-hidden")).toBe(
+      "true",
+    );
   });
 
   it("adds tooltip attributes to virtual directory status indicators", () => {
@@ -305,7 +302,9 @@ describe("renderFileTreeVirtual", () => {
 
     renderFileTree({ treeEl, emptyStateEl, entries });
 
-    const indicator = containerEl.querySelector<HTMLElement>('.vtree-row[data-value="dir-0"] .status-indicator');
+    const indicator = containerEl.querySelector<HTMLElement>(
+      '.vtree-row[data-value="dir-0"] .status-indicator',
+    );
     expect(indicator).not.toBeNull();
     expect(indicator?.getAttribute("title")).toBe("Contains unsynced items");
     expect(indicator?.getAttribute("aria-label")).toBe("Contains unsynced items");
@@ -315,13 +314,8 @@ describe("renderFileTreeVirtual", () => {
     const entries = Array.from({ length: 2500 }, (_, i) =>
       fileEntry({
         path: `file-${i}.txt`,
-        status: i === 0
-          ? "conflict"
-          : i === 1
-            ? "review-required"
-            : i === 2
-              ? "conflict"
-              : "synced",
+        status:
+          i === 0 ? "conflict" : i === 1 ? "review-required" : i === 2 ? "conflict" : "synced",
         localKind: i <= 2 ? "file" : undefined,
         remoteKind: i === 2 ? "directory" : i <= 1 ? "file" : undefined,
         hasLocalCopy: i === 1 ? false : true,
@@ -330,12 +324,20 @@ describe("renderFileTreeVirtual", () => {
 
     renderFileTree({ treeEl, emptyStateEl, entries });
 
-    const conflictRow = containerEl.querySelector<HTMLElement>('.vtree-row[data-value="file-0.txt"]');
+    const conflictRow = containerEl.querySelector<HTMLElement>(
+      '.vtree-row[data-value="file-0.txt"]',
+    );
     const conflictCheckbox = conflictRow?.querySelector<HTMLInputElement>(".tree-check");
     const resolveBtn = conflictRow?.querySelector<HTMLButtonElement>(".tree-resolve-btn");
-    const reviewResolveBtn = containerEl.querySelector('.vtree-row[data-value="file-1.txt"] .tree-resolve-btn');
-    const unsupportedResolveBtn = containerEl.querySelector('.vtree-row[data-value="file-2.txt"] .tree-resolve-btn');
-    const normalResolveBtn = containerEl.querySelector('.vtree-row[data-value="file-3.txt"] .tree-resolve-btn');
+    const reviewResolveBtn = containerEl.querySelector(
+      '.vtree-row[data-value="file-1.txt"] .tree-resolve-btn',
+    );
+    const unsupportedResolveBtn = containerEl.querySelector(
+      '.vtree-row[data-value="file-2.txt"] .tree-resolve-btn',
+    );
+    const normalResolveBtn = containerEl.querySelector(
+      '.vtree-row[data-value="file-3.txt"] .tree-resolve-btn',
+    );
 
     expect(conflictCheckbox?.disabled).toBe(true);
     expect(resolveBtn?.classList.contains("icon-btn")).toBe(true);
@@ -386,8 +388,8 @@ describe("renderFileTreeVirtual", () => {
     renderFileTree({ treeEl, emptyStateEl, entries });
 
     const row = containerEl.querySelector<HTMLElement>('.vtree-row[data-value="file-0.txt"]');
-    expect(row?.querySelector('.tree-storage-class-btn')).not.toBeNull();
-    expect(row?.querySelector('.tree-delete-btn')).not.toBeNull();
+    expect(row?.querySelector(".tree-storage-class-btn")).not.toBeNull();
+    expect(row?.querySelector(".tree-delete-btn")).not.toBeNull();
   });
 
   it("disables review-required directory checkboxes in virtual live tree", () => {
@@ -413,7 +415,9 @@ describe("renderFileTreeVirtual", () => {
 
     renderFileTree({ treeEl, emptyStateEl, entries });
 
-    const conflictRow = containerEl.querySelector<HTMLElement>('.vtree-row[data-value="conflict-dir"]');
+    const conflictRow = containerEl.querySelector<HTMLElement>(
+      '.vtree-row[data-value="conflict-dir"]',
+    );
     const conflictCheckbox = conflictRow?.querySelector<HTMLInputElement>(".tree-check");
 
     expect(conflictCheckbox?.disabled).toBe(true);
@@ -433,10 +437,15 @@ describe("renderFileTreeVirtual", () => {
 
     renderFileTree({ treeEl, emptyStateEl, entries, onResolveConflict });
 
-    containerEl.querySelector<HTMLButtonElement>('.vtree-row[data-value="file-0.txt"] .tree-resolve-btn')?.click();
+    containerEl
+      .querySelector<HTMLButtonElement>('.vtree-row[data-value="file-0.txt"] .tree-resolve-btn')
+      ?.click();
 
     expect(onResolveConflict).toHaveBeenCalledOnce();
-    expect(onResolveConflict.mock.calls[0]?.[0]).toMatchObject({ path: "file-0.txt", status: "conflict" });
+    expect(onResolveConflict.mock.calls[0]?.[0]).toMatchObject({
+      path: "file-0.txt",
+      status: "conflict",
+    });
   });
 
   it("clicking resolve button calls onResolveConflict for review-required entries in virtual tree", () => {
@@ -453,10 +462,15 @@ describe("renderFileTreeVirtual", () => {
 
     renderFileTree({ treeEl, emptyStateEl, entries, onResolveConflict });
 
-    containerEl.querySelector<HTMLButtonElement>('.vtree-row[data-value="file-0.txt"] .tree-resolve-btn')?.click();
+    containerEl
+      .querySelector<HTMLButtonElement>('.vtree-row[data-value="file-0.txt"] .tree-resolve-btn')
+      ?.click();
 
     expect(onResolveConflict).toHaveBeenCalledOnce();
-    expect(onResolveConflict.mock.calls[0]?.[0]).toMatchObject({ path: "file-0.txt", status: "review-required" });
+    expect(onResolveConflict.mock.calls[0]?.[0]).toMatchObject({
+      path: "file-0.txt",
+      status: "review-required",
+    });
   });
 });
 
@@ -507,9 +521,7 @@ describe("delete button", () => {
 
   it("renders for file rows in virtual tree", () => {
     // Use root-level files so they appear immediately without expanding directories
-    const entries = Array.from({ length: 2500 }, (_, i) =>
-      fileEntry({ path: `file-${i}.txt` }),
-    );
+    const entries = Array.from({ length: 2500 }, (_, i) => fileEntry({ path: `file-${i}.txt` }));
 
     renderFileTree({ treeEl, emptyStateEl, entries });
 
@@ -563,9 +575,7 @@ describe("delete button", () => {
   it("clicking delete button calls onDelete with correct path", () => {
     const onDelete = vi.fn();
     // Root-level files so file rows (with delete buttons) render immediately
-    const entries = Array.from({ length: 2500 }, (_, i) =>
-      fileEntry({ path: `file-${i}.txt` }),
-    );
+    const entries = Array.from({ length: 2500 }, (_, i) => fileEntry({ path: `file-${i}.txt` }));
 
     renderFileTree({ treeEl, emptyStateEl, entries, onDelete });
 
@@ -588,7 +598,9 @@ describe("delete button", () => {
 
     renderFileTree({ treeEl, emptyStateEl, entries, onDelete });
 
-    const deleteBtn = containerEl.querySelector<HTMLButtonElement>('.vtree-row[data-value="dir-0"] .tree-delete-btn');
+    const deleteBtn = containerEl.querySelector<HTMLButtonElement>(
+      '.vtree-row[data-value="dir-0"] .tree-delete-btn',
+    );
     expect(deleteBtn).not.toBeNull();
 
     deleteBtn!.click();
@@ -619,7 +631,9 @@ describe("restore button", () => {
     containerEl.appendChild(emptyStateEl);
 
     createIconMock.mockClear();
-    createIconMock.mockImplementation(() => document.createElementNS("http://www.w3.org/2000/svg", "svg"));
+    createIconMock.mockImplementation(() =>
+      document.createElementNS("http://www.w3.org/2000/svg", "svg"),
+    );
   });
 
   afterEach(() => {
@@ -628,7 +642,12 @@ describe("restore button", () => {
 
   it("renders restore buttons for file rows in virtual bin tree", () => {
     const entries = Array.from({ length: 2500 }, (_, i) =>
-      fileEntry({ path: `file-${i}.txt`, status: "deleted", hasLocalCopy: false, binKey: `bin-${i}` }),
+      fileEntry({
+        path: `file-${i}.txt`,
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: `bin-${i}`,
+      }),
     );
 
     renderFileTree({ treeEl, emptyStateEl, entries, mode: "bin" });
@@ -642,7 +661,12 @@ describe("restore button", () => {
   it("clicking restore button calls onRestore with opaque bin key", () => {
     const onRestore = vi.fn();
     const entries = Array.from({ length: 2500 }, (_, i) =>
-      fileEntry({ path: `file-${i}.txt`, status: "deleted", hasLocalCopy: false, binKey: `opaque-${i}` }),
+      fileEntry({
+        path: `file-${i}.txt`,
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: `opaque-${i}`,
+      }),
     );
 
     renderFileTree({ treeEl, emptyStateEl, entries, mode: "bin", onRestore });
@@ -660,7 +684,12 @@ describe("restore button", () => {
     const restore = createDeferred<void>();
     const onRestore = vi.fn(() => restore.promise);
     const entries = Array.from({ length: 2500 }, (_, i) =>
-      fileEntry({ path: `file-${i}.txt`, status: "deleted", hasLocalCopy: false, binKey: `opaque-${i}` }),
+      fileEntry({
+        path: `file-${i}.txt`,
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: `opaque-${i}`,
+      }),
     );
 
     renderFileTree({ treeEl, emptyStateEl, entries, mode: "bin", onRestore });
@@ -692,7 +721,12 @@ describe("restore button", () => {
   it("allows checkbox selection in virtual bin tree", () => {
     const onChange = vi.fn();
     const entries = Array.from({ length: 2500 }, (_, i) =>
-      fileEntry({ path: `file-${i}.txt`, status: "deleted", hasLocalCopy: false, binKey: `opaque-${i}` }),
+      fileEntry({
+        path: `file-${i}.txt`,
+        status: "deleted",
+        hasLocalCopy: false,
+        binKey: `opaque-${i}`,
+      }),
     );
 
     renderFileTree({ treeEl, emptyStateEl, entries, mode: "bin", onChange, checkedPaths: [] });
@@ -711,13 +745,20 @@ describe("restore button", () => {
     const entries: FileEntry[] = [
       directoryEntry({ path: "empty-dir", status: "deleted", hasLocalCopy: false }),
       ...Array.from({ length: 2499 }, (_, i) =>
-        fileEntry({ path: `folder-${i}/file-${i}.txt`, status: "deleted", hasLocalCopy: false, binKey: `opaque-${i}` }),
+        fileEntry({
+          path: `folder-${i}/file-${i}.txt`,
+          status: "deleted",
+          hasLocalCopy: false,
+          binKey: `opaque-${i}`,
+        }),
       ),
     ];
 
     renderFileTree({ treeEl, emptyStateEl, entries, mode: "bin", onChange, checkedPaths: [] });
 
-    const emptyDirCheckbox = containerEl.querySelector<HTMLInputElement>('.vtree-row[data-value="empty-dir"] .tree-check');
+    const emptyDirCheckbox = containerEl.querySelector<HTMLInputElement>(
+      '.vtree-row[data-value="empty-dir"] .tree-check',
+    );
     expect(emptyDirCheckbox?.disabled).toBe(false);
 
     emptyDirCheckbox!.checked = true;
@@ -748,7 +789,9 @@ describe("reveal button", () => {
     containerEl.appendChild(emptyStateEl);
 
     createIconMock.mockClear();
-    createIconMock.mockImplementation(() => document.createElementNS("http://www.w3.org/2000/svg", "svg"));
+    createIconMock.mockImplementation(() =>
+      document.createElementNS("http://www.w3.org/2000/svg", "svg"),
+    );
   });
 
   afterEach(() => {
@@ -771,9 +814,7 @@ describe("reveal button", () => {
 
   it("clicking reveal button calls onReveal with correct path", () => {
     const onReveal = vi.fn();
-    const entries = Array.from({ length: 2500 }, (_, i) =>
-      fileEntry({ path: `file-${i}.txt` }),
-    );
+    const entries = Array.from({ length: 2500 }, (_, i) => fileEntry({ path: `file-${i}.txt` }));
 
     renderFileTree({ treeEl, emptyStateEl, entries, onReveal });
 

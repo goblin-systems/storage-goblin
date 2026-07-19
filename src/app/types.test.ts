@@ -55,26 +55,24 @@ describe("provider capability defaults", () => {
   it("advertises backend-aligned GCS aliases in the default definition", () => {
     const definition = defaultProviderDefinition("gcs");
 
-    expect(definition.aliases).toEqual([
-      "gcp",
-      "google-cloud-storage",
-      "google cloud storage",
-    ]);
+    expect(definition.aliases).toEqual(["gcp", "google-cloud-storage", "google cloud storage"]);
   });
 
   it("normalizes provider-aware credential summaries from native responses", () => {
-    expect(normalizeCredentialSummaryRecord({
-      id: "cred-aws",
-      name: "AWS",
-      provider: "aws",
-      ready: true,
-      validationStatus: "untested",
-      lastTestedAt: null,
-      lastTestMessage: null,
-      summary: {
-        accessKeyIdPreview: "AKIA12345678",
-      },
-    })).toEqual({
+    expect(
+      normalizeCredentialSummaryRecord({
+        id: "cred-aws",
+        name: "AWS",
+        provider: "aws",
+        ready: true,
+        validationStatus: "untested",
+        lastTestedAt: null,
+        lastTestMessage: null,
+        summary: {
+          accessKeyIdPreview: "AKIA12345678",
+        },
+      }),
+    ).toEqual({
       id: "cred-aws",
       name: "AWS",
       provider: "aws",
@@ -87,19 +85,21 @@ describe("provider capability defaults", () => {
       },
     });
 
-    expect(normalizeCredentialSummaryRecord({
-      id: "cred-gcs",
-      name: "GCS",
-      provider: "gcp",
-      ready: true,
-      validationStatus: "untested",
-      lastTestedAt: null,
-      lastTestMessage: null,
-      summary: {
-        client_email: "sync@example-project.iam.gserviceaccount.com",
-        project_id: "example-project",
-      },
-    })).toEqual({
+    expect(
+      normalizeCredentialSummaryRecord({
+        id: "cred-gcs",
+        name: "GCS",
+        provider: "gcp",
+        ready: true,
+        validationStatus: "untested",
+        lastTestedAt: null,
+        lastTestMessage: null,
+        summary: {
+          client_email: "sync@example-project.iam.gserviceaccount.com",
+          project_id: "example-project",
+        },
+      }),
+    ).toEqual({
       id: "cred-gcs",
       name: "GCS",
       provider: "gcs",

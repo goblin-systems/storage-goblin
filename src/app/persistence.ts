@@ -35,7 +35,9 @@ export function loadStoredProfileFromBrowserStorage(): StoredStorageProfile {
   }
 }
 
-export function saveStoredProfileToBrowserStorage(profile: StoredStorageProfile | StorageProfileDraft): StoredStorageProfile {
+export function saveStoredProfileToBrowserStorage(
+  profile: StoredStorageProfile,
+): StoredStorageProfile {
   const storage = getBrowserStorage();
   const normalized = normalizeStoredProfile(profile);
   const sanitized = {
@@ -51,7 +53,9 @@ export function saveStoredProfileToBrowserStorage(profile: StoredStorageProfile 
   return sanitized;
 }
 
-export function createProfilePersistence(nativePersistence: NativeProfilePersistence): ProfilePersistence {
+export function createProfilePersistence(
+  nativePersistence: NativeProfilePersistence,
+): ProfilePersistence {
   return {
     async load() {
       if (nativePersistence.supportsNativeProfilePersistence) {
