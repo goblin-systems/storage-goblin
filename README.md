@@ -60,23 +60,10 @@ Early stage (v0.2.0). Functional sync pipeline, multi-location sync orchestratio
 
 ## Roadmap
 
-### Now
-
-- Safer sync and recovery workflows built on object versioning.
-- Richer conflict handling beyond size-based file/file decisions.
-- Clearer conflict diagnostics, recovery tooling, and auditability in the UI.
-
-### Next
-
-- Azure Blob Storage support on the provider abstraction foundation established for AWS + GCS.
-- More advanced sync safety and auditability features.
-- Bulk remote bin operations, richer restore flows, and additional recovery ergonomics.
-- Deeper watcher observability and watcher-health surfacing.
-
-### Later
-
-- Content-aware reconciliation and history workflows built on versioning.
-- Broader operational tooling for support, diagnostics, and reporting across providers.
+The project is undergoing a staged overhaul toward a 1.0-quality release. The full plan —
+current-state assessment, phases, and acceptance criteria — lives in
+[`backlog/`](backlog/README.md). Contributor workflow is documented in
+[`CONTRIBUTING.md`](CONTRIBUTING.md); product briefs live in [`docs/`](docs/).
 
 ## License
 

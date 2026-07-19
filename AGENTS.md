@@ -1,8 +1,14 @@
 # AGENTS.md
 
+## Overhaul status
+
+- **Current overhaul phase: 0 (Foundations & Guardrails)** — see `backlog/phase-0-foundations.md`.
+- Roadmap/backlog lives in `backlog/` (one MD per phase); update the phase doc during session handoff.
+- Package manager is bun only (`bun.lock`); never generate `package-lock.json`.
+- Sync-engine changes require simulator coverage (`src-tauri/src/storage/sim/`).
+
 ## Auto
 
-- Roadmap/backlog lives in `README.md`; update it during session handoff.
 - Native GCS credentials use service account JSON; do not use AWS-style key ID / secret fields for GCS UX or storage.
 - Normalize provider aliases `gcp` -> `gcs`; keep legacy compatibility when touching provider state.
 - Provider metadata/capabilities live in `src-tauri/src/storage/provider.rs` and are hydrated in frontend state from `src/app/bootstrap.ts` / `src/app/types.ts`.

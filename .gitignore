@@ -1,5 +1,11 @@
 NUL
-node_modiules/
+node_modules/
 dist/
 **/node_modules/
 **/dist/
+target/
+**/target/
+coverage/
+lcov.info
+*.profraw
+.eslintcache
