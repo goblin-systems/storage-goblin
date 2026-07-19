@@ -17,6 +17,8 @@ pub mod remote_bin;
 pub mod remote_index;
 pub mod s3_adapter;
 pub mod sanitizer;
+#[cfg(test)]
+pub(crate) mod sim;
 pub mod sync_db;
 pub mod sync_planner;
 pub mod sync_state;
