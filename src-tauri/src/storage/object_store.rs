@@ -138,6 +138,9 @@ pub struct ObjectEntry {
     pub last_modified_at: Option<String>,
     pub etag: Option<String>,
     pub storage_class: Option<String>,
+    /// Goblin content fingerprint, when the provider's listing carries the
+    /// metadata our uploads attach (GCS does; S3 ListObjectsV2 does not).
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,6 +486,9 @@ pub async fn list_objects(
                         storage_class: object
                             .storage_class()
                             .map(|value| value.as_str().to_string()),
+                        // S3 list responses carry no user metadata; resolving
+                        // it would need a HEAD per object (backlog phase 2).
+                        fingerprint: None,
                     })
                 }));
 
@@ -503,12 +509,15 @@ pub async fn list_objects(
                 .map(|objects| {
                     objects
                         .into_iter()
-                        .map(|object| ObjectEntry {
+                        .map(|mut object| ObjectEntry {
                             key: object.name,
                             size: object.size,
                             last_modified_at: object.updated,
                             etag: object.etag,
                             storage_class: object.storage_class,
+                            fingerprint: object
+                                .metadata
+                                .remove(s3_adapter::LOCAL_FINGERPRINT_METADATA_KEY),
                         })
                         .collect()
                 })

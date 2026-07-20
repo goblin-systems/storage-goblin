@@ -56,6 +56,10 @@ pub struct GcsObject {
     pub updated: Option<String>,
     pub etag: Option<String>,
     pub storage_class: Option<String>,
+    /// Custom object metadata. GCS returns full object resources on list, so
+    /// the goblin content fingerprint we attach on upload survives round-trips
+    /// without an extra request per object.
+    pub metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +158,8 @@ struct GcsObjectItem {
     etag: Option<String>,
     #[serde(default, rename = "storageClass")]
     storage_class: Option<String>,
+    #[serde(default)]
+    metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -387,6 +393,7 @@ impl GcsClient {
             updated: body.updated,
             etag: body.etag,
             storage_class: body.storage_class,
+            metadata: body.metadata,
         })
     }
 
@@ -492,6 +499,7 @@ impl GcsClient {
                     updated: item.updated,
                     etag: item.etag,
                     storage_class: item.storage_class,
+                    metadata: item.metadata,
                 }
             }));
 

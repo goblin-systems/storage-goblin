@@ -451,6 +451,7 @@ async fn list_remote_inventory(
         let last_modified_at = object.last_modified_at;
         let etag = object.etag;
         let storage_class = object.storage_class;
+        let fingerprint = object.fingerprint;
 
         if key.ends_with('/') {
             let directory_path = relative_path.trim_matches('/');
@@ -500,7 +501,7 @@ async fn list_remote_inventory(
                 last_modified_at,
                 etag,
                 storage_class,
-                fingerprint: None,
+                fingerprint,
             },
         );
 
@@ -1078,6 +1079,21 @@ fn anchor_only_for_pair<R: Runtime>(
     let fingerprint = crate::storage::local_index::file_fingerprint(&local_path)?;
     let snapshot = read_remote_index_snapshot_for_pair(app, &pair.id)?
         .ok_or_else(|| "remote snapshot missing while anchoring existing content".to_string())?;
+
+    // Re-verify before recording a match. Anchoring two different files as
+    // "already in sync" would silently strand one of them, so a stale or
+    // fingerprint-less snapshot must fail rather than guess.
+    let remote_fingerprint = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.relative_path == path && entry.kind == "file")
+        .and_then(|entry| entry.fingerprint.clone());
+    if remote_fingerprint.as_deref() != Some(fingerprint.as_str()) {
+        return Err(format!(
+            "content for '{path}' no longer matches the remote copy; leaving it for review"
+        ));
+    }
+
     anchor_path_from_snapshot(app, pair, path, &fingerprint, &snapshot)?;
     Ok(format!("Matched existing content for '{path}'."))
 }
@@ -5039,6 +5055,7 @@ async fn list_remote_inventory_for_pair(
         let last_modified_at = object.last_modified_at;
         let etag = object.etag;
         let storage_class = object.storage_class;
+        let fingerprint = object.fingerprint;
 
         if key.ends_with('/') {
             let directory_path = relative_path.trim_matches('/');
@@ -5088,7 +5105,7 @@ async fn list_remote_inventory_for_pair(
                 last_modified_at,
                 etag,
                 storage_class,
-                fingerprint: None,
+                fingerprint,
             },
         );
 
