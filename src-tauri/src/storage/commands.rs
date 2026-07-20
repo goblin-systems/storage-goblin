@@ -3,8 +3,7 @@ use std::{
     fs,
     future::Future,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
@@ -15,11 +14,9 @@ use super::{
     activity::{emit_activity, ActivityDebugState, ActivityLevel},
     bin_service::{
         build_bin_entry_responses, build_versioned_bin_entry_responses,
-        collect_remote_bin_keys_for_request, collect_versioned_bin_entries_for_request,
-        collect_versioned_history_for_deleted_entries, destination_key_for_bin_restore,
-        normalize_bin_entry_kind, normalize_restore_relative_path, parse_versioned_bin_key,
-        validate_bin_batch_requests, validate_bulk_restore_destinations,
-        validate_local_restore_destination, validate_restore_destination, VersionedBinEntry,
+        delete_remote_folder_subtree, list_remote_bin_inventory_for_pair,
+        list_versioned_bin_inventory_for_pair, parse_versioned_bin_key, purge_remote_bin_entries,
+        purge_versioned_bin_entries, restore_remote_bin_entries, restore_versioned_bin_entries,
     },
     compare_service::{
         finalize_conflict_compare_details, finalize_version_compare_details,
@@ -53,12 +50,10 @@ use super::{
     now_iso, object_store,
     platform::{
         cleanup_empty_ancestors, normalize_directory_delete_path, open_path_with_default_app,
-        remove_local_directory_subtree, resolve_local_download_path, resolve_local_upload_path,
-        reveal_in_file_manager,
+        remove_local_directory_subtree, resolve_local_download_path, reveal_in_file_manager,
     },
     polling_service::{
-        active_pair_for_manual_actions, due_polling_pairs, next_polling_deadline_at,
-        pair_watch_target, should_poll_pair, should_scan_local_for_trigger, stop_requested,
+        active_pair_for_manual_actions, pair_watch_target, should_poll_pair,
         watcher_eligible_pairs, PairSyncTrigger,
     },
     profile_store::{
@@ -68,8 +63,7 @@ use super::{
     },
     provider::{normalize_provider, provider_capabilities, supported_providers, GCS_PROVIDER},
     remote_bin::{
-        deleted_directory_key, deleted_object_key, namespace_prefix,
-        original_relative_path_from_bin_key_for_pair, pair_bin_prefix,
+        deleted_object_key, original_relative_path_from_bin_key_for_pair, pair_bin_prefix,
     },
     remote_index::{
         directory_relative_paths_from_key, directory_relative_paths_from_relative_path,
@@ -80,30 +74,23 @@ use super::{
     s3_adapter,
     sanitizer::sanitize_sensitive_text,
     sync_db::{
-        load_planned_download_queue_for_pair, load_planned_upload_queue_for_pair,
-        load_planner_summary, load_planner_summary_for_pair, load_sync_anchors_for_pair,
-        mark_download_queue_item_completed_for_pair, mark_download_queue_item_failed_for_pair,
-        mark_download_queue_item_in_progress_for_pair, mark_upload_queue_item_completed_for_pair,
-        mark_upload_queue_item_failed_for_pair, mark_upload_queue_item_in_progress_for_pair,
-        persist_sync_plan_for_pair, recover_interrupted_queue_items_for_pair, SyncAnchor,
+        load_planner_summary, load_planner_summary_for_pair, load_sync_anchors_for_pair, SyncAnchor,
     },
     sync_planner::{self},
+    sync_service::{
+        rebuild_durable_plan_for_pair, remote_snapshot_for_pair, run_sync_cycle_for_pair,
+        snapshot_for_pair, start_polling_worker,
+    },
     sync_state::{
-        active_watcher_pair_paths, begin_polling_worker, clear_all_pair_watchers, clear_dirty_pair,
-        clear_polling_worker, due_dirty_pairs, get_status_lock, install_pair_watcher,
-        mark_pair_dirty, next_dirty_pair_deadline, pair_has_active_watcher, pair_statuses_snapshot,
-        pair_to_status, polling_worker_active, profile_to_status, remove_pair_watcher,
-        replace_pair_statuses_from_handle, retain_dirty_pairs, set_pair_status_from_handle,
-        set_status_from_handle, stop_polling_worker, synthesize_status_from_pairs, PairSyncStatus,
-        SyncState, SyncStatus,
+        active_watcher_pair_paths, get_status_lock, install_pair_watcher, mark_pair_dirty,
+        pair_statuses_snapshot, pair_to_status, polling_worker_active, profile_to_status,
+        remove_pair_watcher, replace_pair_statuses_from_handle, retain_dirty_pairs,
+        set_pair_status_from_handle, set_status_from_handle, stop_polling_worker,
+        synthesize_status_from_pairs, PairSyncStatus, SyncState, SyncStatus,
     },
     transfer_service::{
-        build_pair_transfer_executor, download_stale_plan_error, local_fingerprint_for_path,
-        perform_planned_download_for_pair, perform_planned_upload_for_pair,
-        perform_structural_download_operation_for_pair,
-        perform_structural_upload_operation_for_pair, persist_download_success_for_pair,
-        persist_upload_success_for_pair, remote_etag_for_path, upload_stale_plan_error,
-        PairTransferExecutor,
+        local_fingerprint_for_path, persist_download_success_for_pair,
+        persist_upload_success_for_pair, remote_etag_for_path,
     },
     watchers::{plan_watch_reconciliation, start_pair_watcher, WatchTarget, WatcherCallbackEvent},
 };
@@ -248,15 +235,15 @@ pub struct ConflictResolutionDetails {
     pub fallback_reason: Option<String>,
 }
 
-const PLANNED_UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
-const PLANNED_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
-const DIRTY_PAIR_DEBOUNCE: Duration = Duration::from_millis(750);
-const LOCAL_SNAPSHOT_STALE_TTL: Duration = Duration::from_secs(300);
-fn emit_status<R: Runtime>(app: &AppHandle<R>, status: &SyncStatus) {
+pub(crate) const PLANNED_UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+pub(crate) const PLANNED_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+pub(crate) const DIRTY_PAIR_DEBOUNCE: Duration = Duration::from_millis(750);
+pub(crate) const LOCAL_SNAPSHOT_STALE_TTL: Duration = Duration::from_secs(300);
+pub(crate) fn emit_status<R: Runtime>(app: &AppHandle<R>, status: &SyncStatus) {
     let _ = app.emit("storage://sync-status-changed", status);
 }
 
-fn emit_info_activity<R: Runtime>(
+pub(crate) fn emit_info_activity<R: Runtime>(
     app: &AppHandle<R>,
     debug_state: &ActivityDebugState,
     message: impl Into<String>,
@@ -265,7 +252,7 @@ fn emit_info_activity<R: Runtime>(
     emit_activity(app, debug_state, ActivityLevel::Info, message, details);
 }
 
-fn emit_success_activity<R: Runtime>(
+pub(crate) fn emit_success_activity<R: Runtime>(
     app: &AppHandle<R>,
     debug_state: &ActivityDebugState,
     message: impl Into<String>,
@@ -274,7 +261,7 @@ fn emit_success_activity<R: Runtime>(
     emit_activity(app, debug_state, ActivityLevel::Success, message, details);
 }
 
-fn emit_error_activity<R: Runtime>(
+pub(crate) fn emit_error_activity<R: Runtime>(
     app: &AppHandle<R>,
     debug_state: &ActivityDebugState,
     message: impl Into<String>,
@@ -283,7 +270,10 @@ fn emit_error_activity<R: Runtime>(
     emit_activity(app, debug_state, ActivityLevel::Error, message, details);
 }
 
-fn append_error_context(primary: Option<String>, secondary: impl Into<String>) -> String {
+pub(crate) fn append_error_context(
+    primary: Option<String>,
+    secondary: impl Into<String>,
+) -> String {
     let secondary = secondary.into();
     match primary {
         Some(primary) if !primary.is_empty() => format!("{primary}. {secondary}"),
@@ -291,7 +281,7 @@ fn append_error_context(primary: Option<String>, secondary: impl Into<String>) -
     }
 }
 
-fn concise_sync_issue(stage: &str) -> String {
+pub(crate) fn concise_sync_issue(stage: &str) -> String {
     format!("{stage} failed.")
 }
 
@@ -310,7 +300,7 @@ where
     }
 }
 
-fn pair_sync_cycle_issue_details(
+pub(crate) fn pair_sync_cycle_issue_details(
     pair: &SyncPair,
     stage: &str,
     error: impl AsRef<str>,
@@ -337,7 +327,7 @@ fn pair_sync_cycle_issue_details(
     details.join(" ")
 }
 
-async fn run_with_timeout<F, T, E>(
+pub(crate) async fn run_with_timeout<F, T, E>(
     future: F,
     timeout: Duration,
     operation: impl FnOnce() -> String,
@@ -415,31 +405,7 @@ fn status_with_snapshots(
     profile_to_status(profile, local_snapshot, remote_snapshot, plan_summary)
 }
 
-fn emit_recovery_activity<R: Runtime>(
-    app: &AppHandle<R>,
-    debug_state: &ActivityDebugState,
-    upload_count: u64,
-    download_count: u64,
-    scope: Option<&str>,
-) {
-    let recovered_count = upload_count + download_count;
-    if recovered_count == 0 {
-        return;
-    }
-
-    let scope_prefix = scope.map(|value| format!("{value} ")).unwrap_or_default();
-    emit_info_activity(
-        app,
-        debug_state,
-        "Recovered interrupted sync queue items.",
-        Some(format!(
-            "{}recovered_items={} recovered_uploads={} recovered_downloads={}",
-            scope_prefix, recovered_count, upload_count, download_count
-        )),
-    );
-}
-
-fn saved_profile_with_credentials_state<R: Runtime>(
+pub(crate) fn saved_profile_with_credentials_state<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<StoredProfile, String> {
     let mut profile = read_profile_from_disk(app)?;
@@ -469,7 +435,7 @@ fn saved_profile_with_credentials_state<R: Runtime>(
     Ok(profile)
 }
 
-fn resolve_refresh_credentials(
+pub(crate) fn resolve_refresh_credentials(
     app: &AppHandle,
     profile: &StoredProfile,
     input: &ConnectionValidationInput,
@@ -500,16 +466,6 @@ fn resolve_refresh_credentials(
             })
         }
     }
-}
-
-struct UploadExecutionOutcome {
-    execution_error: Option<String>,
-    uploads_ran: bool,
-}
-
-struct DownloadExecutionOutcome {
-    execution_error: Option<String>,
-    downloads_ran: bool,
 }
 
 impl CredentialTestContext {
@@ -814,49 +770,6 @@ async fn reconcile_pair_object_versioning<R: Runtime>(
     }
 
     Ok(())
-}
-
-async fn sleep_until_pair_work(
-    state: &State<'_, SyncState>,
-    stop_signal: &AtomicBool,
-    polling_wait: Duration,
-) {
-    let poll_deadline = Instant::now() + polling_wait;
-
-    loop {
-        if stop_signal.load(Ordering::SeqCst) {
-            break;
-        }
-
-        let now = Instant::now();
-        if now >= poll_deadline {
-            break;
-        }
-
-        if next_dirty_pair_deadline(state, DIRTY_PAIR_DEBOUNCE)
-            .ok()
-            .flatten()
-            .is_some_and(|deadline| deadline <= now)
-        {
-            break;
-        }
-
-        let next_dirty_wait = next_dirty_pair_deadline(state, DIRTY_PAIR_DEBOUNCE)
-            .ok()
-            .flatten()
-            .map(|deadline| deadline.saturating_duration_since(now))
-            .unwrap_or(poll_deadline.saturating_duration_since(now));
-        let remaining_poll = poll_deadline.saturating_duration_since(now);
-        let sleep_for = remaining_poll
-            .min(next_dirty_wait)
-            .min(Duration::from_millis(250));
-
-        if sleep_for.is_zero() {
-            break;
-        }
-
-        tokio::time::sleep(sleep_for).await;
-    }
 }
 
 #[tauri::command]
@@ -1362,7 +1275,7 @@ pub(crate) fn storage_config_for_pair(
     }
 }
 
-fn resolve_credentials_for_pair<R: Runtime>(
+pub(crate) fn resolve_credentials_for_pair<R: Runtime>(
     app: &AppHandle<R>,
     pair: &SyncPair,
 ) -> Result<StoredCredentials, String> {
@@ -1397,7 +1310,10 @@ fn emit_watcher_degraded_activity<R: Runtime>(
     );
 }
 
-fn reconcile_pair_watchers(app: &AppHandle, profile: &StoredProfile) -> Result<(), String> {
+pub(crate) fn reconcile_pair_watchers(
+    app: &AppHandle,
+    profile: &StoredProfile,
+) -> Result<(), String> {
     let state = app.state::<SyncState>();
     let current = active_watcher_pair_paths(&state)?;
     let eligible_pairs = watcher_eligible_pairs(profile);
@@ -1498,7 +1414,7 @@ fn current_pair_statuses<R: Runtime>(
         .collect()
 }
 
-fn configured_pair_statuses<R: Runtime>(
+pub(crate) fn configured_pair_statuses<R: Runtime>(
     profile: &StoredProfile,
     app: &AppHandle<R>,
 ) -> Vec<PairSyncStatus> {
@@ -1532,7 +1448,7 @@ fn configured_pair_statuses<R: Runtime>(
         .collect()
 }
 
-fn set_aggregate_status_from_pairs<R: Runtime>(
+pub(crate) fn set_aggregate_status_from_pairs<R: Runtime>(
     app: &AppHandle<R>,
     pair_statuses: Vec<PairSyncStatus>,
 ) -> Result<SyncStatus, String> {
@@ -1542,56 +1458,12 @@ fn set_aggregate_status_from_pairs<R: Runtime>(
     Ok(status)
 }
 
-fn refresh_aggregate_status<R: Runtime>(
+pub(crate) fn refresh_aggregate_status<R: Runtime>(
     app: &AppHandle<R>,
     profile: &StoredProfile,
 ) -> Result<SyncStatus, String> {
     let pair_statuses = configured_pair_statuses(profile, app);
     set_aggregate_status_from_pairs(app, pair_statuses)
-}
-
-fn snapshot_for_pair<R: Runtime>(
-    app: &AppHandle<R>,
-    pair: &SyncPair,
-) -> (Option<LocalIndexSnapshot>, Option<String>) {
-    match read_local_index_snapshot_for_pair(app, &pair.id) {
-        Ok(snapshot) => (
-            snapshot.filter(|s| {
-                !pair.local_folder.is_empty()
-                    && super::local_index::snapshot_matches_folder(s, &pair.local_folder)
-            }),
-            None,
-        ),
-        Err(error) => (
-            None,
-            Some(format!(
-                "Failed to load local index snapshot for pair '{}': {error}",
-                pair.label
-            )),
-        ),
-    }
-}
-
-fn remote_snapshot_for_pair<R: Runtime>(
-    app: &AppHandle<R>,
-    pair: &SyncPair,
-) -> (Option<RemoteIndexSnapshot>, Option<String>) {
-    match read_remote_index_snapshot_for_pair(app, &pair.id) {
-        Ok(snapshot) => (
-            snapshot.filter(|s| {
-                !pair.bucket.is_empty()
-                    && super::remote_index::snapshot_matches_target(s, &pair.bucket)
-            }),
-            None,
-        ),
-        Err(error) => (
-            None,
-            Some(format!(
-                "Failed to load remote index snapshot for pair '{}': {error}",
-                pair.label
-            )),
-        ),
-    }
 }
 
 pub(crate) async fn list_remote_inventory_for_pair(
@@ -1709,1293 +1581,9 @@ pub(crate) async fn list_remote_inventory_for_pair(
     })
 }
 
-fn rebuild_durable_plan_for_pair<R: Runtime>(
-    app: &AppHandle<R>,
-    pair: &SyncPair,
-    local_snapshot: &LocalIndexSnapshot,
-    remote_snapshot: &RemoteIndexSnapshot,
-    credentials_available: bool,
-) -> Result<super::sync_db::DurablePlannerSummary, String> {
-    let anchors = load_sync_anchors_for_pair(app, pair)?
-        .into_iter()
-        .map(|anchor| (anchor.path.clone(), anchor))
-        .collect();
-    let plan = sync_planner::build_sync_plan(
-        local_snapshot,
-        remote_snapshot,
-        &anchors,
-        &pair.conflict_strategy,
-        credentials_available,
-    );
-
-    if plan.summary.suppressed_delete_count > 0 {
-        // The mass-delete breaker tripped. Surface it loudly: the user sees
-        // review items and must be told why nothing was deleted.
-        // (Phase 5 turns this into an explicit confirm-or-restore prompt.)
-        if let Some(debug_state) = app.try_state::<ActivityDebugState>() {
-            emit_error_activity(
-                app,
-                &debug_state,
-                format!(
-                    "Held {} deletion(s) for '{}' pending review.",
-                    plan.summary.suppressed_delete_count, pair.label
-                ),
-                Some(format!(
-                    "pair='{}' suppressed_delete_count={} anchored_paths={}. Storage Goblin does not delete this many files automatically; review the flagged entries and confirm.",
-                    pair.label,
-                    plan.summary.suppressed_delete_count,
-                    anchors.len()
-                )),
-            );
-        }
-    }
-
-    persist_sync_plan_for_pair(app, pair, &plan)
-}
-
-async fn execute_planned_upload_queue_for_pair<R: Runtime>(
-    app: &AppHandle<R>,
-    debug_state: &ActivityDebugState,
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-) -> Result<UploadExecutionOutcome, String> {
-    let recovery = recover_interrupted_queue_items_for_pair(app, pair, &now_iso())?;
-    emit_recovery_activity(
-        app,
-        debug_state,
-        recovery.recovered_upload_count,
-        recovery.recovered_download_count,
-        Some(&format!("pair='{}'", pair.label)),
-    );
-    let queue_items = load_planned_upload_queue_for_pair(app, pair)?;
-    let executor = build_pair_transfer_executor(pair, credentials).await?;
-    let uploads_ran = !queue_items.is_empty();
-    let mut execution_error: Option<String> = None;
-
-    for (index, item) in queue_items.into_iter().enumerate() {
-        let started_at = now_iso();
-        if let Err(error) =
-            mark_upload_queue_item_in_progress_for_pair(app, pair, item.id, &started_at)
-        {
-            execution_error = Some(error);
-            break;
-        }
-
-        // Deletes, moves, conflict duplication, and anchor reconciliation
-        // (backlog phase 1) are not file transfers.
-        if let Some(structural) =
-            perform_structural_upload_operation_for_pair(app, &executor, pair, credentials, &item)
-                .await
-        {
-            match structural {
-                Ok(message) => {
-                    let finished_at = now_iso();
-                    if let Err(error) =
-                        mark_upload_queue_item_completed_for_pair(app, pair, item.id, &finished_at)
-                    {
-                        execution_error = Some(error);
-                        break;
-                    }
-                    emit_success_activity(
-                        app,
-                        debug_state,
-                        &message,
-                        Some(format!(
-                            "pair='{}' queue_item_id={} operation='{}' path='{}' finished_at='{}'",
-                            pair.label, item.id, item.operation, item.path, finished_at
-                        )),
-                    );
-                }
-                Err(error) => {
-                    let finished_at = now_iso();
-                    let failure_message = format!(
-                        "{} failed for '{}': {error}",
-                        item.operation.replace('_', " "),
-                        item.path
-                    );
-                    let _ = mark_upload_queue_item_failed_for_pair(
-                        app,
-                        pair,
-                        item.id,
-                        &finished_at,
-                        &failure_message,
-                    );
-                    emit_error_activity(
-                        app,
-                        debug_state,
-                        "Planned sync operation failed.",
-                        Some(format!(
-                            "pair='{}' queue_item_id={} operation='{}' path='{}' finished_at='{}' error='{}'",
-                            pair.label, item.id, item.operation, item.path, finished_at, failure_message
-                        )),
-                    );
-                    execution_error = Some(failure_message);
-                    break;
-                }
-            }
-            continue;
-        }
-
-        if item.operation == "create_directory" {
-            let key = s3_adapter::directory_key(&item.path);
-            emit_info_activity(
-                app,
-                debug_state,
-                "Starting planned directory creation.",
-                Some(format!(
-                    "pair='{}' queue_item_id={} attempt={} path='{}' key='{}'",
-                    pair.label,
-                    item.id,
-                    index + 1,
-                    item.path,
-                    key,
-                )),
-            );
-
-            match match &executor {
-                PairTransferExecutor::Real(client) => {
-                    run_with_timeout(
-                        object_store::create_directory_placeholder(client, &pair.bucket, &key),
-                        PLANNED_UPLOAD_TIMEOUT,
-                        || {
-                            format!(
-                                "Directory creation timed out for '{}' after {}s",
-                                item.path,
-                                PLANNED_UPLOAD_TIMEOUT.as_secs()
-                            )
-                        },
-                    )
-                    .await
-                }
-                #[cfg(test)]
-                PairTransferExecutor::Mock => Ok(()),
-            } {
-                Ok(()) => {
-                    let finished_at = now_iso();
-                    if let Err(error) =
-                        mark_upload_queue_item_completed_for_pair(app, pair, item.id, &finished_at)
-                    {
-                        execution_error = Some(error);
-                        break;
-                    }
-                    emit_success_activity(
-                        app,
-                        debug_state,
-                        "Completed planned directory creation.",
-                        Some(format!(
-                            "pair='{}' queue_item_id={} path='{}' key='{}' finished_at='{}'",
-                            pair.label, item.id, item.path, key, finished_at
-                        )),
-                    );
-                }
-                Err(error) => {
-                    let finished_at = now_iso();
-                    let failure_message =
-                        format!("Directory creation failed for '{}': {error}", item.path);
-                    let _ = mark_upload_queue_item_failed_for_pair(
-                        app,
-                        pair,
-                        item.id,
-                        &finished_at,
-                        &failure_message,
-                    );
-                    emit_error_activity(
-                        app,
-                        debug_state,
-                        "Planned directory creation failed.",
-                        Some(format!(
-                            "pair='{}' queue_item_id={} path='{}' key='{}' finished_at='{}' error='{}'",
-                            pair.label, item.id, item.path, key, finished_at, failure_message
-                        )),
-                    );
-                    execution_error = Some(failure_message);
-                    break;
-                }
-            }
-
-            continue;
-        }
-
-        let local_path = match resolve_local_upload_path(&pair.local_folder, &item.path) {
-            Ok(path) => path,
-            Err(error) => {
-                let finished_at = now_iso();
-                let _ = mark_upload_queue_item_failed_for_pair(
-                    app,
-                    pair,
-                    item.id,
-                    &finished_at,
-                    &error,
-                );
-                execution_error = Some(error);
-                break;
-            }
-        };
-
-        let metadata = match std::fs::metadata(&local_path) {
-            Ok(metadata) if metadata.is_file() => metadata,
-            Ok(_) => {
-                let error = format!(
-                    "planned upload source is not a file: {}",
-                    local_path.display()
-                );
-                let finished_at = now_iso();
-                let _ = mark_upload_queue_item_failed_for_pair(
-                    app,
-                    pair,
-                    item.id,
-                    &finished_at,
-                    &error,
-                );
-                execution_error = Some(error);
-                break;
-            }
-            Err(error) => {
-                let error = format!(
-                    "failed to inspect planned upload source '{}': {error}",
-                    local_path.display()
-                );
-                let finished_at = now_iso();
-                let _ = mark_upload_queue_item_failed_for_pair(
-                    app,
-                    pair,
-                    item.id,
-                    &finished_at,
-                    &error,
-                );
-                execution_error = Some(error);
-                break;
-            }
-        };
-
-        if let Some(expected_size) = item.local_size {
-            if metadata.len() != expected_size {
-                let error = format!(
-                    "planned upload source '{}' changed on disk since planning (expected {expected_size} bytes, found {})",
-                    local_path.display(),
-                    metadata.len()
-                );
-                let finished_at = now_iso();
-                let _ = mark_upload_queue_item_failed_for_pair(
-                    app,
-                    pair,
-                    item.id,
-                    &finished_at,
-                    &error,
-                );
-                execution_error = Some(error);
-                break;
-            }
-        }
-
-        let current_fingerprint = match crate::storage::local_index::file_fingerprint(&local_path) {
-            Ok(fingerprint) => fingerprint,
-            Err(error) => {
-                let finished_at = now_iso();
-                let _ = mark_upload_queue_item_failed_for_pair(
-                    app,
-                    pair,
-                    item.id,
-                    &finished_at,
-                    &error,
-                );
-                execution_error = Some(error);
-                break;
-            }
-        };
-
-        let remote_snapshot = match read_remote_index_snapshot_for_pair(app, &pair.id)? {
-            Some(snapshot) => snapshot,
-            None => {
-                let error = "remote snapshot missing before planned upload execution".to_string();
-                let finished_at = now_iso();
-                let _ = mark_upload_queue_item_failed_for_pair(
-                    app,
-                    pair,
-                    item.id,
-                    &finished_at,
-                    &error,
-                );
-                execution_error = Some(error);
-                break;
-            }
-        };
-        let current_remote_etag = remote_etag_for_path(&remote_snapshot, &item.path);
-        if let Some(error) = upload_stale_plan_error(
-            &local_path,
-            &current_fingerprint,
-            item.expected_local_fingerprint.as_deref(),
-            current_remote_etag.as_deref(),
-            item.expected_remote_etag.as_deref(),
-        ) {
-            let finished_at = now_iso();
-            let _ =
-                mark_upload_queue_item_failed_for_pair(app, pair, item.id, &finished_at, &error);
-            execution_error = Some(error);
-            break;
-        }
-
-        let key = s3_adapter::object_key(&item.path);
-        emit_info_activity(
-            app,
-            debug_state,
-            "Starting planned upload.",
-            Some(format!(
-                "pair='{}' queue_item_id={} attempt={} path='{}' key='{}' local_path='{}' bytes={}",
-                pair.label,
-                item.id,
-                index + 1,
-                item.path,
-                key,
-                local_path.display(),
-                metadata.len()
-            )),
-        );
-
-        match run_with_timeout(
-            perform_planned_upload_for_pair(
-                &executor,
-                pair,
-                credentials,
-                &item.path,
-                &key,
-                &local_path,
-                &current_fingerprint,
-            ),
-            PLANNED_UPLOAD_TIMEOUT,
-            || {
-                format!(
-                    "Upload timed out for '{}' after {}s",
-                    item.path,
-                    PLANNED_UPLOAD_TIMEOUT.as_secs()
-                )
-            },
-        )
-        .await
-        {
-            Ok(refreshed_remote_snapshot) => {
-                if let Err(error) = persist_upload_success_for_pair(
-                    app,
-                    pair,
-                    &item.path,
-                    &current_fingerprint,
-                    &refreshed_remote_snapshot,
-                ) {
-                    let finished_at = now_iso();
-                    let _ = mark_upload_queue_item_failed_for_pair(
-                        app,
-                        pair,
-                        item.id,
-                        &finished_at,
-                        &error,
-                    );
-                    execution_error = Some(error);
-                    break;
-                }
-
-                let finished_at = now_iso();
-                if let Err(error) =
-                    mark_upload_queue_item_completed_for_pair(app, pair, item.id, &finished_at)
-                {
-                    execution_error = Some(error);
-                    break;
-                }
-                emit_success_activity(
-                    app,
-                    debug_state,
-                    "Completed planned upload.",
-                    Some(format!(
-                        "pair='{}' queue_item_id={} path='{}' key='{}' finished_at='{}'",
-                        pair.label, item.id, item.path, key, finished_at
-                    )),
-                );
-            }
-            Err(error) => {
-                let finished_at = now_iso();
-                let failure_message = format!("Upload failed for '{}': {error}", item.path);
-                let _ = mark_upload_queue_item_failed_for_pair(
-                    app,
-                    pair,
-                    item.id,
-                    &finished_at,
-                    &failure_message,
-                );
-                emit_error_activity(
-                    app,
-                    debug_state,
-                    "Planned upload failed.",
-                    Some(format!(
-                        "pair='{}' queue_item_id={} path='{}' key='{}' finished_at='{}' error='{}'",
-                        pair.label, item.id, item.path, key, finished_at, failure_message
-                    )),
-                );
-                execution_error = Some(failure_message);
-                break;
-            }
-        }
-    }
-
-    Ok(UploadExecutionOutcome {
-        execution_error,
-        uploads_ran,
-    })
-}
-
-async fn execute_planned_download_queue_for_pair<R: Runtime>(
-    app: &AppHandle<R>,
-    debug_state: &ActivityDebugState,
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-) -> Result<DownloadExecutionOutcome, String> {
-    let recovery = recover_interrupted_queue_items_for_pair(app, pair, &now_iso())?;
-    emit_recovery_activity(
-        app,
-        debug_state,
-        recovery.recovered_upload_count,
-        recovery.recovered_download_count,
-        Some(&format!("pair='{}'", pair.label)),
-    );
-    let queue_items = load_planned_download_queue_for_pair(app, pair)?;
-    let executor = build_pair_transfer_executor(pair, credentials).await?;
-    let downloads_ran = !queue_items.is_empty();
-    let mut execution_error: Option<String> = None;
-
-    for (index, item) in queue_items.into_iter().enumerate() {
-        let started_at = now_iso();
-        if let Err(error) =
-            mark_download_queue_item_in_progress_for_pair(app, pair, item.id, &started_at)
-        {
-            execution_error = Some(error);
-            break;
-        }
-
-        // Local deletes and local moves (backlog phase 1) are not transfers.
-        if let Some(structural) =
-            perform_structural_download_operation_for_pair(app, &executor, pair, &item)
-        {
-            match structural {
-                Ok(message) => {
-                    let finished_at = now_iso();
-                    if let Err(error) = mark_download_queue_item_completed_for_pair(
-                        app,
-                        pair,
-                        item.id,
-                        &finished_at,
-                    ) {
-                        execution_error = Some(error);
-                        break;
-                    }
-                    emit_success_activity(
-                        app,
-                        debug_state,
-                        &message,
-                        Some(format!(
-                            "pair='{}' queue_item_id={} operation='{}' path='{}' finished_at='{}'",
-                            pair.label, item.id, item.operation, item.path, finished_at
-                        )),
-                    );
-                }
-                Err(error) => {
-                    let finished_at = now_iso();
-                    let failure_message = format!(
-                        "{} failed for '{}': {error}",
-                        item.operation.replace('_', " "),
-                        item.path
-                    );
-                    let _ = mark_download_queue_item_failed_for_pair(
-                        app,
-                        pair,
-                        item.id,
-                        &finished_at,
-                        &failure_message,
-                    );
-                    emit_error_activity(
-                        app,
-                        debug_state,
-                        "Planned sync operation failed.",
-                        Some(format!(
-                            "pair='{}' queue_item_id={} operation='{}' path='{}' finished_at='{}' error='{}'",
-                            pair.label, item.id, item.operation, item.path, finished_at, failure_message
-                        )),
-                    );
-                    execution_error = Some(failure_message);
-                    break;
-                }
-            }
-            continue;
-        }
-
-        let local_path = match resolve_local_download_path(&pair.local_folder, &item.path) {
-            Ok(path) => path,
-            Err(error) => {
-                let finished_at = now_iso();
-                let _ = mark_download_queue_item_failed_for_pair(
-                    app,
-                    pair,
-                    item.id,
-                    &finished_at,
-                    &error,
-                );
-                execution_error = Some(error);
-                break;
-            }
-        };
-
-        let remote_snapshot = match read_remote_index_snapshot_for_pair(app, &pair.id)? {
-            Some(snapshot) => snapshot,
-            None => {
-                let error = "remote snapshot missing before planned download execution".to_string();
-                let finished_at = now_iso();
-                let _ = mark_download_queue_item_failed_for_pair(
-                    app,
-                    pair,
-                    item.id,
-                    &finished_at,
-                    &error,
-                );
-                execution_error = Some(error);
-                break;
-            }
-        };
-        let current_remote_etag = remote_etag_for_path(&remote_snapshot, &item.path);
-        if current_remote_etag != item.expected_remote_etag {
-            let error = format!(
-                "planned download source '{}' changed remotely since planning",
-                item.path
-            );
-            let finished_at = now_iso();
-            let _ =
-                mark_download_queue_item_failed_for_pair(app, pair, item.id, &finished_at, &error);
-            execution_error = Some(error);
-            break;
-        }
-
-        let current_local_fingerprint = if local_path.exists() {
-            match crate::storage::local_index::file_fingerprint(&local_path) {
-                Ok(fingerprint) => Some(fingerprint),
-                Err(error) => {
-                    let finished_at = now_iso();
-                    let _ = mark_download_queue_item_failed_for_pair(
-                        app,
-                        pair,
-                        item.id,
-                        &finished_at,
-                        &error,
-                    );
-                    execution_error = Some(error);
-                    break;
-                }
-            }
-        } else {
-            None
-        };
-
-        if let Some(error) = download_stale_plan_error(
-            &local_path,
-            current_local_fingerprint.as_deref(),
-            item.expected_local_fingerprint.as_deref(),
-            current_remote_etag.as_deref(),
-            item.expected_remote_etag.as_deref(),
-        ) {
-            let finished_at = now_iso();
-            let _ =
-                mark_download_queue_item_failed_for_pair(app, pair, item.id, &finished_at, &error);
-            execution_error = Some(error);
-            break;
-        }
-
-        let key = s3_adapter::object_key(&item.path);
-        emit_info_activity(
-            app,
-            debug_state,
-            "Starting planned download.",
-            Some(format!(
-                "pair='{}' queue_item_id={} attempt={} path='{}' key='{}' local_path='{}' remote_size={}",
-                pair.label,
-                item.id,
-                index + 1,
-                item.path,
-                key,
-                local_path.display(),
-                item.remote_size
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "unknown".into())
-            )),
-        );
-
-        if let Some(parent) = local_path.parent() {
-            if let Err(error) = std::fs::create_dir_all(parent) {
-                let error_msg = format!(
-                    "failed to create parent directory for download '{}': {error}",
-                    local_path.display()
-                );
-                let finished_at = now_iso();
-                let _ = mark_download_queue_item_failed_for_pair(
-                    app,
-                    pair,
-                    item.id,
-                    &finished_at,
-                    &error_msg,
-                );
-                execution_error = Some(error_msg);
-                break;
-            }
-        }
-
-        match run_with_timeout(
-            perform_planned_download_for_pair(&executor, pair, &key, &item.path, &local_path),
-            PLANNED_DOWNLOAD_TIMEOUT,
-            || {
-                format!(
-                    "Download timed out for '{}' after {}s",
-                    item.path,
-                    PLANNED_DOWNLOAD_TIMEOUT.as_secs()
-                )
-            },
-        )
-        .await
-        {
-            Ok(()) => {
-                if let Err(error) = persist_download_success_for_pair(
-                    app,
-                    pair,
-                    &item.path,
-                    &local_path,
-                    current_remote_etag.clone(),
-                ) {
-                    let finished_at = now_iso();
-                    let _ = mark_download_queue_item_failed_for_pair(
-                        app,
-                        pair,
-                        item.id,
-                        &finished_at,
-                        &error,
-                    );
-                    execution_error = Some(error);
-                    break;
-                }
-
-                let finished_at = now_iso();
-                if let Err(error) =
-                    mark_download_queue_item_completed_for_pair(app, pair, item.id, &finished_at)
-                {
-                    execution_error = Some(error);
-                    break;
-                }
-                emit_success_activity(
-                    app,
-                    debug_state,
-                    "Completed planned download.",
-                    Some(format!(
-                        "pair='{}' queue_item_id={} path='{}' key='{}' finished_at='{}'",
-                        pair.label, item.id, item.path, key, finished_at
-                    )),
-                );
-            }
-            Err(error) => {
-                let finished_at = now_iso();
-                let failure_message = format!("Download failed for '{}': {error}", item.path);
-                let _ = mark_download_queue_item_failed_for_pair(
-                    app,
-                    pair,
-                    item.id,
-                    &finished_at,
-                    &failure_message,
-                );
-                emit_error_activity(
-                    app,
-                    debug_state,
-                    "Planned download failed.",
-                    Some(format!(
-                        "pair='{}' queue_item_id={} path='{}' key='{}' finished_at='{}' error='{}'",
-                        pair.label, item.id, item.path, key, finished_at, failure_message
-                    )),
-                );
-                execution_error = Some(failure_message);
-                break;
-            }
-        }
-    }
-
-    Ok(DownloadExecutionOutcome {
-        execution_error,
-        downloads_ran,
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Per-pair sync cycle orchestration
 // ---------------------------------------------------------------------------
-
-async fn run_sync_cycle_for_pair(
-    app: &AppHandle,
-    debug_state: &ActivityDebugState,
-    pair: &SyncPair,
-    trigger: PairSyncTrigger,
-    stop_signal: Option<&AtomicBool>,
-) -> Result<PairSyncStatus, String> {
-    if !is_pair_configured(pair) {
-        let mut status = pair_to_status(pair, None, None, Default::default());
-        status.phase = "unconfigured".into();
-        status.last_error = Some("Save setup details before starting sync.".into());
-        emit_error_activity(
-            app,
-            debug_state,
-            "Pair sync cycle finished with an issue.",
-            Some(pair_sync_cycle_issue_details(
-                pair,
-                "configuration",
-                "Save setup details before starting sync.",
-                None,
-                None,
-            )),
-        );
-        return Ok(status);
-    }
-
-    let credentials = match resolve_credentials_for_pair(app, pair) {
-        Ok(creds) => creds,
-        Err(error) => {
-            let (existing_local, _) = snapshot_for_pair(app, pair);
-            let (existing_remote, _) = remote_snapshot_for_pair(app, pair);
-            let plan_summary = load_planner_summary_for_pair(app, pair).unwrap_or_default();
-            let mut status = pair_to_status(
-                pair,
-                existing_local.as_ref(),
-                existing_remote.as_ref(),
-                plan_summary,
-            );
-            status.phase = "error".into();
-            status.last_error = Some(concise_sync_issue("Credential resolution"));
-            emit_error_activity(
-                app,
-                debug_state,
-                "Pair sync cycle finished with an issue.",
-                Some(pair_sync_cycle_issue_details(
-                    pair,
-                    "credential-resolution",
-                    &error,
-                    None,
-                    None,
-                )),
-            );
-            return Ok(status);
-        }
-    };
-
-    emit_info_activity(
-        app,
-        debug_state,
-        "Running sync cycle for pair.",
-        Some(format!(
-            "pair='{}' folder='{}' bucket='{}' trigger='{}'",
-            pair.label,
-            pair.local_folder,
-            pair.bucket,
-            match trigger {
-                PairSyncTrigger::Manual => "manual",
-                PairSyncTrigger::LocalDirty => "local-dirty",
-                PairSyncTrigger::RemotePoll => "remote-poll",
-            }
-        )),
-    );
-
-    let cycle_started_at = now_iso();
-
-    let (existing_local, _) = snapshot_for_pair(app, pair);
-    let state = app.state::<SyncState>();
-    let watcher_active = pair_has_active_watcher(&state, &pair.id).unwrap_or(false);
-
-    // 1. Scan local folder when needed
-    let mut local_snapshot = if should_scan_local_for_trigger(
-        trigger,
-        existing_local.as_ref(),
-        watcher_active,
-        LOCAL_SNAPSHOT_STALE_TTL,
-    ) {
-        match scan_local_folder(Path::new(&pair.local_folder)) {
-            Ok(snapshot) => {
-                let _ = write_local_index_snapshot_for_pair(app, &pair.id, &snapshot);
-                snapshot
-            }
-            Err(error) => {
-                let (existing_local, _) = snapshot_for_pair(app, pair);
-                let (existing_remote, _) = remote_snapshot_for_pair(app, pair);
-                let plan_summary = load_planner_summary_for_pair(app, pair).unwrap_or_default();
-                let mut status = pair_to_status(
-                    pair,
-                    existing_local.as_ref(),
-                    existing_remote.as_ref(),
-                    plan_summary,
-                );
-                status.phase = "error".into();
-                status.last_error = Some(concise_sync_issue("Local scan"));
-                emit_error_activity(
-                    app,
-                    debug_state,
-                    "Pair sync cycle finished with an issue.",
-                    Some(pair_sync_cycle_issue_details(
-                        pair,
-                        "local-scan",
-                        &error,
-                        Some(&cycle_started_at),
-                        None,
-                    )),
-                );
-                return Ok(status);
-            }
-        }
-    } else {
-        existing_local.unwrap_or_else(|| LocalIndexSnapshot {
-            version: 1,
-            root_folder: pair.local_folder.clone(),
-            summary: crate::storage::local_index::LocalIndexSummary {
-                indexed_at: now_iso(),
-                file_count: 0,
-                directory_count: 0,
-                total_bytes: 0,
-            },
-            entries: Vec::new(),
-        })
-    };
-
-    if stop_requested(stop_signal) {
-        let plan_summary = load_planner_summary_for_pair(app, pair).unwrap_or_default();
-        return Ok(pair_to_status(
-            pair,
-            Some(&local_snapshot),
-            None,
-            plan_summary,
-        ));
-    }
-
-    // 2. Refresh remote inventory
-    let mut remote_snapshot = match list_remote_inventory_for_pair(pair, &credentials).await {
-        Ok(snapshot) => {
-            let _ = write_remote_index_snapshot_for_pair(app, &pair.id, &snapshot);
-            snapshot
-        }
-        Err(error) => {
-            let (existing_remote, _) = remote_snapshot_for_pair(app, pair);
-            let plan_summary = load_planner_summary_for_pair(app, pair).unwrap_or_default();
-            let mut status = pair_to_status(
-                pair,
-                Some(&local_snapshot),
-                existing_remote.as_ref(),
-                plan_summary,
-            );
-            status.phase = "error".into();
-            status.last_error = Some(concise_sync_issue("Remote inventory refresh"));
-            emit_error_activity(
-                app,
-                debug_state,
-                "Pair sync cycle finished with an issue.",
-                Some(pair_sync_cycle_issue_details(
-                    pair,
-                    "remote-refresh",
-                    &error,
-                    Some(&cycle_started_at),
-                    None,
-                )),
-            );
-            return Ok(status);
-        }
-    };
-
-    if stop_requested(stop_signal) {
-        let plan_summary = load_planner_summary_for_pair(app, pair).unwrap_or_default();
-        return Ok(pair_to_status(
-            pair,
-            Some(&local_snapshot),
-            Some(&remote_snapshot),
-            plan_summary,
-        ));
-    }
-
-    // 3. Build sync plan
-    let mut planner_summary =
-        match rebuild_durable_plan_for_pair(app, pair, &local_snapshot, &remote_snapshot, true) {
-            Ok(summary) => summary,
-            Err(error) => {
-                let mut status = pair_to_status(
-                    pair,
-                    Some(&local_snapshot),
-                    Some(&remote_snapshot),
-                    Default::default(),
-                );
-                status.phase = "error".into();
-                status.last_error = Some(concise_sync_issue("Sync plan build"));
-                emit_error_activity(
-                    app,
-                    debug_state,
-                    "Pair sync cycle finished with an issue.",
-                    Some(pair_sync_cycle_issue_details(
-                        pair,
-                        "plan-build",
-                        &error,
-                        Some(&cycle_started_at),
-                        None,
-                    )),
-                );
-                return Ok(status);
-            }
-        };
-
-    let mut last_error: Option<String> = None;
-
-    // 4. Execute uploads
-    if (planner_summary.upload_count > 0 || planner_summary.create_directory_count > 0)
-        && !stop_requested(stop_signal)
-    {
-        match execute_planned_upload_queue_for_pair(app, debug_state, pair, &credentials).await {
-            Ok(outcome) => {
-                last_error = outcome.execution_error;
-
-                if outcome.uploads_ran {
-                    // Refresh remote after uploads
-                    match list_remote_inventory_for_pair(pair, &credentials).await {
-                        Ok(snapshot) => {
-                            let _ = write_remote_index_snapshot_for_pair(app, &pair.id, &snapshot);
-                            remote_snapshot = snapshot;
-                        }
-                        Err(error) => {
-                            last_error = Some(append_error_context(
-                                last_error.clone(),
-                                format!(
-                                    "Failed to refresh remote inventory after upload execution: {error}"
-                                ),
-                            ));
-                        }
-                    }
-
-                    // Rebuild plan after uploads
-                    match rebuild_durable_plan_for_pair(
-                        app,
-                        pair,
-                        &local_snapshot,
-                        &remote_snapshot,
-                        true,
-                    ) {
-                        Ok(summary) => planner_summary = summary,
-                        Err(error) => {
-                            last_error = Some(append_error_context(
-                                last_error.clone(),
-                                format!(
-                                    "Failed to rebuild sync plan after upload execution: {error}"
-                                ),
-                            ));
-                        }
-                    }
-                }
-            }
-            Err(error) => {
-                let mut status = pair_to_status(
-                    pair,
-                    Some(&local_snapshot),
-                    Some(&remote_snapshot),
-                    planner_summary,
-                );
-                status.phase = "error".into();
-                status.last_error = Some(concise_sync_issue("Upload execution"));
-                status.last_sync_at = Some(cycle_started_at);
-                emit_error_activity(
-                    app,
-                    debug_state,
-                    "Pair sync cycle finished with an issue.",
-                    Some(pair_sync_cycle_issue_details(
-                        pair,
-                        "upload-execution",
-                        &error,
-                        status.last_sync_at.as_deref(),
-                        None,
-                    )),
-                );
-                return Ok(status);
-            }
-        }
-    }
-
-    // 5. Execute downloads
-    if planner_summary.download_count > 0 && !stop_requested(stop_signal) {
-        match execute_planned_download_queue_for_pair(app, debug_state, pair, &credentials).await {
-            Ok(outcome) => {
-                last_error = match (last_error, outcome.execution_error) {
-                    (Some(prev), Some(dl_err)) => Some(format!("{prev}. {dl_err}")),
-                    (None, Some(dl_err)) => Some(dl_err),
-                    (existing, None) => existing,
-                };
-
-                if outcome.downloads_ran {
-                    // Rescan local folder after downloads
-                    if let Ok(updated_snapshot) = scan_local_folder(Path::new(&pair.local_folder)) {
-                        let _ =
-                            write_local_index_snapshot_for_pair(app, &pair.id, &updated_snapshot);
-                        local_snapshot = updated_snapshot;
-                    } else {
-                        last_error = Some(append_error_context(
-                            last_error.clone(),
-                            "Failed to rescan local folder after download execution.",
-                        ));
-                    }
-
-                    // Refresh remote after downloads
-                    match list_remote_inventory_for_pair(pair, &credentials).await {
-                        Ok(snapshot) => {
-                            let _ = write_remote_index_snapshot_for_pair(app, &pair.id, &snapshot);
-                            remote_snapshot = snapshot;
-                        }
-                        Err(error) => {
-                            last_error = Some(append_error_context(
-                                last_error.clone(),
-                                format!(
-                                    "Failed to refresh remote inventory after download execution: {error}"
-                                ),
-                            ));
-                        }
-                    }
-
-                    // Rebuild plan after downloads
-                    match rebuild_durable_plan_for_pair(
-                        app,
-                        pair,
-                        &local_snapshot,
-                        &remote_snapshot,
-                        true,
-                    ) {
-                        Ok(summary) => planner_summary = summary,
-                        Err(error) => {
-                            last_error = Some(append_error_context(
-                                last_error.clone(),
-                                format!(
-                                    "Failed to rebuild sync plan after download execution: {error}"
-                                ),
-                            ));
-                        }
-                    }
-                }
-            }
-            Err(error) => {
-                let mut status = pair_to_status(
-                    pair,
-                    Some(&local_snapshot),
-                    Some(&remote_snapshot),
-                    planner_summary,
-                );
-                status.phase = "error".into();
-                let detail_error = append_error_context(last_error.clone(), error.clone());
-                status.last_error = Some(concise_sync_issue("Download execution"));
-                status.last_sync_at = Some(cycle_started_at);
-                emit_error_activity(
-                    app,
-                    debug_state,
-                    "Pair sync cycle finished with an issue.",
-                    Some(pair_sync_cycle_issue_details(
-                        pair,
-                        "download-execution",
-                        &detail_error,
-                        status.last_sync_at.as_deref(),
-                        None,
-                    )),
-                );
-                return Ok(status);
-            }
-        }
-    }
-
-    if stop_requested(stop_signal) {
-        return Ok(pair_to_status(
-            pair,
-            Some(&local_snapshot),
-            Some(&remote_snapshot),
-            planner_summary,
-        ));
-    }
-
-    // 6. Build final status
-    let phase = if last_error.is_some() {
-        "error"
-    } else if !pair.enabled {
-        "paused"
-    } else {
-        "idle"
-    };
-
-    let mut final_status = pair_to_status(
-        pair,
-        Some(&local_snapshot),
-        Some(&remote_snapshot),
-        planner_summary,
-    );
-    final_status.phase = phase.into();
-    final_status.last_sync_at = Some(cycle_started_at);
-    final_status.last_error = last_error
-        .as_ref()
-        .map(|_| "Sync cycle completed with issues.".to_string());
-
-    if let Some(error) = final_status.last_error.as_ref() {
-        emit_error_activity(
-            app,
-            debug_state,
-            "Pair sync cycle finished with an issue.",
-            Some(pair_sync_cycle_issue_details(
-                pair,
-                "sync-cycle",
-                error,
-                final_status.last_sync_at.as_deref(),
-                last_error.as_deref(),
-            )),
-        );
-    } else {
-        emit_success_activity(
-            app,
-            debug_state,
-            "Pair sync cycle finished.",
-            Some(format!(
-                "pair='{}' phase='{}' pending_operations={} last_sync_at='{}'",
-                pair.label,
-                final_status.phase,
-                final_status.pending_operations,
-                final_status.last_sync_at.clone().unwrap_or_default()
-            )),
-        );
-    }
-
-    Ok(final_status)
-}
-
-fn start_polling_worker_for_pairs(app: &AppHandle) -> Result<(), String> {
-    let state = app.state::<SyncState>();
-    let (worker_id, stop_signal) = begin_polling_worker(&state)?;
-    let app_handle = app.clone();
-
-    tauri::async_runtime::spawn(async move {
-        loop {
-            let profile = match read_profile_from_disk(&app_handle) {
-                Ok(profile) => profile,
-                Err(error) => {
-                    let debug_state = app_handle.state::<ActivityDebugState>();
-                    emit_error_activity(
-                        &app_handle,
-                        &debug_state,
-                        "Pair polling worker stopped after profile load failed.",
-                        Some(error),
-                    );
-                    break;
-                }
-            };
-
-            let pollable_pairs: Vec<SyncPair> = profile
-                .sync_pairs
-                .iter()
-                .filter(|pair| should_poll_pair(pair))
-                .cloned()
-                .collect();
-
-            let _ = reconcile_pair_watchers(&app_handle, &profile);
-
-            if pollable_pairs.is_empty() {
-                let state = app_handle.state::<SyncState>();
-                let _ = clear_all_pair_watchers(&state);
-                let aggregate = refresh_aggregate_status(&app_handle, &profile);
-                if let Ok(status) = aggregate {
-                    emit_status(&app_handle, &status);
-                }
-                break;
-            }
-
-            let state = app_handle.state::<SyncState>();
-            let runtime_statuses = pair_statuses_snapshot(&state).unwrap_or_default();
-            let now = tokio::time::Instant::now();
-            let soonest_deadline = pollable_pairs
-                .iter()
-                .map(|pair| next_polling_deadline_at(now, pair, runtime_statuses.get(&pair.id)))
-                .min()
-                .unwrap_or(now);
-
-            sleep_until_pair_work(
-                &state,
-                stop_signal.as_ref(),
-                soonest_deadline.saturating_duration_since(now),
-            )
-            .await;
-
-            if stop_signal.load(Ordering::SeqCst) {
-                break;
-            }
-
-            let debug_state = app_handle.state::<ActivityDebugState>();
-            let now = tokio::time::Instant::now();
-            let dirty_pair_ids: BTreeSet<String> =
-                due_dirty_pairs(&state, Instant::now(), DIRTY_PAIR_DEBOUNCE)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect();
-            let due_pairs = due_polling_pairs(&pollable_pairs, &runtime_statuses, now);
-
-            let mut work_items: Vec<(SyncPair, PairSyncTrigger)> = Vec::new();
-
-            for pair in &pollable_pairs {
-                if dirty_pair_ids.contains(&pair.id) {
-                    work_items.push((pair.clone(), PairSyncTrigger::LocalDirty));
-                }
-            }
-
-            for pair in due_pairs {
-                if !dirty_pair_ids.contains(&pair.id) {
-                    work_items.push((pair, PairSyncTrigger::RemotePoll));
-                }
-            }
-
-            if work_items.is_empty() {
-                continue;
-            }
-
-            for (pair, trigger) in work_items {
-                if stop_signal.load(Ordering::SeqCst) {
-                    break;
-                }
-
-                if trigger == PairSyncTrigger::LocalDirty {
-                    let _ = clear_dirty_pair(&state, &pair.id);
-                }
-
-                // On Err the error was already emitted by run_sync_cycle_for_pair.
-                if let Ok(status) = run_sync_cycle_for_pair(
-                    &app_handle,
-                    &debug_state,
-                    &pair,
-                    trigger,
-                    Some(stop_signal.as_ref()),
-                )
-                .await
-                {
-                    let _ = set_pair_status_from_handle(&app_handle, status);
-                }
-            }
-
-            if let Ok(mut synthesized) = refresh_aggregate_status(&app_handle, &profile) {
-                if synthesized.phase == "idle" {
-                    synthesized.phase = "polling".into();
-                    let _ = set_status_from_handle(&app_handle, synthesized.clone());
-                }
-                emit_status(&app_handle, &synthesized);
-            }
-        }
-
-        let state = app_handle.state::<SyncState>();
-        let _ = clear_all_pair_watchers(&state);
-        let _ = clear_polling_worker(&state, worker_id);
-    });
-
-    Ok(())
-}
-
-/// Starts the appropriate polling worker based on the current profile state.
-/// If configured sync pairs exist, uses the per-pair polling worker.
-/// Otherwise, falls back to the legacy single-profile polling worker.
-fn start_polling_worker(app: &AppHandle) -> Result<(), String> {
-    start_polling_worker_for_pairs(app)
-}
 
 // ---------------------------------------------------------------------------
 // Sync-pair CRUD commands
@@ -3544,394 +2132,6 @@ async fn resolve_conflict_impl<R: Runtime>(
         }
         _ => Err(format!("Unsupported conflict resolution '{resolution}'.")),
     }
-}
-
-async fn list_versioned_bin_inventory_for_pair(
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-) -> Result<Vec<VersionedBinEntry>, String> {
-    if !provider_supports_runtime_object_versioning(&pair.provider) {
-        return Err(sync_location_runtime_object_versioning_message(pair));
-    }
-    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
-    let mut key_marker: Option<String> = None;
-    let mut version_id_marker: Option<String> = None;
-    let mut deleted: BTreeMap<String, VersionedBinEntry> = BTreeMap::new();
-    let mut live_keys = BTreeSet::new();
-
-    loop {
-        let page = object_store::list_object_versions_page(
-            &client,
-            &pair.bucket,
-            key_marker.as_deref(),
-            version_id_marker.as_deref(),
-        )
-        .await?;
-
-        for version in &page.versions {
-            if should_exclude_remote_key(&version.key, &[]) {
-                continue;
-            }
-
-            if version.is_latest {
-                live_keys.insert(version.key.clone());
-                deleted.remove(&version.key);
-            }
-        }
-
-        for marker in &page.delete_markers {
-            if !marker.is_latest {
-                continue;
-            }
-
-            if should_exclude_remote_key(
-                &marker.key,
-                &[pair_bin_prefix(&pair.id), namespace_prefix()],
-            ) {
-                continue;
-            }
-
-            if live_keys.contains(&marker.key) {
-                continue;
-            }
-
-            let relative_path = relative_path_from_key(&marker.key);
-            if relative_path.is_empty() {
-                continue;
-            }
-
-            deleted.insert(
-                marker.key.clone(),
-                VersionedBinEntry {
-                    key: marker.key.clone(),
-                    version_id: marker.version_id.clone(),
-                    relative_path: relative_path.clone(),
-                    kind: if marker.key.ends_with('/') {
-                        "directory".into()
-                    } else {
-                        "file".into()
-                    },
-                    storage_class: page
-                        .versions
-                        .iter()
-                        .find(|version| version.key == marker.key)
-                        .and_then(|version| version.storage_class.clone()),
-                    deleted_at: marker.last_modified_at.clone(),
-                },
-            );
-        }
-
-        if !page.truncated {
-            break;
-        }
-
-        key_marker = page.next_key_marker;
-        version_id_marker = page.next_version_id_marker;
-    }
-
-    Ok(deleted.into_values().collect())
-}
-
-async fn list_versioned_object_history_for_prefix(
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-    prefix: &str,
-) -> Result<Vec<(String, String)>, String> {
-    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
-    let mut key_marker: Option<String> = None;
-    let mut version_id_marker: Option<String> = None;
-    let mut versions = Vec::new();
-
-    loop {
-        let page = object_store::list_object_versions_page_with_prefix(
-            &client,
-            &pair.bucket,
-            Some(prefix),
-            key_marker.as_deref(),
-            version_id_marker.as_deref(),
-        )
-        .await?;
-
-        versions.extend(
-            page.versions
-                .into_iter()
-                .map(|version| (version.key, version.version_id)),
-        );
-        versions.extend(
-            page.delete_markers
-                .into_iter()
-                .map(|marker| (marker.key, marker.version_id)),
-        );
-
-        if !page.truncated {
-            break;
-        }
-
-        key_marker = page.next_key_marker;
-        version_id_marker = page.next_version_id_marker;
-    }
-
-    Ok(versions)
-}
-
-async fn restore_versioned_bin_entries(
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-    requests: &[BinEntryRequest],
-) -> Result<Vec<BinEntryMutationResult>, String> {
-    validate_bin_batch_requests(requests, "restore")?;
-    let available_entries = list_versioned_bin_inventory_for_pair(pair, credentials).await?;
-    let mut grouped_paths = Vec::new();
-    let mut ordered_requests: Vec<(BinEntryRequest, Vec<VersionedBinEntry>)> = Vec::new();
-
-    for request in requests {
-        let path = normalize_restore_relative_path(&request.path);
-        if path.is_empty() {
-            return Err("Bin path must reference a non-empty relative path.".into());
-        }
-
-        let matches = collect_versioned_bin_entries_for_request(request, &available_entries)?;
-
-        grouped_paths.push(path.clone());
-        ordered_requests.push((request.clone(), matches));
-    }
-
-    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
-    for path in &grouped_paths {
-        validate_restore_destination(pair, credentials, &client, path).await?;
-    }
-    validate_bulk_restore_destinations(
-        &list_remote_inventory_for_pair(pair, credentials)
-            .await?
-            .entries,
-        &grouped_paths,
-    )?;
-
-    let mut results = Vec::with_capacity(ordered_requests.len());
-    for (request, entries) in ordered_requests {
-        let mut affected_count = 0usize;
-        for entry in entries {
-            object_store::delete_object_version(
-                &client,
-                &pair.bucket,
-                &entry.key,
-                &entry.version_id,
-            )
-            .await?;
-            affected_count += 1;
-        }
-
-        results.push(BinEntryMutationResult {
-            path: request.path,
-            kind: request.kind,
-            bin_key: request.bin_key,
-            success: true,
-            affected_count,
-            error: None,
-        });
-    }
-
-    Ok(results)
-}
-
-async fn restore_remote_bin_entries(
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-    requests: &[BinEntryRequest],
-) -> Result<Vec<BinEntryMutationResult>, String> {
-    validate_bin_batch_requests(requests, "restore")?;
-    let available_entries = list_remote_bin_inventory_for_pair(pair, credentials).await?;
-    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
-    let remote_snapshot = list_remote_inventory_for_pair(pair, credentials).await?;
-
-    let mut ordered_requests: Vec<(BinEntryRequest, Vec<RemoteObjectEntry>)> = Vec::new();
-    let mut destination_paths = Vec::new();
-
-    for request in requests {
-        let matches = collect_remote_bin_keys_for_request(pair, request, &available_entries)?;
-        let destination_path = normalize_restore_relative_path(&request.path);
-        validate_local_restore_destination(&pair.local_folder, &destination_path)?;
-        destination_paths.push(destination_path);
-        ordered_requests.push((request.clone(), matches));
-    }
-
-    validate_bulk_restore_destinations(&remote_snapshot.entries, &destination_paths)?;
-
-    let mut results = Vec::with_capacity(ordered_requests.len());
-    for (request, entries) in ordered_requests {
-        let mut affected_count = 0usize;
-        for entry in entries {
-            let destination_key = destination_key_for_bin_restore(&entry.key, &entry.relative_path);
-            object_store::move_object(&client, &pair.bucket, &entry.key, &destination_key, None)
-                .await?;
-            affected_count += 1;
-        }
-
-        results.push(BinEntryMutationResult {
-            path: request.path,
-            kind: request.kind,
-            bin_key: request.bin_key,
-            success: true,
-            affected_count,
-            error: None,
-        });
-    }
-
-    Ok(results)
-}
-
-async fn purge_versioned_bin_entries(
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-    requests: &[BinEntryRequest],
-) -> Result<Vec<BinEntryMutationResult>, String> {
-    validate_bin_batch_requests(requests, "purge")?;
-    let available_entries = list_versioned_bin_inventory_for_pair(pair, credentials).await?;
-    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
-    let mut results = Vec::with_capacity(requests.len());
-
-    for request in requests {
-        let matches = collect_versioned_bin_entries_for_request(request, &available_entries)?;
-        let request_kind = normalize_bin_entry_kind(&request.kind)?;
-        let mut affected_count = 0usize;
-
-        let history = if request_kind == "file" {
-            let entry = matches
-                .into_iter()
-                .next()
-                .ok_or_else(|| format!("Bin path '{}' was not found.", request.path))?;
-            list_versioned_object_history_for_prefix(pair, credentials, &entry.key)
-                .await?
-                .into_iter()
-                .filter(|(key, _)| key == &entry.key)
-                .collect::<Vec<_>>()
-        } else {
-            let prefix = s3_adapter::directory_key(&request.path);
-            let subtree_history =
-                list_versioned_object_history_for_prefix(pair, credentials, &prefix).await?;
-            collect_versioned_history_for_deleted_entries(&matches, &subtree_history)
-        };
-
-        for (key, version_id) in history {
-            object_store::delete_object_version(&client, &pair.bucket, &key, &version_id).await?;
-            affected_count += 1;
-        }
-
-        results.push(BinEntryMutationResult {
-            path: request.path.clone(),
-            kind: request.kind.clone(),
-            bin_key: request.bin_key.clone(),
-            success: true,
-            affected_count,
-            error: None,
-        });
-    }
-
-    Ok(results)
-}
-
-async fn purge_remote_bin_entries(
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-    requests: &[BinEntryRequest],
-) -> Result<Vec<BinEntryMutationResult>, String> {
-    validate_bin_batch_requests(requests, "purge")?;
-    let available_entries = list_remote_bin_inventory_for_pair(pair, credentials).await?;
-    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
-    let mut results = Vec::with_capacity(requests.len());
-
-    for request in requests {
-        let matches = collect_remote_bin_keys_for_request(pair, request, &available_entries)?;
-        let mut affected_count = 0usize;
-
-        for entry in matches {
-            object_store::delete_object(&client, &pair.bucket, &entry.key).await?;
-            affected_count += 1;
-        }
-
-        results.push(BinEntryMutationResult {
-            path: request.path.clone(),
-            kind: request.kind.clone(),
-            bin_key: request.bin_key.clone(),
-            success: true,
-            affected_count,
-            error: None,
-        });
-    }
-
-    Ok(results)
-}
-
-async fn list_remote_bin_inventory_for_pair(
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-) -> Result<Vec<RemoteObjectEntry>, String> {
-    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
-    let mut entries: BTreeMap<String, RemoteObjectEntry> = BTreeMap::new();
-    let prefixes = [pair_bin_prefix(&pair.id), namespace_prefix()];
-
-    for prefix in prefixes {
-        let objects = object_store::list_objects(&client, &pair.bucket, Some(&prefix))
-            .await
-            .map_err(|error| {
-                format!(
-                    "failed to list bin inventory for pair '{}': {error}",
-                    pair.label
-                )
-            })?;
-
-        for object in objects {
-            let key = object.key;
-
-            let Ok(original_relative_path) =
-                original_relative_path_from_bin_key_for_pair(&pair.id, &key)
-            else {
-                continue;
-            };
-
-            let last_modified_at = object.last_modified_at;
-            let etag = object.etag;
-            let storage_class = object.storage_class;
-
-            if key.ends_with('/') {
-                let relative_path = original_relative_path.trim_matches('/').to_string();
-                if relative_path.is_empty() {
-                    continue;
-                }
-
-                entries.insert(
-                    key.to_string(),
-                    RemoteObjectEntry {
-                        key: key.to_string(),
-                        relative_path,
-                        kind: "directory".into(),
-                        size: 0,
-                        last_modified_at,
-                        etag,
-                        storage_class: None,
-                        fingerprint: None,
-                    },
-                );
-                continue;
-            }
-
-            entries.insert(
-                key.to_string(),
-                RemoteObjectEntry {
-                    key: key.to_string(),
-                    relative_path: original_relative_path,
-                    kind: "file".into(),
-                    size: object.size,
-                    last_modified_at,
-                    etag,
-                    storage_class,
-                    fingerprint: None,
-                },
-            );
-        }
-    }
-
-    Ok(entries.into_values().collect())
 }
 
 async fn refresh_pair_state_after_remote_change<R: Runtime>(
@@ -4667,50 +2867,6 @@ pub async fn delete_file(app: AppHandle, location_id: String, path: String) -> R
         .map_err(|error| format!("Deleted '{path}', but refresh failed: {error}"))
 }
 
-fn remote_bin_key_for_deleted_key(pair_id: &str, key: &str) -> String {
-    let relative_path = relative_path_from_key(key);
-    if key.ends_with('/') {
-        deleted_directory_key(pair_id, relative_path.trim_matches('/'))
-    } else {
-        deleted_object_key(pair_id, &relative_path)
-    }
-}
-
-async fn delete_remote_folder_subtree(
-    app: &AppHandle,
-    pair: &SyncPair,
-    client: &object_store::ObjectStoreClient,
-    folder_path: &str,
-) -> Result<(), String> {
-    let prefix = s3_adapter::directory_key(folder_path);
-    let keys = object_store::list_object_keys_with_prefix(client, &pair.bucket, &prefix).await?;
-
-    if pair.object_versioning_enabled {
-        for key in keys {
-            object_store::delete_object(client, &pair.bucket, &key).await?;
-        }
-        return Ok(());
-    }
-
-    if pair.remote_bin.enabled {
-        if let Some(target) = target_for_pair(pair) {
-            reconcile_remote_bin_lifecycle_target(app, &target).await?;
-        }
-
-        for key in keys {
-            let bin_key = remote_bin_key_for_deleted_key(&pair.id, &key);
-            object_store::move_object(client, &pair.bucket, &key, &bin_key, None).await?;
-        }
-        return Ok(());
-    }
-
-    for key in keys {
-        object_store::delete_object(client, &pair.bucket, &key).await?;
-    }
-
-    Ok(())
-}
-
 #[tauri::command]
 pub async fn delete_folder(
     app: AppHandle,
@@ -4785,10 +2941,17 @@ pub async fn change_storage_class(
 mod tests {
     use crate::storage::platform::{rename_local_file_for_pair, trash_local_file_for_pair};
     use crate::storage::polling_service::local_snapshot_is_fresh;
+    use crate::storage::polling_service::{due_polling_pairs, should_scan_local_for_trigger};
+    use crate::storage::transfer_service::{download_stale_plan_error, upload_stale_plan_error};
 
     use crate::storage::bin_service::{
         add_retention_days, path_matches_exact_or_descendant, validate_remote_restore_destination,
         versioned_bin_key,
+    };
+    use crate::storage::bin_service::{
+        collect_remote_bin_keys_for_request, collect_versioned_bin_entries_for_request,
+        collect_versioned_history_for_deleted_entries, destination_key_for_bin_restore,
+        remote_bin_key_for_deleted_key, validate_bin_batch_requests, VersionedBinEntry,
     };
     use crate::storage::lifecycle_service::{
         filter_remote_bin_reconciliation_targets,
@@ -4797,18 +2960,14 @@ mod tests {
 
     use super::{
         append_error_context, build_bin_entry_responses, build_file_entry_responses,
-        build_versioned_bin_entry_responses, collect_remote_bin_keys_for_request,
-        collect_versioned_bin_entries_for_request, collect_versioned_history_for_deleted_entries,
-        destination_key_for_bin_restore, directory_relative_paths_from_key,
-        directory_relative_paths_from_relative_path, download_stale_plan_error, due_polling_pairs,
-        local_fingerprint_for_path, next_polling_deadline, parse_versioned_bin_key,
+        build_versioned_bin_entry_responses, directory_relative_paths_from_key,
+        directory_relative_paths_from_relative_path, local_fingerprint_for_path,
+        next_polling_deadline, parse_versioned_bin_key,
         provider_supports_remote_bin_lifecycle_reconciliation,
         provider_supports_runtime_object_versioning, relative_path_from_key,
-        remote_bin_key_for_deleted_key, remove_local_directory_subtree,
-        resolve_local_download_path, s3_config_for_pair, should_defer_create_time_credential_test,
-        should_poll_pair, should_scan_local_for_trigger, sync_pair_for_location,
-        upload_stale_plan_error, validate_bin_batch_requests, watcher_eligible_pairs,
-        BinEntryRequest, CredentialTestContext, PairSyncTrigger, VersionedBinEntry,
+        remove_local_directory_subtree, resolve_local_download_path, s3_config_for_pair,
+        should_defer_create_time_credential_test, should_poll_pair, sync_pair_for_location,
+        watcher_eligible_pairs, BinEntryRequest, CredentialTestContext, PairSyncTrigger,
         LOCAL_SNAPSHOT_STALE_TTL,
     };
     use crate::storage::credentials_store::{

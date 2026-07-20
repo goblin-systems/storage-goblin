@@ -5,17 +5,29 @@
 //! pairs without versioning, and delete-marker history for pairs with object
 //! versioning enabled.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use super::commands::{list_remote_inventory_for_pair, BinEntryRequest, FileEntryResponse};
+use tauri::AppHandle;
+
+use super::commands::{
+    list_remote_inventory_for_pair, reconcile_remote_bin_lifecycle_target, storage_config_for_pair,
+    BinEntryMutationResult, BinEntryRequest, FileEntryResponse,
+};
+use super::credential_service::{
+    provider_supports_runtime_object_versioning, sync_location_runtime_object_versioning_message,
+};
 use super::credentials_store::StoredCredentials;
+use super::lifecycle_service::target_for_pair;
 use super::object_store;
 use super::platform::resolve_local_download_path;
 use super::profile_store::SyncPair;
-use super::remote_bin::bin_prefix_contains_bin_key;
-use super::remote_index::relative_path_from_key;
+use super::remote_bin::{
+    bin_prefix_contains_bin_key, deleted_directory_key, deleted_object_key, namespace_prefix,
+    original_relative_path_from_bin_key_for_pair, pair_bin_prefix,
+};
 use super::remote_index::RemoteObjectEntry;
+use super::remote_index::{relative_path_from_key, should_exclude_remote_key};
 use super::s3_adapter;
 
 pub(crate) fn normalize_restore_relative_path(path: &str) -> String {
@@ -560,4 +572,436 @@ pub(crate) struct VersionedBinEntry {
     pub(crate) kind: String,
     pub(crate) storage_class: Option<String>,
     pub(crate) deleted_at: Option<String>,
+}
+
+pub(crate) async fn list_versioned_bin_inventory_for_pair(
+    pair: &SyncPair,
+    credentials: &StoredCredentials,
+) -> Result<Vec<VersionedBinEntry>, String> {
+    if !provider_supports_runtime_object_versioning(&pair.provider) {
+        return Err(sync_location_runtime_object_versioning_message(pair));
+    }
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
+    let mut key_marker: Option<String> = None;
+    let mut version_id_marker: Option<String> = None;
+    let mut deleted: BTreeMap<String, VersionedBinEntry> = BTreeMap::new();
+    let mut live_keys = BTreeSet::new();
+
+    loop {
+        let page = object_store::list_object_versions_page(
+            &client,
+            &pair.bucket,
+            key_marker.as_deref(),
+            version_id_marker.as_deref(),
+        )
+        .await?;
+
+        for version in &page.versions {
+            if should_exclude_remote_key(&version.key, &[]) {
+                continue;
+            }
+
+            if version.is_latest {
+                live_keys.insert(version.key.clone());
+                deleted.remove(&version.key);
+            }
+        }
+
+        for marker in &page.delete_markers {
+            if !marker.is_latest {
+                continue;
+            }
+
+            if should_exclude_remote_key(
+                &marker.key,
+                &[pair_bin_prefix(&pair.id), namespace_prefix()],
+            ) {
+                continue;
+            }
+
+            if live_keys.contains(&marker.key) {
+                continue;
+            }
+
+            let relative_path = relative_path_from_key(&marker.key);
+            if relative_path.is_empty() {
+                continue;
+            }
+
+            deleted.insert(
+                marker.key.clone(),
+                VersionedBinEntry {
+                    key: marker.key.clone(),
+                    version_id: marker.version_id.clone(),
+                    relative_path: relative_path.clone(),
+                    kind: if marker.key.ends_with('/') {
+                        "directory".into()
+                    } else {
+                        "file".into()
+                    },
+                    storage_class: page
+                        .versions
+                        .iter()
+                        .find(|version| version.key == marker.key)
+                        .and_then(|version| version.storage_class.clone()),
+                    deleted_at: marker.last_modified_at.clone(),
+                },
+            );
+        }
+
+        if !page.truncated {
+            break;
+        }
+
+        key_marker = page.next_key_marker;
+        version_id_marker = page.next_version_id_marker;
+    }
+
+    Ok(deleted.into_values().collect())
+}
+
+pub(crate) async fn list_versioned_object_history_for_prefix(
+    pair: &SyncPair,
+    credentials: &StoredCredentials,
+    prefix: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
+    let mut key_marker: Option<String> = None;
+    let mut version_id_marker: Option<String> = None;
+    let mut versions = Vec::new();
+
+    loop {
+        let page = object_store::list_object_versions_page_with_prefix(
+            &client,
+            &pair.bucket,
+            Some(prefix),
+            key_marker.as_deref(),
+            version_id_marker.as_deref(),
+        )
+        .await?;
+
+        versions.extend(
+            page.versions
+                .into_iter()
+                .map(|version| (version.key, version.version_id)),
+        );
+        versions.extend(
+            page.delete_markers
+                .into_iter()
+                .map(|marker| (marker.key, marker.version_id)),
+        );
+
+        if !page.truncated {
+            break;
+        }
+
+        key_marker = page.next_key_marker;
+        version_id_marker = page.next_version_id_marker;
+    }
+
+    Ok(versions)
+}
+
+pub(crate) async fn restore_versioned_bin_entries(
+    pair: &SyncPair,
+    credentials: &StoredCredentials,
+    requests: &[BinEntryRequest],
+) -> Result<Vec<BinEntryMutationResult>, String> {
+    validate_bin_batch_requests(requests, "restore")?;
+    let available_entries = list_versioned_bin_inventory_for_pair(pair, credentials).await?;
+    let mut grouped_paths = Vec::new();
+    let mut ordered_requests: Vec<(BinEntryRequest, Vec<VersionedBinEntry>)> = Vec::new();
+
+    for request in requests {
+        let path = normalize_restore_relative_path(&request.path);
+        if path.is_empty() {
+            return Err("Bin path must reference a non-empty relative path.".into());
+        }
+
+        let matches = collect_versioned_bin_entries_for_request(request, &available_entries)?;
+
+        grouped_paths.push(path.clone());
+        ordered_requests.push((request.clone(), matches));
+    }
+
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
+    for path in &grouped_paths {
+        validate_restore_destination(pair, credentials, &client, path).await?;
+    }
+    validate_bulk_restore_destinations(
+        &list_remote_inventory_for_pair(pair, credentials)
+            .await?
+            .entries,
+        &grouped_paths,
+    )?;
+
+    let mut results = Vec::with_capacity(ordered_requests.len());
+    for (request, entries) in ordered_requests {
+        let mut affected_count = 0usize;
+        for entry in entries {
+            object_store::delete_object_version(
+                &client,
+                &pair.bucket,
+                &entry.key,
+                &entry.version_id,
+            )
+            .await?;
+            affected_count += 1;
+        }
+
+        results.push(BinEntryMutationResult {
+            path: request.path,
+            kind: request.kind,
+            bin_key: request.bin_key,
+            success: true,
+            affected_count,
+            error: None,
+        });
+    }
+
+    Ok(results)
+}
+
+pub(crate) async fn restore_remote_bin_entries(
+    pair: &SyncPair,
+    credentials: &StoredCredentials,
+    requests: &[BinEntryRequest],
+) -> Result<Vec<BinEntryMutationResult>, String> {
+    validate_bin_batch_requests(requests, "restore")?;
+    let available_entries = list_remote_bin_inventory_for_pair(pair, credentials).await?;
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
+    let remote_snapshot = list_remote_inventory_for_pair(pair, credentials).await?;
+
+    let mut ordered_requests: Vec<(BinEntryRequest, Vec<RemoteObjectEntry>)> = Vec::new();
+    let mut destination_paths = Vec::new();
+
+    for request in requests {
+        let matches = collect_remote_bin_keys_for_request(pair, request, &available_entries)?;
+        let destination_path = normalize_restore_relative_path(&request.path);
+        validate_local_restore_destination(&pair.local_folder, &destination_path)?;
+        destination_paths.push(destination_path);
+        ordered_requests.push((request.clone(), matches));
+    }
+
+    validate_bulk_restore_destinations(&remote_snapshot.entries, &destination_paths)?;
+
+    let mut results = Vec::with_capacity(ordered_requests.len());
+    for (request, entries) in ordered_requests {
+        let mut affected_count = 0usize;
+        for entry in entries {
+            let destination_key = destination_key_for_bin_restore(&entry.key, &entry.relative_path);
+            object_store::move_object(&client, &pair.bucket, &entry.key, &destination_key, None)
+                .await?;
+            affected_count += 1;
+        }
+
+        results.push(BinEntryMutationResult {
+            path: request.path,
+            kind: request.kind,
+            bin_key: request.bin_key,
+            success: true,
+            affected_count,
+            error: None,
+        });
+    }
+
+    Ok(results)
+}
+
+pub(crate) async fn purge_versioned_bin_entries(
+    pair: &SyncPair,
+    credentials: &StoredCredentials,
+    requests: &[BinEntryRequest],
+) -> Result<Vec<BinEntryMutationResult>, String> {
+    validate_bin_batch_requests(requests, "purge")?;
+    let available_entries = list_versioned_bin_inventory_for_pair(pair, credentials).await?;
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
+    let mut results = Vec::with_capacity(requests.len());
+
+    for request in requests {
+        let matches = collect_versioned_bin_entries_for_request(request, &available_entries)?;
+        let request_kind = normalize_bin_entry_kind(&request.kind)?;
+        let mut affected_count = 0usize;
+
+        let history = if request_kind == "file" {
+            let entry = matches
+                .into_iter()
+                .next()
+                .ok_or_else(|| format!("Bin path '{}' was not found.", request.path))?;
+            list_versioned_object_history_for_prefix(pair, credentials, &entry.key)
+                .await?
+                .into_iter()
+                .filter(|(key, _)| key == &entry.key)
+                .collect::<Vec<_>>()
+        } else {
+            let prefix = s3_adapter::directory_key(&request.path);
+            let subtree_history =
+                list_versioned_object_history_for_prefix(pair, credentials, &prefix).await?;
+            collect_versioned_history_for_deleted_entries(&matches, &subtree_history)
+        };
+
+        for (key, version_id) in history {
+            object_store::delete_object_version(&client, &pair.bucket, &key, &version_id).await?;
+            affected_count += 1;
+        }
+
+        results.push(BinEntryMutationResult {
+            path: request.path.clone(),
+            kind: request.kind.clone(),
+            bin_key: request.bin_key.clone(),
+            success: true,
+            affected_count,
+            error: None,
+        });
+    }
+
+    Ok(results)
+}
+
+pub(crate) async fn purge_remote_bin_entries(
+    pair: &SyncPair,
+    credentials: &StoredCredentials,
+    requests: &[BinEntryRequest],
+) -> Result<Vec<BinEntryMutationResult>, String> {
+    validate_bin_batch_requests(requests, "purge")?;
+    let available_entries = list_remote_bin_inventory_for_pair(pair, credentials).await?;
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
+    let mut results = Vec::with_capacity(requests.len());
+
+    for request in requests {
+        let matches = collect_remote_bin_keys_for_request(pair, request, &available_entries)?;
+        let mut affected_count = 0usize;
+
+        for entry in matches {
+            object_store::delete_object(&client, &pair.bucket, &entry.key).await?;
+            affected_count += 1;
+        }
+
+        results.push(BinEntryMutationResult {
+            path: request.path.clone(),
+            kind: request.kind.clone(),
+            bin_key: request.bin_key.clone(),
+            success: true,
+            affected_count,
+            error: None,
+        });
+    }
+
+    Ok(results)
+}
+
+pub(crate) async fn list_remote_bin_inventory_for_pair(
+    pair: &SyncPair,
+    credentials: &StoredCredentials,
+) -> Result<Vec<RemoteObjectEntry>, String> {
+    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
+    let mut entries: BTreeMap<String, RemoteObjectEntry> = BTreeMap::new();
+    let prefixes = [pair_bin_prefix(&pair.id), namespace_prefix()];
+
+    for prefix in prefixes {
+        let objects = object_store::list_objects(&client, &pair.bucket, Some(&prefix))
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to list bin inventory for pair '{}': {error}",
+                    pair.label
+                )
+            })?;
+
+        for object in objects {
+            let key = object.key;
+
+            let Ok(original_relative_path) =
+                original_relative_path_from_bin_key_for_pair(&pair.id, &key)
+            else {
+                continue;
+            };
+
+            let last_modified_at = object.last_modified_at;
+            let etag = object.etag;
+            let storage_class = object.storage_class;
+
+            if key.ends_with('/') {
+                let relative_path = original_relative_path.trim_matches('/').to_string();
+                if relative_path.is_empty() {
+                    continue;
+                }
+
+                entries.insert(
+                    key.to_string(),
+                    RemoteObjectEntry {
+                        key: key.to_string(),
+                        relative_path,
+                        kind: "directory".into(),
+                        size: 0,
+                        last_modified_at,
+                        etag,
+                        storage_class: None,
+                        fingerprint: None,
+                    },
+                );
+                continue;
+            }
+
+            entries.insert(
+                key.to_string(),
+                RemoteObjectEntry {
+                    key: key.to_string(),
+                    relative_path: original_relative_path,
+                    kind: "file".into(),
+                    size: object.size,
+                    last_modified_at,
+                    etag,
+                    storage_class,
+                    fingerprint: None,
+                },
+            );
+        }
+    }
+
+    Ok(entries.into_values().collect())
+}
+
+pub(crate) fn remote_bin_key_for_deleted_key(pair_id: &str, key: &str) -> String {
+    let relative_path = relative_path_from_key(key);
+    if key.ends_with('/') {
+        deleted_directory_key(pair_id, relative_path.trim_matches('/'))
+    } else {
+        deleted_object_key(pair_id, &relative_path)
+    }
+}
+
+pub(crate) async fn delete_remote_folder_subtree(
+    app: &AppHandle,
+    pair: &SyncPair,
+    client: &object_store::ObjectStoreClient,
+    folder_path: &str,
+) -> Result<(), String> {
+    let prefix = s3_adapter::directory_key(folder_path);
+    let keys = object_store::list_object_keys_with_prefix(client, &pair.bucket, &prefix).await?;
+
+    if pair.object_versioning_enabled {
+        for key in keys {
+            object_store::delete_object(client, &pair.bucket, &key).await?;
+        }
+        return Ok(());
+    }
+
+    if pair.remote_bin.enabled {
+        if let Some(target) = target_for_pair(pair) {
+            reconcile_remote_bin_lifecycle_target(app, &target).await?;
+        }
+
+        for key in keys {
+            let bin_key = remote_bin_key_for_deleted_key(&pair.id, &key);
+            object_store::move_object(client, &pair.bucket, &key, &bin_key, None).await?;
+        }
+        return Ok(());
+    }
+
+    for key in keys {
+        object_store::delete_object(client, &pair.bucket, &key).await?;
+    }
+
+    Ok(())
 }
