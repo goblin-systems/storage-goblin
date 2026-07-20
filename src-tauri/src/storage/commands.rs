@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     future::Future,
     path::{Path, PathBuf},
     time::Duration,
@@ -18,10 +17,8 @@ use super::{
         list_versioned_bin_inventory_for_pair, parse_versioned_bin_key, purge_remote_bin_entries,
         purge_versioned_bin_entries, restore_remote_bin_entries, restore_versioned_bin_entries,
     },
-    compare_service::{
-        finalize_conflict_compare_details, finalize_version_compare_details,
-        temp_compare_file_path, temp_version_compare_file_path,
-    },
+    compare_service::{finalize_version_compare_details, temp_version_compare_file_path},
+    conflict_service::{prepare_conflict_comparison_impl, resolve_conflict_impl},
     credential_service::{
         format_permission_probe_summary, format_storage_validation_success_message,
         provider_runtime_object_versioning_message, provider_supports_runtime_object_versioning,
@@ -88,19 +85,12 @@ use super::{
         set_pair_status_from_handle, set_status_from_handle, stop_polling_worker,
         synthesize_status_from_pairs, PairSyncStatus, SyncState, SyncStatus,
     },
-    transfer_service::{
-        local_fingerprint_for_path, persist_download_success_for_pair,
-        persist_upload_success_for_pair, remote_etag_for_path,
-    },
+    transfer_service::{local_fingerprint_for_path, remote_etag_for_path},
     watchers::{plan_watch_reconciliation, start_pair_watcher, WatchTarget, WatcherCallbackEvent},
 };
 
 #[cfg(test)]
 use super::polling_service::next_polling_deadline;
-#[cfg(test)]
-use super::transfer_service::{
-    mock_download_file, mock_upload_refresh_snapshot, planned_transfer_test_mode_enabled,
-};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1857,281 +1847,16 @@ struct IndexedFileEntry {
     etag: Option<String>,
 }
 
-fn sync_pair_for_location(profile: &StoredProfile, location_id: &str) -> Result<SyncPair, String> {
+pub(crate) fn sync_pair_for_location(
+    profile: &StoredProfile,
+    location_id: &str,
+) -> Result<SyncPair, String> {
     profile
         .sync_pairs
         .iter()
         .find(|pair| pair.id == location_id)
         .cloned()
         .ok_or_else(|| format!("Sync pair '{location_id}' not found."))
-}
-
-fn file_entry_for_conflict(
-    local_snapshot: Option<&LocalIndexSnapshot>,
-    remote_snapshot: Option<&RemoteIndexSnapshot>,
-    anchors: Option<&BTreeMap<String, SyncAnchor>>,
-    path: &str,
-) -> Option<FileEntryResponse> {
-    build_file_entry_responses(local_snapshot, remote_snapshot, anchors)
-        .into_iter()
-        .find(|entry| entry.path == path)
-}
-
-fn supports_manual_file_resolution(entry: &FileEntryResponse) -> bool {
-    entry.kind == "file"
-        && matches!(entry.status.as_str(), "conflict" | "review-required")
-        && entry.local_kind.as_deref() == Some("file")
-        && entry.remote_kind.as_deref() == Some("file")
-}
-
-async fn download_remote_file_for_pair(
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-    _path: &str,
-    key: &str,
-    destination_path: &Path,
-) -> Result<(), String> {
-    #[cfg(test)]
-    if planned_transfer_test_mode_enabled() {
-        return mock_download_file(_path, destination_path);
-    }
-
-    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
-    object_store::download_file(&client, &pair.bucket, key, destination_path)
-        .await
-        .map_err(String::from)
-}
-
-async fn upload_local_file_for_pair_and_refresh_remote(
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-    _path: &str,
-    key: &str,
-    local_path: &Path,
-    local_fingerprint: &str,
-) -> Result<RemoteIndexSnapshot, String> {
-    #[cfg(test)]
-    if planned_transfer_test_mode_enabled() {
-        return mock_upload_refresh_snapshot(_path);
-    }
-
-    let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
-    object_store::upload_file(
-        &client,
-        &pair.bucket,
-        key,
-        local_path,
-        Some(
-            BTreeMap::from([(
-                s3_adapter::LOCAL_FINGERPRINT_METADATA_KEY.to_string(),
-                local_fingerprint.to_string(),
-            )])
-            .into_iter()
-            .collect(),
-        ),
-    )
-    .await?;
-    list_remote_inventory_for_pair(pair, credentials).await
-}
-
-async fn remote_snapshot_for_manual_resolution<R: Runtime>(
-    _app: &AppHandle<R>,
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-) -> Result<RemoteIndexSnapshot, String> {
-    #[cfg(test)]
-    if planned_transfer_test_mode_enabled() {
-        return read_remote_index_snapshot_for_pair(_app, &pair.id)?.ok_or_else(|| {
-            format!(
-                "Remote inventory snapshot for pair '{}' is unavailable.",
-                pair.label
-            )
-        });
-    }
-
-    list_remote_inventory_for_pair(pair, credentials).await
-}
-
-async fn prepare_conflict_comparison_impl<R: Runtime>(
-    app: AppHandle<R>,
-    location_id: String,
-    path: String,
-) -> Result<ConflictResolutionDetails, String> {
-    let profile = read_profile_from_disk(&app)?;
-    let pair = sync_pair_for_location(&profile, &location_id)?;
-    let normalized_path = path.replace('\\', "/");
-    let local_snapshot = read_local_index_snapshot_for_pair(&app, &pair.id)?;
-    let remote_snapshot = read_remote_index_snapshot_for_pair(&app, &pair.id)?;
-    let anchors = load_sync_anchors_for_pair(&app, &pair)?
-        .into_iter()
-        .map(|anchor| (anchor.path.clone(), anchor))
-        .collect::<BTreeMap<_, _>>();
-    let entry = file_entry_for_conflict(
-        local_snapshot.as_ref(),
-        remote_snapshot.as_ref(),
-        Some(&anchors),
-        &normalized_path,
-    )
-    .ok_or_else(|| format!("Resolvable file entry '{}' was not found.", normalized_path))?;
-
-    if !matches!(entry.status.as_str(), "conflict" | "review-required") {
-        return Err(format!(
-            "'{}' is no longer marked for manual review.",
-            normalized_path
-        ));
-    }
-
-    if !supports_manual_file_resolution(&entry) {
-        return Err(
-            "This MVP only supports compare for file-vs-file conflict/review-required entries."
-                .into(),
-        );
-    }
-
-    let local_path = resolve_local_download_path(&pair.local_folder, &normalized_path)?;
-    let local_path_value = if local_path.exists() {
-        Some(local_path.to_string_lossy().into_owned())
-    } else {
-        None
-    };
-
-    let credentials = resolve_credentials_for_pair(&app, &pair)?;
-    let remote_temp_path = temp_compare_file_path(&app, &normalized_path)?;
-    let key = s3_adapter::object_key(&normalized_path);
-    download_remote_file_for_pair(
-        &pair,
-        &credentials,
-        &normalized_path,
-        &key,
-        &remote_temp_path,
-    )
-    .await?;
-
-    Ok(finalize_conflict_compare_details(
-        location_id,
-        normalized_path,
-        local_path_value,
-        Some(remote_temp_path.to_string_lossy().into_owned()),
-    ))
-}
-
-async fn resolve_conflict_impl<R: Runtime>(
-    app: AppHandle<R>,
-    location_id: String,
-    path: String,
-    resolution: String,
-) -> Result<(), String> {
-    let profile = read_profile_from_disk(&app)?;
-    let pair = sync_pair_for_location(&profile, &location_id)?;
-    let normalized_path = path.replace('\\', "/");
-    let local_snapshot = read_local_index_snapshot_for_pair(&app, &pair.id)?;
-    let remote_snapshot = read_remote_index_snapshot_for_pair(&app, &pair.id)?;
-    let anchors = load_sync_anchors_for_pair(&app, &pair)?
-        .into_iter()
-        .map(|anchor| (anchor.path.clone(), anchor))
-        .collect::<BTreeMap<_, _>>();
-    let entry = file_entry_for_conflict(
-        local_snapshot.as_ref(),
-        remote_snapshot.as_ref(),
-        Some(&anchors),
-        &normalized_path,
-    )
-    .ok_or_else(|| format!("Resolvable file entry '{}' was not found.", normalized_path))?;
-
-    if !matches!(entry.status.as_str(), "conflict" | "review-required") {
-        return Err(format!(
-            "'{}' is no longer marked for manual review.",
-            normalized_path
-        ));
-    }
-
-    if !supports_manual_file_resolution(&entry) {
-        return Err(
-            "This MVP only supports keep-local/keep-remote for file-vs-file conflict/review-required entries.".into(),
-        );
-    }
-
-    let credentials = resolve_credentials_for_pair(&app, &pair)?;
-    let local_path = resolve_local_download_path(&pair.local_folder, &normalized_path)?;
-    let remote_key = s3_adapter::object_key(&normalized_path);
-
-    match resolution.as_str() {
-        "keep-local" => {
-            let metadata = fs::metadata(&local_path).map_err(|error| match error.kind() {
-                std::io::ErrorKind::NotFound => format!(
-                    "Local file '{}' does not exist, so Keep local cannot run.",
-                    local_path.display()
-                ),
-                _ => format!(
-                    "Failed to inspect local file '{}': {error}",
-                    local_path.display()
-                ),
-            })?;
-
-            if !metadata.is_file() {
-                return Err(format!(
-                    "Local conflict source '{}' is not a file. Directory conflicts are not supported in this MVP.",
-                    local_path.display()
-                ));
-            }
-
-            let local_fingerprint = crate::storage::local_index::file_fingerprint(&local_path)?;
-
-            let refreshed_remote_snapshot = upload_local_file_for_pair_and_refresh_remote(
-                &pair,
-                &credentials,
-                &normalized_path,
-                &remote_key,
-                &local_path,
-                &local_fingerprint,
-            )
-            .await?;
-
-            persist_upload_success_for_pair(
-                &app,
-                &pair,
-                &normalized_path,
-                &local_fingerprint,
-                &refreshed_remote_snapshot,
-            )?;
-
-            refresh_pair_state_after_local_change(&app, &pair).map_err(|error| {
-                format!(
-                    "Resolved '{}' by keeping local, but refresh failed: {error}",
-                    normalized_path
-                )
-            })
-        }
-        "keep-remote" => {
-            download_remote_file_for_pair(
-                &pair,
-                &credentials,
-                &normalized_path,
-                &remote_key,
-                &local_path,
-            )
-            .await?;
-
-            let remote_snapshot =
-                remote_snapshot_for_manual_resolution(&app, &pair, &credentials).await?;
-            let remote_etag = remote_etag_for_path(&remote_snapshot, &normalized_path);
-            persist_download_success_for_pair(
-                &app,
-                &pair,
-                &normalized_path,
-                &local_path,
-                remote_etag,
-            )?;
-
-            refresh_pair_state_after_local_change(&app, &pair).map_err(|error| {
-                format!(
-                    "Resolved '{}' by keeping remote, but refresh failed: {error}",
-                    normalized_path
-                )
-            })
-        }
-        _ => Err(format!("Unsupported conflict resolution '{resolution}'.")),
-    }
 }
 
 async fn refresh_pair_state_after_remote_change<R: Runtime>(
@@ -2158,7 +1883,7 @@ async fn refresh_pair_state_after_remote_change<R: Runtime>(
     Ok(())
 }
 
-fn refresh_pair_state_after_local_change<R: Runtime>(
+pub(crate) fn refresh_pair_state_after_local_change<R: Runtime>(
     app: &AppHandle<R>,
     pair: &SyncPair,
 ) -> Result<(), String> {
@@ -2191,7 +1916,7 @@ fn refresh_pair_state_after_local_change<R: Runtime>(
     Ok(())
 }
 
-fn build_file_entry_responses(
+pub(crate) fn build_file_entry_responses(
     local_snapshot: Option<&LocalIndexSnapshot>,
     remote_snapshot: Option<&RemoteIndexSnapshot>,
     anchors: Option<&BTreeMap<String, SyncAnchor>>,
@@ -4972,17 +4697,16 @@ mod tests {
 
 #[cfg(all(test, feature = "tauri-command-tests"))]
 mod tauri_command_tests {
-    use super::{
-        build_file_entry_responses, clear_planned_transfer_test_hooks, compare_mode_external,
-        execute_planned_download_queue_for_pair, execute_planned_upload_queue_for_pair,
-        finalize_conflict_compare_details, image_media_type_for_extension, is_probably_text_bytes,
-        local_fingerprint_for_path, persist_download_success_for_pair,
-        persist_upload_success_for_pair, prepare_conflict_comparison_impl,
-        read_file_with_size_limit, rebuild_durable_plan_for_pair, resolve_conflict_impl,
-        set_planned_transfer_test_hooks, supports_manual_file_resolution, PlannedTransferTestHooks,
-        INLINE_IMAGE_COMPARE_MAX_BYTES, INLINE_TEXT_COMPARE_MAX_BYTES,
-    };
+    use super::build_file_entry_responses;
     use crate::storage::activity::ActivityDebugState;
+    use crate::storage::compare_service::{
+        compare_mode_external, finalize_conflict_compare_details, image_media_type_for_extension,
+        is_probably_text_bytes, read_file_with_size_limit, INLINE_IMAGE_COMPARE_MAX_BYTES,
+        INLINE_TEXT_COMPARE_MAX_BYTES,
+    };
+    use crate::storage::conflict_service::{
+        prepare_conflict_comparison_impl, resolve_conflict_impl, supports_manual_file_resolution,
+    };
     use crate::storage::credentials_store::{
         clear_test_secret_store, create_credential, CredentialDraft, StoredCredentials,
     };
@@ -4994,6 +4718,9 @@ mod tauri_command_tests {
         read_profile_from_disk, write_profile_to_disk, RemoteBinConfig, StoredProfile, SyncPair,
         SyncPairDraft,
     };
+    use crate::storage::queue_service::{
+        execute_planned_download_queue_for_pair, execute_planned_upload_queue_for_pair,
+    };
     use crate::storage::remote_index::{
         write_remote_index_snapshot_for_pair, RemoteIndexSnapshot, RemoteIndexSummary,
         RemoteObjectEntry,
@@ -5002,8 +4729,14 @@ mod tauri_command_tests {
         load_planned_download_queue_for_pair, load_planned_upload_queue_for_pair,
         load_sync_anchors_for_pair, upsert_sync_anchor_for_pair, SyncAnchor,
     };
+    use crate::storage::sync_service::rebuild_durable_plan_for_pair;
     use crate::storage::sync_state::{
         replace_pair_statuses_from_handle, PairSyncStatus, SyncState,
+    };
+    use crate::storage::transfer_service::{
+        clear_planned_transfer_test_hooks, local_fingerprint_for_path,
+        persist_download_success_for_pair, persist_upload_success_for_pair,
+        set_planned_transfer_test_hooks, PlannedTransferTestHooks,
     };
     use std::collections::BTreeMap;
     use std::env;

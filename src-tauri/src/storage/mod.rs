@@ -9,6 +9,7 @@ mod bench_baseline;
 pub mod bin_service;
 pub mod commands;
 pub mod compare_service;
+pub mod conflict_service;
 pub mod credential_service;
 pub mod credentials_store;
 pub mod error;

@@ -45,8 +45,8 @@ pub(crate) enum PairTransferExecutor {
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct PlannedTransferTestHooks {
-    upload_refresh_snapshots: BTreeMap<String, RemoteIndexSnapshot>,
-    download_payloads: BTreeMap<String, Vec<u8>>,
+    pub(crate) upload_refresh_snapshots: BTreeMap<String, RemoteIndexSnapshot>,
+    pub(crate) download_payloads: BTreeMap<String, Vec<u8>>,
 }
 
 #[cfg(test)]
