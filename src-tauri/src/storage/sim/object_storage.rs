@@ -7,6 +7,9 @@ pub(crate) struct ObjectRecord {
     pub size: u64,
     pub etag: String,
     pub storage_class: Option<String>,
+    /// Goblin content fingerprint, as a provider exposing our upload metadata
+    /// would report it (ADR-4).
+    pub fingerprint: Option<String>,
 }
 
 /// Provider-neutral object storage operations.

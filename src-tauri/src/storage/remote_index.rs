@@ -24,6 +24,11 @@ pub struct RemoteObjectEntry {
     pub etag: Option<String>,
     #[serde(default)]
     pub storage_class: Option<String>,
+    /// Goblin content fingerprint (SHA-256) when the provider listing exposes
+    /// the metadata our uploads attach. Enables first-sync merge and rename
+    /// detection without transfers (backlog phase 1, ADR-4).
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 /// Returns true if the storage class represents a cold/archive storage tier.

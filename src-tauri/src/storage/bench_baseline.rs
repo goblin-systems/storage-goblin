@@ -90,6 +90,7 @@ fn bench_plan_100k_entries() {
                 last_modified_at: None,
                 etag: Some(format!("etag-{index}")),
                 storage_class: None,
+                fingerprint: None,
             });
             anchors.insert(
                 path.clone(),
@@ -114,6 +115,7 @@ fn bench_plan_100k_entries() {
             last_modified_at: None,
             etag: Some(format!("etag-{index}")),
             storage_class: None,
+            fingerprint: None,
         });
     }
 

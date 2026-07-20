@@ -464,6 +464,7 @@ async fn list_remote_inventory(
                         last_modified_at,
                         etag,
                         storage_class: None,
+                        fingerprint: None,
                     },
                 );
             }
@@ -479,6 +480,7 @@ async fn list_remote_inventory(
                         last_modified_at: None,
                         etag: None,
                         storage_class: None,
+                        fingerprint: None,
                     });
             }
             continue;
@@ -497,6 +499,7 @@ async fn list_remote_inventory(
                 last_modified_at,
                 etag,
                 storage_class,
+                fingerprint: None,
             },
         );
 
@@ -511,6 +514,7 @@ async fn list_remote_inventory(
                     last_modified_at: None,
                     etag: None,
                     storage_class: None,
+                    fingerprint: None,
                 });
         }
     }
@@ -4730,6 +4734,7 @@ async fn list_remote_inventory_for_pair(
                         last_modified_at,
                         etag,
                         storage_class: None,
+                        fingerprint: None,
                     },
                 );
             }
@@ -4745,6 +4750,7 @@ async fn list_remote_inventory_for_pair(
                         last_modified_at: None,
                         etag: None,
                         storage_class: None,
+                        fingerprint: None,
                     });
             }
             continue;
@@ -4763,6 +4769,7 @@ async fn list_remote_inventory_for_pair(
                 last_modified_at,
                 etag,
                 storage_class,
+                fingerprint: None,
             },
         );
 
@@ -4777,6 +4784,7 @@ async fn list_remote_inventory_for_pair(
                     last_modified_at: None,
                     etag: None,
                     storage_class: None,
+                    fingerprint: None,
                 });
         }
     }
@@ -7726,6 +7734,7 @@ async fn list_remote_bin_inventory_for_pair(
                         last_modified_at,
                         etag,
                         storage_class: None,
+                        fingerprint: None,
                     },
                 );
                 continue;
@@ -7741,6 +7750,7 @@ async fn list_remote_bin_inventory_for_pair(
                     last_modified_at,
                     etag,
                     storage_class,
+                    fingerprint: None,
                 },
             );
         }
@@ -8942,6 +8952,7 @@ mod tests {
                         last_modified_at: None,
                         etag: None,
                         storage_class: storage_class.map(str::to_string),
+                        fingerprint: None,
                     },
                 )
                 .collect(),
@@ -8969,6 +8980,7 @@ mod tests {
                             last_modified_at: None,
                             etag: None,
                             storage_class: None,
+                            fingerprint: None,
                         },
                     );
                 }
@@ -8984,6 +8996,7 @@ mod tests {
                             last_modified_at: None,
                             etag: None,
                             storage_class: None,
+                            fingerprint: None,
                         });
                 }
                 continue;
@@ -9001,6 +9014,7 @@ mod tests {
                     last_modified_at: None,
                     etag: None,
                     storage_class: None,
+                    fingerprint: None,
                 },
             );
 
@@ -9015,6 +9029,7 @@ mod tests {
                         last_modified_at: None,
                         etag: None,
                         storage_class: None,
+                        fingerprint: None,
                     });
             }
         }
@@ -9819,6 +9834,7 @@ mod tests {
                     last_modified_at: Some("2026-04-10T12:00:00Z".into()),
                     etag: None,
                     storage_class: Some("STANDARD".into()),
+                    fingerprint: None,
                 },
                 RemoteObjectEntry {
                     key: ".storage-goblin-bin/pairs/pair-1/docs/archive/".into(),
@@ -9828,6 +9844,7 @@ mod tests {
                     last_modified_at: Some("2026-04-11T12:00:00Z".into()),
                     etag: None,
                     storage_class: None,
+                    fingerprint: None,
                 },
             ],
         );
@@ -9915,6 +9932,7 @@ mod tests {
                 last_modified_at: None,
                 etag: None,
                 storage_class: None,
+                fingerprint: None,
             },
             RemoteObjectEntry {
                 key: ".storage-goblin-bin/pairs/pair-1/docs/archive/assets/logo.png".into(),
@@ -9924,6 +9942,7 @@ mod tests {
                 last_modified_at: None,
                 etag: None,
                 storage_class: None,
+                fingerprint: None,
             },
         ];
 
@@ -10112,6 +10131,7 @@ mod tests {
                 last_modified_at: None,
                 etag: None,
                 storage_class: None,
+                fingerprint: None,
             },
             RemoteObjectEntry {
                 key: ".storage-goblin-bin/pairs/pair-1/docs/archive/nested/deeper.txt".into(),
@@ -10121,6 +10141,7 @@ mod tests {
                 last_modified_at: None,
                 etag: None,
                 storage_class: None,
+                fingerprint: None,
             },
             RemoteObjectEntry {
                 key: ".storage-goblin-bin/pairs/pair-1/docs/archive-sibling.txt".into(),
@@ -10130,6 +10151,7 @@ mod tests {
                 last_modified_at: None,
                 etag: None,
                 storage_class: None,
+                fingerprint: None,
             },
         ];
 
@@ -10238,6 +10260,7 @@ mod tests {
             last_modified_at: None,
             etag: None,
             storage_class: None,
+            fingerprint: None,
         }];
 
         let error = validate_remote_restore_destination(&entries, "docs/readme.md")
@@ -10256,6 +10279,7 @@ mod tests {
             last_modified_at: None,
             etag: None,
             storage_class: None,
+            fingerprint: None,
         }];
 
         let error = validate_remote_restore_destination(&entries, "docs/readme.md")
@@ -10274,6 +10298,7 @@ mod tests {
             last_modified_at: None,
             etag: None,
             storage_class: None,
+            fingerprint: None,
         }];
 
         let error = validate_remote_restore_destination(&entries, "docs")
@@ -10292,6 +10317,7 @@ mod tests {
             last_modified_at: None,
             etag: None,
             storage_class: None,
+            fingerprint: None,
         }];
 
         validate_remote_restore_destination(&entries, "docs/readme.md")
@@ -10590,6 +10616,7 @@ mod tests {
                 last_modified_at: None,
                 etag: Some("etag-new".into()),
                 storage_class: None,
+                fingerprint: None,
             }],
             ..remote
         };
@@ -11749,6 +11776,7 @@ mod tauri_command_tests {
                 last_modified_at: None,
                 etag: Some("etag-uploaded".into()),
                 storage_class: None,
+                fingerprint: None,
             }],
             ..remote_snapshot.clone()
         };
@@ -11843,6 +11871,7 @@ mod tauri_command_tests {
                 last_modified_at: None,
                 etag: Some("etag-new".into()),
                 storage_class: None,
+                fingerprint: None,
             }],
             ..build_remote_snapshot(&[("note.txt", "file", 5)])
         };
@@ -12021,6 +12050,7 @@ mod tauri_command_tests {
                 last_modified_at: None,
                 etag: Some("etag-local-kept".into()),
                 storage_class: None,
+                fingerprint: None,
             }],
             ..remote_before.clone()
         };
@@ -12094,6 +12124,7 @@ mod tauri_command_tests {
                 last_modified_at: None,
                 etag: Some("etag-remote-kept".into()),
                 storage_class: None,
+                fingerprint: None,
             }],
             ..build_remote_snapshot(&[("review.txt", "file", 5)])
         };
@@ -12198,6 +12229,7 @@ mod tauri_command_tests {
                 last_modified_at: None,
                 etag: Some("etag-review-remote".into()),
                 storage_class: None,
+                fingerprint: None,
             }],
             ..build_remote_snapshot(&[("docs/review.txt", "file", 10)])
         };
@@ -12269,6 +12301,7 @@ mod tauri_command_tests {
                 last_modified_at: None,
                 etag: Some("etag-review-before".into()),
                 storage_class: None,
+                fingerprint: None,
             }],
             ..build_remote_snapshot(&[("docs/review.txt", "file", 11)])
         };
@@ -12284,6 +12317,7 @@ mod tauri_command_tests {
                 last_modified_at: None,
                 etag: Some("etag-review-local-after".into()),
                 storage_class: None,
+                fingerprint: None,
             }],
             ..build_remote_snapshot(&[("docs/review.txt", "file", 10)])
         };
@@ -12375,6 +12409,7 @@ mod tauri_command_tests {
                 last_modified_at: None,
                 etag: Some("etag-review-remote-after".into()),
                 storage_class: None,
+                fingerprint: None,
             }],
             ..build_remote_snapshot(&[("docs/review.txt", "file", 11)])
         };

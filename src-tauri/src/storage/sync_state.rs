@@ -982,6 +982,7 @@ mod tests {
                     last_modified_at: None,
                     etag: None,
                     storage_class: None,
+                    fingerprint: None,
                 },
                 RemoteObjectEntry {
                     key: "gamma.txt".into(),
@@ -991,6 +992,7 @@ mod tests {
                     last_modified_at: None,
                     etag: None,
                     storage_class: None,
+                    fingerprint: None,
                 },
             ],
         };
@@ -1245,6 +1247,7 @@ mod tests {
                     last_modified_at: None,
                     etag: None,
                     storage_class: None,
+                    fingerprint: None,
                 },
                 RemoteObjectEntry {
                     key: "delta.txt".into(),
@@ -1254,6 +1257,7 @@ mod tests {
                     last_modified_at: None,
                     etag: None,
                     storage_class: None,
+                    fingerprint: None,
                 },
             ],
         };

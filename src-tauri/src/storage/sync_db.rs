@@ -42,6 +42,7 @@ pub struct PlannedUploadQueueItem {
     pub id: i64,
     pub path: String,
     pub operation: String,
+    pub target_path: Option<String>,
     pub local_size: Option<u64>,
     pub remote_size: Option<u64>,
     pub expected_local_fingerprint: Option<String>,
@@ -52,6 +53,8 @@ pub struct PlannedUploadQueueItem {
 pub struct PlannedDownloadQueueItem {
     pub id: i64,
     pub path: String,
+    pub operation: String,
+    pub target_path: Option<String>,
     pub local_size: Option<u64>,
     pub remote_size: Option<u64>,
     pub expected_local_fingerprint: Option<String>,
@@ -417,9 +420,9 @@ fn load_planned_upload_queue_from_path(
     let connection = open_connection(path)?;
     let mut statement = connection
         .prepare(
-            "SELECT id, path, operation, local_size, remote_size, expected_local_fingerprint, expected_remote_etag
+            "SELECT id, path, operation, target_path, local_size, remote_size, expected_local_fingerprint, expected_remote_etag
              FROM sync_queue
-             WHERE profile_key = ?1 AND operation IN ('upload', 'create_directory') AND queue_status IN ('planned', 'interrupted')
+             WHERE profile_key = ?1 AND operation IN ('upload', 'create_directory', 'delete_remote', 'move_remote', 'duplicate_conflict', 'anchor_only', 'forget_anchor') AND queue_status IN ('planned', 'interrupted')
              ORDER BY id ASC",
         )
         .map_err(|error| format!("failed to prepare planned upload queue query: {error}"))?;
@@ -430,10 +433,11 @@ fn load_planned_upload_queue_from_path(
                 id: row.get(0)?,
                 path: row.get(1)?,
                 operation: row.get(2)?,
-                local_size: optional_i64_to_u64(row.get(3)?)?,
-                remote_size: optional_i64_to_u64(row.get(4)?)?,
-                expected_local_fingerprint: row.get(5)?,
-                expected_remote_etag: row.get(6)?,
+                target_path: row.get(3)?,
+                local_size: optional_i64_to_u64(row.get(4)?)?,
+                remote_size: optional_i64_to_u64(row.get(5)?)?,
+                expected_local_fingerprint: row.get(6)?,
+                expected_remote_etag: row.get(7)?,
             })
         })
         .map_err(|error| format!("failed to load planned upload queue: {error}"))?;
@@ -574,13 +578,14 @@ fn persist_sync_plan_to_path(
                     profile_key,
                     path,
                     operation,
+                    target_path,
                     local_size,
                     remote_size,
                     expected_local_fingerprint,
                     expected_remote_etag,
                     queue_status,
                     created_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'planned', ?9)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'planned', ?10)",
             )
             .map_err(|error| format!("failed to prepare queue insert: {error}"))?;
 
@@ -591,6 +596,7 @@ fn persist_sync_plan_to_path(
                     profile_key,
                     item.path,
                     item.operation,
+                    item.target_path,
                     option_u64_to_i64(item.local_size)?,
                     option_u64_to_i64(item.remote_size)?,
                     item.expected_local_fingerprint,
@@ -639,7 +645,7 @@ fn mark_upload_queue_item_in_progress_at_path(
                  last_error = NULL
              WHERE id = ?1
                AND profile_key = ?2
-               AND operation IN ('upload', 'create_directory')
+               AND operation IN ('upload', 'create_directory', 'delete_remote', 'move_remote', 'duplicate_conflict', 'anchor_only', 'forget_anchor')
                AND queue_status IN ('planned', 'interrupted')",
             params![queue_item_id, profile_key, started_at],
         )
@@ -670,7 +676,7 @@ fn mark_upload_queue_item_completed_at_path(
                  last_error = NULL
              WHERE id = ?1
                AND profile_key = ?2
-               AND operation IN ('upload', 'create_directory')
+               AND operation IN ('upload', 'create_directory', 'delete_remote', 'move_remote', 'duplicate_conflict', 'anchor_only', 'forget_anchor')
                AND queue_status = 'in_progress'",
             params![queue_item_id, profile_key, finished_at],
         )
@@ -702,7 +708,7 @@ fn mark_upload_queue_item_failed_at_path(
                  last_error = ?4
              WHERE id = ?1
                AND profile_key = ?2
-               AND operation IN ('upload', 'create_directory')
+               AND operation IN ('upload', 'create_directory', 'delete_remote', 'move_remote', 'duplicate_conflict', 'anchor_only', 'forget_anchor')
                AND queue_status IN ('planned', 'in_progress', 'interrupted')",
             params![queue_item_id, profile_key, finished_at, error_message],
         )
@@ -725,10 +731,10 @@ fn load_planned_download_queue_from_path(
     let connection = open_connection(path)?;
     let mut statement = connection
         .prepare(
-            "SELECT id, path, local_size, remote_size
+            "SELECT id, path, operation, target_path, local_size, remote_size
              , expected_local_fingerprint, expected_remote_etag
              FROM sync_queue
-             WHERE profile_key = ?1 AND operation = 'download' AND queue_status IN ('planned', 'interrupted')
+             WHERE profile_key = ?1 AND operation IN ('download', 'delete_local', 'move_local') AND queue_status IN ('planned', 'interrupted')
              ORDER BY id ASC",
         )
         .map_err(|error| format!("failed to prepare planned download queue query: {error}"))?;
@@ -738,10 +744,12 @@ fn load_planned_download_queue_from_path(
             Ok(PlannedDownloadQueueItem {
                 id: row.get(0)?,
                 path: row.get(1)?,
-                local_size: optional_i64_to_u64(row.get(2)?)?,
-                remote_size: optional_i64_to_u64(row.get(3)?)?,
-                expected_local_fingerprint: row.get(4)?,
-                expected_remote_etag: row.get(5)?,
+                operation: row.get(2)?,
+                target_path: row.get(3)?,
+                local_size: optional_i64_to_u64(row.get(4)?)?,
+                remote_size: optional_i64_to_u64(row.get(5)?)?,
+                expected_local_fingerprint: row.get(6)?,
+                expected_remote_etag: row.get(7)?,
             })
         })
         .map_err(|error| format!("failed to load planned download queue: {error}"))?;
@@ -766,7 +774,7 @@ fn mark_download_queue_item_in_progress_at_path(
                  last_error = NULL
              WHERE id = ?1
                AND profile_key = ?2
-               AND operation = 'download'
+               AND operation IN ('download', 'delete_local', 'move_local')
                AND queue_status IN ('planned', 'interrupted')",
             params![queue_item_id, profile_key, started_at],
         )
@@ -797,7 +805,7 @@ fn mark_download_queue_item_completed_at_path(
                  last_error = NULL
              WHERE id = ?1
                AND profile_key = ?2
-               AND operation = 'download'
+               AND operation IN ('download', 'delete_local', 'move_local')
                AND queue_status = 'in_progress'",
             params![queue_item_id, profile_key, finished_at],
         )
@@ -829,7 +837,7 @@ fn mark_download_queue_item_failed_at_path(
                  last_error = ?4
              WHERE id = ?1
                AND profile_key = ?2
-               AND operation = 'download'
+               AND operation IN ('download', 'delete_local', 'move_local')
                AND queue_status IN ('planned', 'in_progress', 'interrupted')",
             params![queue_item_id, profile_key, finished_at, error_message],
         )
@@ -928,6 +936,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
     ensure_sync_queue_column(connection, "last_error", "TEXT")?;
     ensure_sync_queue_column(connection, "expected_local_fingerprint", "TEXT")?;
     ensure_sync_queue_column(connection, "expected_remote_etag", "TEXT")?;
+    ensure_sync_queue_column(connection, "target_path", "TEXT")?;
     ensure_plan_runs_column(
         connection,
         "create_directory_count",
@@ -1280,6 +1289,10 @@ mod tests {
                 noop_count: 0,
                 pending_operation_count: 3,
                 credentials_available: true,
+                delete_count: 0,
+                move_count: 0,
+                anchor_count: 0,
+                suppressed_delete_count: 0,
             },
             observed_entries: vec![
                 ObservedEntry {
@@ -1309,6 +1322,7 @@ mod tests {
                     remote_size: None,
                     expected_local_fingerprint: Some("fp-alpha".into()),
                     expected_remote_etag: Some("etag-alpha".into()),
+                    target_path: None,
                 },
                 PlannedQueueItem {
                     path: "beta.txt".into(),
@@ -1317,6 +1331,7 @@ mod tests {
                     remote_size: Some(7),
                     expected_local_fingerprint: Some("fp-beta".into()),
                     expected_remote_etag: Some("etag-beta".into()),
+                    target_path: None,
                 },
                 PlannedQueueItem {
                     path: "gamma.txt".into(),
@@ -1325,6 +1340,7 @@ mod tests {
                     remote_size: Some(11),
                     expected_local_fingerprint: Some("fp-gamma".into()),
                     expected_remote_etag: Some("etag-gamma".into()),
+                    target_path: None,
                 },
             ],
         };
@@ -1368,6 +1384,10 @@ mod tests {
                 noop_count: 0,
                 pending_operation_count: 4,
                 credentials_available: true,
+                delete_count: 0,
+                move_count: 0,
+                anchor_count: 0,
+                suppressed_delete_count: 0,
             },
             observed_entries: vec![],
             queue_items: vec![
@@ -1378,6 +1398,7 @@ mod tests {
                     remote_size: None,
                     expected_local_fingerprint: Some("fp-alpha".into()),
                     expected_remote_etag: None,
+                    target_path: None,
                 },
                 PlannedQueueItem {
                     path: "nested".into(),
@@ -1386,6 +1407,7 @@ mod tests {
                     remote_size: None,
                     expected_local_fingerprint: None,
                     expected_remote_etag: None,
+                    target_path: None,
                 },
                 PlannedQueueItem {
                     path: "beta.txt".into(),
@@ -1394,6 +1416,7 @@ mod tests {
                     remote_size: Some(7),
                     expected_local_fingerprint: Some("fp-beta".into()),
                     expected_remote_etag: Some("etag-beta".into()),
+                    target_path: None,
                 },
                 PlannedQueueItem {
                     path: "gamma.txt".into(),
@@ -1402,6 +1425,7 @@ mod tests {
                     remote_size: Some(11),
                     expected_local_fingerprint: Some("fp-gamma".into()),
                     expected_remote_etag: Some("etag-gamma".into()),
+                    target_path: None,
                 },
             ],
         };
@@ -1486,6 +1510,10 @@ mod tests {
                 noop_count: 0,
                 pending_operation_count: 1,
                 credentials_available: true,
+                delete_count: 0,
+                move_count: 0,
+                anchor_count: 0,
+                suppressed_delete_count: 0,
             },
             observed_entries: vec![],
             queue_items: vec![PlannedQueueItem {
@@ -1495,6 +1523,7 @@ mod tests {
                 remote_size: None,
                 expected_local_fingerprint: Some("fp-alpha".into()),
                 expected_remote_etag: None,
+                target_path: None,
             }],
         };
 
@@ -1554,6 +1583,10 @@ mod tests {
                 noop_count: 0,
                 pending_operation_count: 3,
                 credentials_available: true,
+                delete_count: 0,
+                move_count: 0,
+                anchor_count: 0,
+                suppressed_delete_count: 0,
             },
             observed_entries: vec![],
             queue_items: vec![
@@ -1564,6 +1597,7 @@ mod tests {
                     remote_size: None,
                     expected_local_fingerprint: Some("fp-alpha".into()),
                     expected_remote_etag: None,
+                    target_path: None,
                 },
                 PlannedQueueItem {
                     path: "beta.txt".into(),
@@ -1572,6 +1606,7 @@ mod tests {
                     remote_size: Some(7),
                     expected_local_fingerprint: Some("fp-beta".into()),
                     expected_remote_etag: Some("etag-beta".into()),
+                    target_path: None,
                 },
                 PlannedQueueItem {
                     path: "gamma.txt".into(),
@@ -1580,6 +1615,7 @@ mod tests {
                     remote_size: Some(11),
                     expected_local_fingerprint: Some("fp-gamma".into()),
                     expected_remote_etag: Some("etag-gamma".into()),
+                    target_path: None,
                 },
             ],
         };
@@ -1701,6 +1737,10 @@ mod tests {
                 noop_count: 1,
                 pending_operation_count: 1,
                 credentials_available: true,
+                delete_count: 0,
+                move_count: 0,
+                anchor_count: 0,
+                suppressed_delete_count: 0,
             },
             observed_entries: vec![],
             queue_items: vec![PlannedQueueItem {
@@ -1710,6 +1750,7 @@ mod tests {
                 remote_size: None,
                 expected_local_fingerprint: None,
                 expected_remote_etag: None,
+                target_path: None,
             }],
         };
 
@@ -1742,6 +1783,10 @@ mod tests {
                 noop_count: 0,
                 pending_operation_count: 1,
                 credentials_available: true,
+                delete_count: 0,
+                move_count: 0,
+                anchor_count: 0,
+                suppressed_delete_count: 0,
             },
             observed_entries: vec![ObservedEntry {
                 path: "alpha.txt".into(),
@@ -1756,6 +1801,7 @@ mod tests {
                 remote_size: None,
                 expected_local_fingerprint: Some("fp-alpha".into()),
                 expected_remote_etag: None,
+                target_path: None,
             }],
         };
 
@@ -1784,6 +1830,10 @@ mod tests {
                 noop_count: 0,
                 pending_operation_count: 1,
                 credentials_available: true,
+                delete_count: 0,
+                move_count: 0,
+                anchor_count: 0,
+                suppressed_delete_count: 0,
             },
             observed_entries: vec![ObservedEntry {
                 path: "beta.txt".into(),
@@ -1798,6 +1848,7 @@ mod tests {
                 remote_size: None,
                 expected_local_fingerprint: Some("fp-beta".into()),
                 expected_remote_etag: None,
+                target_path: None,
             }],
         };
 
@@ -1890,6 +1941,10 @@ mod tests {
                 noop_count: 0,
                 pending_operation_count: 3,
                 credentials_available: true,
+                delete_count: 0,
+                move_count: 0,
+                anchor_count: 0,
+                suppressed_delete_count: 0,
             },
             observed_entries: vec![],
             queue_items: vec![
@@ -1900,6 +1955,7 @@ mod tests {
                     remote_size: None,
                     expected_local_fingerprint: Some("fp-alpha".into()),
                     expected_remote_etag: None,
+                    target_path: None,
                 },
                 PlannedQueueItem {
                     path: "nested".into(),
@@ -1908,6 +1964,7 @@ mod tests {
                     remote_size: None,
                     expected_local_fingerprint: None,
                     expected_remote_etag: None,
+                    target_path: None,
                 },
                 PlannedQueueItem {
                     path: "beta.txt".into(),
@@ -1916,6 +1973,7 @@ mod tests {
                     remote_size: Some(7),
                     expected_local_fingerprint: Some("fp-beta".into()),
                     expected_remote_etag: Some("etag-beta".into()),
+                    target_path: None,
                 },
             ],
         };
@@ -2094,6 +2152,10 @@ mod tests {
                 noop_count: 0,
                 pending_operation_count: 1,
                 credentials_available: true,
+                delete_count: 0,
+                move_count: 0,
+                anchor_count: 0,
+                suppressed_delete_count: 0,
             },
             observed_entries: vec![ObservedEntry {
                 path: "note.txt".into(),
@@ -2108,6 +2170,7 @@ mod tests {
                 remote_size: Some(5),
                 expected_local_fingerprint: Some("fp-note".into()),
                 expected_remote_etag: Some("etag-note".into()),
+                target_path: None,
             }],
         };
 

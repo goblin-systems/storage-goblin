@@ -8,6 +8,85 @@ use super::{
     sync_db::SyncAnchor,
 };
 
+/// Every operation the planner can emit. Stored in the durable queue as the
+/// `as_str` form; parse back with [`Operation::parse`].
+///
+/// (Full typed plumbing through `sync_db`/`commands` lands with phase 3's
+/// `engine::model`; until then the string boundary is these two functions.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    Upload,
+    Download,
+    CreateDirectory,
+    /// Local file was deleted while the remote copy is unchanged: delete the
+    /// remote object (through remote-bin/versioning protection where enabled).
+    DeleteRemote,
+    /// Remote object was deleted while the local copy is unchanged: delete the
+    /// local file (to the OS trash).
+    DeleteLocal,
+    /// Local rename detected: server-side copy `path` → `target_path`, then
+    /// delete `path` remotely.
+    MoveRemote,
+    /// Remote rename detected: locally rename `path` → `target_path`.
+    MoveLocal,
+    /// preserve-both dual edit: rename the local file to `target_path` and
+    /// upload it; a paired `Download` restores the remote version at `path`.
+    DuplicateConflict,
+    /// Identical content on both sides with no anchor: record the anchor,
+    /// transfer nothing.
+    AnchorOnly,
+    /// Anchor exists but the file is gone on both sides: drop the anchor.
+    ForgetAnchor,
+    ConflictReview,
+    ReviewRequired,
+}
+
+impl Operation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Operation::Upload => "upload",
+            Operation::Download => "download",
+            Operation::CreateDirectory => "create_directory",
+            Operation::DeleteRemote => "delete_remote",
+            Operation::DeleteLocal => "delete_local",
+            Operation::MoveRemote => "move_remote",
+            Operation::MoveLocal => "move_local",
+            Operation::DuplicateConflict => "duplicate_conflict",
+            Operation::AnchorOnly => "anchor_only",
+            Operation::ForgetAnchor => "forget_anchor",
+            Operation::ConflictReview => "conflict_review",
+            Operation::ReviewRequired => "review_required",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Operation> {
+        Some(match value {
+            "upload" => Operation::Upload,
+            "download" => Operation::Download,
+            "create_directory" => Operation::CreateDirectory,
+            "delete_remote" => Operation::DeleteRemote,
+            "delete_local" => Operation::DeleteLocal,
+            "move_remote" => Operation::MoveRemote,
+            "move_local" => Operation::MoveLocal,
+            "duplicate_conflict" => Operation::DuplicateConflict,
+            "anchor_only" => Operation::AnchorOnly,
+            "forget_anchor" => Operation::ForgetAnchor,
+            "conflict_review" => Operation::ConflictReview,
+            "review_required" => Operation::ReviewRequired,
+            _ => return None,
+        })
+    }
+}
+
+/// Automatic deletes above this count are suppressed into review items until
+/// a user confirms ("fail-safe — never delete without certainty"). The UI ack
+/// flow arrives in phase 5; until then the guard errs on the safe side.
+pub const MAX_AUTO_DELETE_COUNT: u64 = 25;
+/// Additionally suppress when deletes would touch more than this share of the
+/// anchored tree (only applied once the tree is non-trivial).
+pub const MAX_AUTO_DELETE_RATIO: f64 = 0.5;
+const AUTO_DELETE_RATIO_MIN_ANCHORS: u64 = 10;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LocalIndexedEntry {
     kind: String,
@@ -21,6 +100,7 @@ struct RemoteIndexedEntry {
     size: u64,
     etag: Option<String>,
     storage_class: Option<String>,
+    fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,13 +115,15 @@ pub struct ObservedEntry {
 pub struct PlannedQueueItem {
     pub path: String,
     pub operation: String,
+    /// Destination path for `move_remote` / `move_local` / `duplicate_conflict`.
+    pub target_path: Option<String>,
     pub local_size: Option<u64>,
     pub remote_size: Option<u64>,
     pub expected_local_fingerprint: Option<String>,
     pub expected_remote_etag: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SyncPlanSummary {
     pub planned_at: String,
     pub local_file_count: u64,
@@ -52,24 +134,55 @@ pub struct SyncPlanSummary {
     pub download_count: u64,
     pub conflict_count: u64,
     pub noop_count: u64,
+    pub delete_count: u64,
+    pub move_count: u64,
+    pub anchor_count: u64,
+    /// Deletes converted to review items by the mass-delete circuit breaker.
+    pub suppressed_delete_count: u64,
     pub pending_operation_count: u64,
     pub credentials_available: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SyncPlan {
     pub summary: SyncPlanSummary,
     pub observed_entries: Vec<ObservedEntry>,
     pub queue_items: Vec<PlannedQueueItem>,
 }
 
+/// Outcomes of the file decision table.
+///
+/// Note there is no `ConflictReview` variant: file-vs-directory kind
+/// mismatches are structural and emit their queue item before the table runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileSyncDecision {
     Noop,
     Upload,
     Download,
-    ConflictReview,
+    DeleteRemote,
+    DeleteLocal,
+    DuplicateConflict,
+    AnchorOnly,
+    ForgetAnchor,
     ReviewRequired,
+}
+
+/// One classified path, before post-passes (rename pairing, breaker).
+#[derive(Debug, Clone)]
+struct PlannedAction {
+    path: String,
+    decision: FileSyncDecision,
+    local_size: Option<u64>,
+    remote_size: Option<u64>,
+    local_fingerprint: Option<String>,
+    remote_etag: Option<String>,
+    /// The anchor's identity for delete decisions (what the deleted side
+    /// last looked like) — used for rename pairing.
+    anchor_local_fingerprint: Option<String>,
+    anchor_remote_etag: Option<String>,
+    /// Set by rename pairing: this Delete* action is actually a move to the
+    /// given destination path.
+    move_target: Option<String>,
 }
 
 pub(crate) fn file_entry_status(
@@ -81,12 +194,17 @@ pub(crate) fn file_entry_status(
         anchor,
         current_local_fingerprint,
         current_remote_etag,
+        None,
         "preserve-both",
     ) {
-        FileSyncDecision::Noop => "synced",
+        FileSyncDecision::Noop | FileSyncDecision::AnchorOnly | FileSyncDecision::ForgetAnchor => {
+            "synced"
+        }
         FileSyncDecision::Upload => "local-only",
         FileSyncDecision::Download => "remote-only",
-        FileSyncDecision::ConflictReview => "conflict",
+        FileSyncDecision::DeleteRemote => "remote-only",
+        FileSyncDecision::DeleteLocal => "local-only",
+        FileSyncDecision::DuplicateConflict => "conflict",
         FileSyncDecision::ReviewRequired => "review-required",
     }
 }
@@ -111,19 +229,23 @@ pub fn build_sync_plan(
             entry.kind == "file" && !is_cold_storage_class(entry.storage_class.as_deref())
         })
         .count() as u64;
+    let anchored_file_count = anchors
+        .values()
+        .filter(|anchor| anchor.kind == "file")
+        .count() as u64;
 
     let mut paths = BTreeSet::new();
     paths.extend(local_entries.keys().cloned());
     paths.extend(remote_entries.keys().cloned());
+    paths.extend(anchors.keys().cloned());
 
     let planned_at = now_iso();
     let mut observed_entries = Vec::with_capacity(paths.len());
-    let mut queue_items = Vec::new();
-    let mut upload_count = 0_u64;
+    let mut actions: Vec<PlannedAction> = Vec::new();
     let mut create_directory_count = 0_u64;
-    let mut download_count = 0_u64;
     let mut conflict_count = 0_u64;
     let mut noop_count = 0_u64;
+    let mut queue_items: Vec<PlannedQueueItem> = Vec::new();
 
     for path in paths {
         let local = local_entries.get(&path);
@@ -134,12 +256,8 @@ pub fn build_sync_plan(
             noop_count += 1;
             observed_entries.push(ObservedEntry {
                 path,
-                local_size: local
-                    .map(|entry| entry.size)
-                    .filter(|_| local.is_some_and(|entry| entry.kind == "file")),
-                remote_size: remote
-                    .map(|entry| entry.size)
-                    .filter(|_| remote.is_some_and(|entry| entry.kind == "file")),
+                local_size: local.and_then(file_size),
+                remote_size: remote.and_then(file_size),
                 resolution: "noop".into(),
             });
             continue;
@@ -156,7 +274,8 @@ pub fn build_sync_plan(
                 });
                 queue_items.push(PlannedQueueItem {
                     path,
-                    operation: "create_directory".into(),
+                    operation: Operation::CreateDirectory.as_str().into(),
+                    target_path: None,
                     local_size: None,
                     remote_size: None,
                     expected_local_fingerprint: None,
@@ -193,81 +312,44 @@ pub fn build_sync_plan(
                 });
                 queue_items.push(PlannedQueueItem {
                     path,
-                    operation: "conflict_review".into(),
+                    operation: Operation::ConflictReview.as_str().into(),
+                    target_path: None,
                     local_size: file_size(local),
                     remote_size: file_size(remote),
                     expected_local_fingerprint: None,
                     expected_remote_etag: None,
                 });
             }
-            (Some(local), None) if local.kind == "file" => {
+            (local, remote)
+                if local.is_none_or(|entry| entry.kind == "file")
+                    && remote.is_none_or(|entry| entry.kind == "file") =>
+            {
+                if local.is_none() && remote.is_none() && anchor.is_none() {
+                    continue;
+                }
                 let decision = decide_file_sync(
                     anchor,
-                    local.fingerprint.as_deref(),
-                    None,
+                    local.and_then(|entry| entry.fingerprint.as_deref()),
+                    remote.and_then(|entry| entry.etag.as_deref()),
+                    remote.and_then(|entry| entry.fingerprint.as_deref()),
                     normalized_conflict_strategy.as_str(),
                 );
-                push_file_decision(
-                    &mut observed_entries,
-                    &mut queue_items,
-                    &mut upload_count,
-                    &mut download_count,
-                    &mut conflict_count,
-                    &mut noop_count,
-                    &path,
-                    Some(local.size),
-                    None,
-                    local.fingerprint.clone(),
-                    None,
+                actions.push(PlannedAction {
+                    path,
                     decision,
-                );
+                    local_size: local.and_then(file_size),
+                    remote_size: remote.and_then(file_size),
+                    local_fingerprint: local.and_then(|entry| entry.fingerprint.clone()),
+                    remote_etag: remote.and_then(|entry| entry.etag.clone()),
+                    anchor_local_fingerprint: anchor
+                        .and_then(|anchor| anchor.local_fingerprint.clone()),
+                    anchor_remote_etag: anchor.and_then(|anchor| anchor.remote_etag.clone()),
+                    move_target: None,
+                });
             }
-            (None, Some(remote)) if remote.kind == "file" => {
-                let decision = decide_file_sync(
-                    anchor,
-                    None,
-                    remote.etag.as_deref(),
-                    normalized_conflict_strategy.as_str(),
-                );
-                push_file_decision(
-                    &mut observed_entries,
-                    &mut queue_items,
-                    &mut upload_count,
-                    &mut download_count,
-                    &mut conflict_count,
-                    &mut noop_count,
-                    &path,
-                    None,
-                    Some(remote.size),
-                    None,
-                    remote.etag.clone(),
-                    decision,
-                );
-            }
-            (Some(local), Some(remote)) if local.kind == "file" && remote.kind == "file" => {
-                let decision = decide_file_sync(
-                    anchor,
-                    local.fingerprint.as_deref(),
-                    remote.etag.as_deref(),
-                    normalized_conflict_strategy.as_str(),
-                );
-                push_file_decision(
-                    &mut observed_entries,
-                    &mut queue_items,
-                    &mut upload_count,
-                    &mut download_count,
-                    &mut conflict_count,
-                    &mut noop_count,
-                    &path,
-                    Some(local.size),
-                    Some(remote.size),
-                    local.fingerprint.clone(),
-                    remote.etag.clone(),
-                    decision,
-                );
-            }
-            (None, None) => {}
             _ => {
+                // Directory-vs-nothing combinations with a stale anchor, and
+                // any remaining directory pairings: nothing to transfer.
                 noop_count += 1;
                 observed_entries.push(ObservedEntry {
                     path,
@@ -276,6 +358,120 @@ pub fn build_sync_plan(
                     resolution: "noop".into(),
                 });
             }
+        }
+    }
+
+    // -- post-pass: rename pairing ------------------------------------------
+    pair_local_renames(&mut actions);
+    pair_remote_renames(&mut actions);
+
+    // -- post-pass: mass-delete circuit breaker -----------------------------
+    let planned_delete_count = actions
+        .iter()
+        .filter(|action| {
+            matches!(
+                action.decision,
+                FileSyncDecision::DeleteRemote | FileSyncDecision::DeleteLocal
+            )
+        })
+        .count() as u64;
+    let ratio_tripped = anchored_file_count >= AUTO_DELETE_RATIO_MIN_ANCHORS
+        && planned_delete_count as f64 > anchored_file_count as f64 * MAX_AUTO_DELETE_RATIO;
+    let suppress_deletes = planned_delete_count > MAX_AUTO_DELETE_COUNT || ratio_tripped;
+    let mut suppressed_delete_count = 0_u64;
+
+    // -- materialize --------------------------------------------------------
+    let mut upload_count = 0_u64;
+    let mut download_count = 0_u64;
+    let mut delete_count = 0_u64;
+    let mut move_count = 0_u64;
+    let mut anchor_count = 0_u64;
+
+    for action in actions {
+        match action.decision {
+            FileSyncDecision::Noop => {
+                noop_count += 1;
+                observed_entries.push(observed(&action, "noop"));
+            }
+            FileSyncDecision::Upload => {
+                upload_count += 1;
+                observed_entries.push(observed(&action, "upload"));
+                queue_items.push(queue_item(&action, Operation::Upload, None));
+            }
+            FileSyncDecision::Download => {
+                download_count += 1;
+                observed_entries.push(observed(&action, "download"));
+                queue_items.push(queue_item(&action, Operation::Download, None));
+            }
+            FileSyncDecision::DeleteRemote => {
+                if let Some(target) = action.move_target.clone() {
+                    observed_entries.push(observed(&action, "move_remote"));
+                    queue_items.push(queue_item(&action, Operation::MoveRemote, Some(target)));
+                } else if suppress_deletes {
+                    suppressed_delete_count += 1;
+                    conflict_count += 1;
+                    observed_entries.push(observed(&action, "delete_suppressed"));
+                    queue_items.push(queue_item(&action, Operation::ReviewRequired, None));
+                } else {
+                    delete_count += 1;
+                    observed_entries.push(observed(&action, "delete_remote"));
+                    queue_items.push(queue_item(&action, Operation::DeleteRemote, None));
+                }
+            }
+            FileSyncDecision::DeleteLocal => {
+                if let Some(target) = action.move_target.clone() {
+                    observed_entries.push(observed(&action, "move_local"));
+                    queue_items.push(queue_item(&action, Operation::MoveLocal, Some(target)));
+                } else if suppress_deletes {
+                    suppressed_delete_count += 1;
+                    conflict_count += 1;
+                    observed_entries.push(observed(&action, "delete_suppressed"));
+                    queue_items.push(queue_item(&action, Operation::ReviewRequired, None));
+                } else {
+                    delete_count += 1;
+                    observed_entries.push(observed(&action, "delete_local"));
+                    queue_items.push(queue_item(&action, Operation::DeleteLocal, None));
+                }
+            }
+            FileSyncDecision::DuplicateConflict => {
+                // Keep both: the local edit moves to a conflict-suffixed name
+                // and uploads; the remote edit is downloaded at the original
+                // path. Both sides converge to both files.
+                let conflict_path =
+                    conflict_copy_path(&action.path, &planned_at, &local_entries, &remote_entries);
+                upload_count += 1;
+                download_count += 1;
+                observed_entries.push(observed(&action, "duplicate_conflict"));
+                queue_items.push(queue_item(
+                    &action,
+                    Operation::DuplicateConflict,
+                    Some(conflict_path),
+                ));
+                queue_items.push(queue_item(&action, Operation::Download, None));
+            }
+            FileSyncDecision::AnchorOnly => {
+                anchor_count += 1;
+                observed_entries.push(observed(&action, "anchor"));
+                queue_items.push(queue_item(&action, Operation::AnchorOnly, None));
+            }
+            FileSyncDecision::ForgetAnchor => {
+                anchor_count += 1;
+                observed_entries.push(observed(&action, "forget_anchor"));
+                queue_items.push(queue_item(&action, Operation::ForgetAnchor, None));
+            }
+            FileSyncDecision::ReviewRequired => {
+                conflict_count += 1;
+                observed_entries.push(observed(&action, "review_required"));
+                queue_items.push(queue_item(&action, Operation::ReviewRequired, None));
+            }
+        }
+    }
+
+    // Moves were materialized during pairing (they replace their two halves).
+    for item in &queue_items {
+        match Operation::parse(&item.operation) {
+            Some(Operation::MoveRemote) | Some(Operation::MoveLocal) => move_count += 1,
+            _ => {}
         }
     }
 
@@ -290,6 +486,10 @@ pub fn build_sync_plan(
             download_count,
             conflict_count,
             noop_count,
+            delete_count,
+            move_count,
+            anchor_count,
+            suppressed_delete_count,
             pending_operation_count: queue_items.len() as u64,
             credentials_available,
         },
@@ -298,108 +498,280 @@ pub fn build_sync_plan(
     }
 }
 
-// Signature slated for restructuring in overhaul phase 3 (backlog/phase-3-backend-architecture.md).
-#[allow(clippy::too_many_arguments)]
-fn push_file_decision(
-    observed_entries: &mut Vec<ObservedEntry>,
-    queue_items: &mut Vec<PlannedQueueItem>,
-    upload_count: &mut u64,
-    download_count: &mut u64,
-    conflict_count: &mut u64,
-    noop_count: &mut u64,
-    path: &str,
-    local_size: Option<u64>,
-    remote_size: Option<u64>,
-    expected_local_fingerprint: Option<String>,
-    expected_remote_etag: Option<String>,
-    decision: FileSyncDecision,
+/// Local rename: an unanchored local-only file (Upload) whose fingerprint and
+/// size exactly match a pending DeleteRemote's last-synced local identity.
+/// The pair becomes MoveRemote { path: old, target: new }. Ambiguous matches
+/// (multiple candidates on either side) degrade to the unpaired operations.
+fn pair_local_renames(actions: &mut Vec<PlannedAction>) {
+    pair_renames(
+        actions,
+        |action| {
+            (action.decision == FileSyncDecision::Upload
+                && action.anchor_local_fingerprint.is_none()
+                && action.remote_etag.is_none())
+            .then(|| {
+                (
+                    action.local_fingerprint.clone().unwrap_or_default(),
+                    action.local_size.unwrap_or_default(),
+                )
+            })
+        },
+        |action| {
+            (action.decision == FileSyncDecision::DeleteRemote).then(|| {
+                (
+                    action.anchor_local_fingerprint.clone().unwrap_or_default(),
+                    action.remote_size.unwrap_or_default(),
+                )
+            })
+        },
+    );
+}
+
+/// Remote rename: an unanchored remote-only object (Download) whose etag and
+/// size exactly match a pending DeleteLocal's last-synced remote identity.
+fn pair_remote_renames(actions: &mut Vec<PlannedAction>) {
+    pair_renames(
+        actions,
+        |action| {
+            (action.decision == FileSyncDecision::Download
+                && action.anchor_remote_etag.is_none()
+                && action.local_fingerprint.is_none())
+            .then(|| {
+                (
+                    action.remote_etag.clone().unwrap_or_default(),
+                    action.remote_size.unwrap_or_default(),
+                )
+            })
+        },
+        |action| {
+            (action.decision == FileSyncDecision::DeleteLocal).then(|| {
+                (
+                    action.anchor_remote_etag.clone().unwrap_or_default(),
+                    action.local_size.unwrap_or_default(),
+                )
+            })
+        },
+    );
+}
+
+fn pair_renames(
+    actions: &mut Vec<PlannedAction>,
+    new_side_identity: impl Fn(&PlannedAction) -> Option<(String, u64)>,
+    old_side_identity: impl Fn(&PlannedAction) -> Option<(String, u64)>,
 ) {
-    let (resolution, operation) = match decision {
-        FileSyncDecision::Noop => {
-            *noop_count += 1;
-            ("noop", None)
-        }
-        FileSyncDecision::Upload => {
-            *upload_count += 1;
-            ("upload", Some("upload"))
-        }
-        FileSyncDecision::Download => {
-            *download_count += 1;
-            ("download", Some("download"))
-        }
-        FileSyncDecision::ConflictReview => {
-            *conflict_count += 1;
-            ("conflict_review", Some("conflict_review"))
-        }
-        FileSyncDecision::ReviewRequired => {
-            *conflict_count += 1;
-            ("review_required", Some("review_required"))
-        }
-    };
+    let mut new_by_identity: BTreeMap<(String, u64), Vec<usize>> = BTreeMap::new();
+    let mut old_by_identity: BTreeMap<(String, u64), Vec<usize>> = BTreeMap::new();
 
-    observed_entries.push(ObservedEntry {
-        path: path.into(),
-        local_size,
-        remote_size,
-        resolution: resolution.into(),
-    });
+    for (index, action) in actions.iter().enumerate() {
+        if let Some(identity) = new_side_identity(action) {
+            if !identity.0.is_empty() {
+                new_by_identity.entry(identity).or_default().push(index);
+            }
+        }
+        if let Some(identity) = old_side_identity(action) {
+            if !identity.0.is_empty() {
+                old_by_identity.entry(identity).or_default().push(index);
+            }
+        }
+    }
 
-    if let Some(operation) = operation {
-        queue_items.push(PlannedQueueItem {
-            path: path.into(),
-            operation: operation.into(),
-            local_size,
-            remote_size,
-            expected_local_fingerprint,
-            expected_remote_etag,
-        });
+    let mut consumed_new: Vec<usize> = Vec::new();
+    let mut pairings: Vec<(usize, usize)> = Vec::new();
+
+    for (identity, new_indexes) in &new_by_identity {
+        let Some(old_indexes) = old_by_identity.get(identity) else {
+            continue;
+        };
+        // Require a unique pairing on both sides; anything else is ambiguous
+        // and degrades safely to upload/download + delete.
+        if new_indexes.len() != 1 || old_indexes.len() != 1 {
+            continue;
+        }
+        pairings.push((old_indexes[0], new_indexes[0]));
+        consumed_new.push(new_indexes[0]);
+    }
+
+    for (old_index, new_index) in &pairings {
+        let target = actions[*new_index].path.clone();
+        let new_local_fingerprint = actions[*new_index].local_fingerprint.clone();
+        let new_remote_etag = actions[*new_index].remote_etag.clone();
+        let old_action = &mut actions[*old_index];
+        old_action.move_target = Some(target);
+        // Carry the surviving content identity so the executor can anchor the
+        // destination path after the move.
+        if old_action.local_fingerprint.is_none() {
+            old_action.local_fingerprint = new_local_fingerprint;
+        }
+        if old_action.remote_etag.is_none() {
+            old_action.remote_etag = new_remote_etag;
+        }
+    }
+
+    consumed_new.sort_unstable();
+    for index in consumed_new.into_iter().rev() {
+        actions.remove(index);
     }
 }
 
+fn observed(action: &PlannedAction, resolution: &str) -> ObservedEntry {
+    ObservedEntry {
+        path: action.path.clone(),
+        local_size: action.local_size,
+        remote_size: action.remote_size,
+        resolution: resolution.into(),
+    }
+}
+
+fn queue_item(
+    action: &PlannedAction,
+    operation: Operation,
+    target_path: Option<String>,
+) -> PlannedQueueItem {
+    PlannedQueueItem {
+        path: action.path.clone(),
+        operation: operation.as_str().into(),
+        target_path,
+        local_size: action.local_size,
+        remote_size: action.remote_size,
+        expected_local_fingerprint: action
+            .local_fingerprint
+            .clone()
+            .or_else(|| action.anchor_local_fingerprint.clone()),
+        expected_remote_etag: action
+            .remote_etag
+            .clone()
+            .or_else(|| action.anchor_remote_etag.clone()),
+    }
+}
+
+/// `name.ext` → `name (conflict 2026-07-19).ext`, with a numeric suffix on
+/// collision. (Device-name suffixes need settings plumbing — phase 1.2 TODO.)
+fn conflict_copy_path(
+    path: &str,
+    planned_at: &str,
+    local_entries: &BTreeMap<String, LocalIndexedEntry>,
+    remote_entries: &BTreeMap<String, RemoteIndexedEntry>,
+) -> String {
+    let date = planned_at.get(0..10).unwrap_or("conflict");
+    let (stem, extension) = match path.rsplit_once('.') {
+        // Treat a dot inside the final path segment as an extension split.
+        Some((stem, extension)) if !extension.contains('/') && !stem.ends_with('/') => {
+            (stem, Some(extension))
+        }
+        _ => (path, None),
+    };
+
+    for attempt in 0..100_u32 {
+        let counter = if attempt == 0 {
+            String::new()
+        } else {
+            format!(" {}", attempt + 1)
+        };
+        let candidate = match extension {
+            Some(extension) => format!("{stem} (conflict {date}{counter}).{extension}"),
+            None => format!("{stem} (conflict {date}{counter})"),
+        };
+        if !local_entries.contains_key(&candidate) && !remote_entries.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+    format!("{path} (conflict {date} overflow)")
+}
+
+/// Does the remote object hold the same content the local fingerprint hashes?
+///
+/// Primary signal: a goblin fingerprint the store exposes (uploaded as object
+/// metadata; surfaced by providers whose listings include metadata). Fallback:
+/// an etag that *is* the content fingerprint (true for stores whose etag
+/// function matches ours; never true for S3 md5/multipart etags — those
+/// simply fail the match and fall through to review).
+fn remote_content_matches(
+    local_fingerprint: &str,
+    remote_etag: Option<&str>,
+    remote_fingerprint: Option<&str>,
+) -> bool {
+    if remote_fingerprint == Some(local_fingerprint) {
+        return true;
+    }
+    remote_etag.is_some_and(|etag| etag.trim_matches('"') == local_fingerprint)
+}
+
+/// The decision table. Every arm is deliberate; there is no catch-all.
 fn decide_file_sync(
     anchor: Option<&SyncAnchor>,
     current_local_fingerprint: Option<&str>,
     current_remote_etag: Option<&str>,
+    current_remote_fingerprint: Option<&str>,
     conflict_strategy: &str,
 ) -> FileSyncDecision {
     let Some(anchor) = anchor.filter(|anchor| anchor.kind == "file") else {
-        return if current_local_fingerprint.is_some() && current_remote_etag.is_some() {
-            FileSyncDecision::ReviewRequired
-        } else if current_local_fingerprint.is_some() {
-            FileSyncDecision::Upload
-        } else if current_remote_etag.is_some() {
-            FileSyncDecision::Download
-        } else {
-            FileSyncDecision::Noop
+        // No sync history for this path.
+        return match (current_local_fingerprint, current_remote_etag) {
+            (Some(local), Some(_)) => {
+                if remote_content_matches(local, current_remote_etag, current_remote_fingerprint) {
+                    FileSyncDecision::AnchorOnly
+                } else {
+                    FileSyncDecision::ReviewRequired
+                }
+            }
+            (Some(_), None) => FileSyncDecision::Upload,
+            (None, Some(_)) => FileSyncDecision::Download,
+            (None, None) => FileSyncDecision::Noop,
         };
     };
 
-    let local_changed = anchor.local_fingerprint.as_deref() != current_local_fingerprint;
-    let remote_changed = anchor.remote_etag.as_deref() != current_remote_etag;
+    let anchor_local = anchor.local_fingerprint.as_deref();
+    let anchor_remote = anchor.remote_etag.as_deref();
 
-    match (
-        current_local_fingerprint,
-        current_remote_etag,
-        local_changed,
-        remote_changed,
-    ) {
-        (Some(_), Some(_), false, false) => FileSyncDecision::Noop,
-        (Some(_), Some(_), true, false) => FileSyncDecision::Upload,
-        (Some(_), Some(_), false, true) => FileSyncDecision::Download,
-        (Some(_), Some(_), true, true) => match conflict_strategy {
-            "prefer-local" => FileSyncDecision::Upload,
-            "prefer-remote" => FileSyncDecision::Download,
-            _ => FileSyncDecision::ConflictReview,
-        },
-        (Some(_), None, true, false) if anchor.remote_etag.is_none() => FileSyncDecision::Upload,
-        (None, Some(_), false, true) if anchor.local_fingerprint.is_none() => {
-            FileSyncDecision::Download
+    match (current_local_fingerprint, current_remote_etag) {
+        (Some(local), Some(remote)) => {
+            let local_changed = anchor_local != Some(local);
+            let remote_changed = anchor_remote != Some(remote);
+            match (local_changed, remote_changed) {
+                (false, false) => FileSyncDecision::Noop,
+                (true, false) => FileSyncDecision::Upload,
+                (false, true) => FileSyncDecision::Download,
+                (true, true) => match conflict_strategy {
+                    "prefer-local" => FileSyncDecision::Upload,
+                    "prefer-remote" => FileSyncDecision::Download,
+                    _ => FileSyncDecision::DuplicateConflict,
+                },
+            }
         }
-        (Some(_), None, false, false) if anchor.remote_etag.is_none() => FileSyncDecision::Noop,
-        (None, Some(_), false, false) if anchor.local_fingerprint.is_none() => {
-            FileSyncDecision::Noop
+        (Some(local), None) => {
+            if anchor_remote.is_none() {
+                // The anchor never saw a remote object: this is still an
+                // unsynced local file, changed or not.
+                if anchor_local == Some(local) {
+                    FileSyncDecision::Noop
+                } else {
+                    FileSyncDecision::Upload
+                }
+            } else if anchor_local == Some(local) {
+                // Remote deleted, local untouched since last sync.
+                FileSyncDecision::DeleteLocal
+            } else {
+                // Remote deleted AND local edited: a human must decide.
+                FileSyncDecision::ReviewRequired
+            }
         }
-        _ => FileSyncDecision::ReviewRequired,
+        (None, Some(remote)) => {
+            if anchor_local.is_none() {
+                // The anchor never saw a local file.
+                if anchor_remote == Some(remote) {
+                    FileSyncDecision::Noop
+                } else {
+                    FileSyncDecision::Download
+                }
+            } else if anchor_remote == Some(remote) {
+                // Local deleted, remote untouched since last sync.
+                FileSyncDecision::DeleteRemote
+            } else {
+                // Local deleted AND remote edited: a human must decide.
+                FileSyncDecision::ReviewRequired
+            }
+        }
+        (None, None) => FileSyncDecision::ForgetAnchor,
     }
 }
 
@@ -455,6 +827,7 @@ fn remote_entry_map(snapshot: &RemoteIndexSnapshot) -> BTreeMap<String, RemoteIn
                     size: entry.size,
                     etag: entry.etag.clone(),
                     storage_class: entry.storage_class.clone(),
+                    fingerprint: entry.fingerprint.clone(),
                 },
             )
         })
@@ -465,18 +838,18 @@ fn remote_entry_map(snapshot: &RemoteIndexSnapshot) -> BTreeMap<String, RemoteIn
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::build_sync_plan;
+    use super::{build_sync_plan, conflict_copy_path, Operation, SyncPlan, MAX_AUTO_DELETE_COUNT};
     use crate::storage::{
         local_index::{bytes_fingerprint, LocalIndexEntry, LocalIndexSnapshot, LocalIndexSummary},
         remote_index::{RemoteIndexSnapshot, RemoteIndexSummary, RemoteObjectEntry},
         sync_db::SyncAnchor,
     };
 
-    fn local_file(path: &str, size: u64, content: &str) -> LocalIndexEntry {
+    fn local_file(path: &str, content: &str) -> LocalIndexEntry {
         LocalIndexEntry {
             relative_path: path.into(),
             kind: "file".into(),
-            size,
+            size: content.len() as u64,
             modified_at: None,
             fingerprint: Some(bytes_fingerprint(content.as_bytes())),
         }
@@ -501,18 +874,20 @@ mod tests {
             last_modified_at: None,
             etag: Some(etag.into()),
             storage_class: None,
+            fingerprint: None,
         }
     }
 
-    fn remote_dir(path: &str) -> RemoteObjectEntry {
+    fn remote_file_with_content(path: &str, content: &str, etag: &str) -> RemoteObjectEntry {
         RemoteObjectEntry {
-            key: format!("{path}/"),
+            key: path.into(),
             relative_path: path.into(),
-            kind: "directory".into(),
-            size: 0,
+            kind: "file".into(),
+            size: content.len() as u64,
             last_modified_at: None,
-            etag: None,
+            etag: Some(etag.into()),
             storage_class: None,
+            fingerprint: Some(bytes_fingerprint(content.as_bytes())),
         }
     }
 
@@ -545,156 +920,396 @@ mod tests {
         }
     }
 
+    fn anchors_of(anchors: Vec<SyncAnchor>) -> BTreeMap<String, SyncAnchor> {
+        anchors
+            .into_iter()
+            .map(|anchor| (anchor.path.clone(), anchor))
+            .collect()
+    }
+
+    fn operations(plan: &SyncPlan) -> Vec<(&str, &str)> {
+        plan.queue_items
+            .iter()
+            .map(|item| (item.path.as_str(), item.operation.as_str()))
+            .collect()
+    }
+
+    // -- decision table: anchored states ------------------------------------
+
     #[test]
-    fn anchored_local_only_edit_plans_upload() {
-        let local = local_snapshot(vec![local_file("note.txt", 5, "bravo")]);
-        let remote = remote_snapshot(vec![remote_file("note.txt", 5, "etag-base")]);
-        let mut anchors = BTreeMap::new();
-        anchors.insert(
-            "note.txt".into(),
-            file_anchor("note.txt", "alpha", Some("etag-base")),
+    fn anchored_unchanged_is_noop() {
+        let plan = build_sync_plan(
+            &local_snapshot(vec![local_file("a.txt", "v1")]),
+            &remote_snapshot(vec![remote_file("a.txt", 2, "e1")]),
+            &anchors_of(vec![file_anchor("a.txt", "v1", Some("e1"))]),
+            "preserve-both",
+            true,
         );
-
-        let plan = build_sync_plan(&local, &remote, &anchors, "preserve-both", true);
-
-        assert_eq!(plan.summary.upload_count, 1);
-        assert_eq!(plan.summary.conflict_count, 0);
-        assert_eq!(plan.queue_items[0].operation, "upload");
+        assert_eq!(plan.summary.noop_count, 1);
+        assert!(plan.queue_items.is_empty());
     }
 
     #[test]
-    fn anchored_remote_only_edit_plans_download() {
-        let local = local_snapshot(vec![local_file("note.txt", 5, "alpha")]);
-        let remote = remote_snapshot(vec![remote_file("note.txt", 5, "etag-new")]);
-        let mut anchors = BTreeMap::new();
-        anchors.insert(
-            "note.txt".into(),
-            file_anchor("note.txt", "alpha", Some("etag-base")),
+    fn anchored_local_edit_uploads() {
+        let plan = build_sync_plan(
+            &local_snapshot(vec![local_file("a.txt", "v2")]),
+            &remote_snapshot(vec![remote_file("a.txt", 2, "e1")]),
+            &anchors_of(vec![file_anchor("a.txt", "v1", Some("e1"))]),
+            "preserve-both",
+            true,
         );
-
-        let plan = build_sync_plan(&local, &remote, &anchors, "preserve-both", true);
-
-        assert_eq!(plan.summary.download_count, 1);
-        assert_eq!(plan.summary.conflict_count, 0);
-        assert_eq!(plan.queue_items[0].operation, "download");
+        assert_eq!(operations(&plan), vec![("a.txt", "upload")]);
     }
 
     #[test]
-    fn anchored_dual_drift_plans_conflict() {
-        let local = local_snapshot(vec![local_file("note.txt", 5, "bravo")]);
-        let remote = remote_snapshot(vec![remote_file("note.txt", 5, "etag-new")]);
-        let mut anchors = BTreeMap::new();
-        anchors.insert(
-            "note.txt".into(),
-            file_anchor("note.txt", "alpha", Some("etag-base")),
+    fn anchored_remote_edit_downloads() {
+        let plan = build_sync_plan(
+            &local_snapshot(vec![local_file("a.txt", "v1")]),
+            &remote_snapshot(vec![remote_file("a.txt", 2, "e2")]),
+            &anchors_of(vec![file_anchor("a.txt", "v1", Some("e1"))]),
+            "preserve-both",
+            true,
         );
-
-        let plan = build_sync_plan(&local, &remote, &anchors, "preserve-both", true);
-
-        assert_eq!(plan.summary.conflict_count, 1);
-        assert_eq!(plan.queue_items[0].operation, "conflict_review");
+        assert_eq!(operations(&plan), vec![("a.txt", "download")]);
     }
 
     #[test]
-    fn anchored_same_size_changed_content_is_not_noop_when_local_changed() {
-        let local = local_snapshot(vec![local_file("note.txt", 5, "bravo")]);
-        let remote = remote_snapshot(vec![remote_file("note.txt", 5, "etag-base")]);
-        let mut anchors = BTreeMap::new();
-        anchors.insert(
-            "note.txt".into(),
-            file_anchor("note.txt", "alpha", Some("etag-base")),
+    fn anchored_dual_edit_duplicates_under_preserve_both() {
+        let plan = build_sync_plan(
+            &local_snapshot(vec![local_file("a.txt", "local v2")]),
+            &remote_snapshot(vec![remote_file("a.txt", 9, "e2")]),
+            &anchors_of(vec![file_anchor("a.txt", "v1", Some("e1"))]),
+            "preserve-both",
+            true,
         );
-
-        let plan = build_sync_plan(&local, &remote, &anchors, "preserve-both", true);
-
-        assert_eq!(plan.queue_items[0].operation, "upload");
+        let ops = operations(&plan);
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0], ("a.txt", "duplicate_conflict"));
+        assert_eq!(ops[1], ("a.txt", "download"));
+        let target = plan.queue_items[0].target_path.as_deref().expect("target");
+        assert!(target.contains("(conflict "), "got '{target}'");
+        assert!(target.ends_with(".txt"));
     }
 
     #[test]
-    fn unanchored_same_path_file_file_is_review_required() {
-        let local = local_snapshot(vec![local_file("note.txt", 5, "alpha")]);
-        let remote = remote_snapshot(vec![remote_file("note.txt", 5, "etag-base")]);
-
-        let plan = build_sync_plan(&local, &remote, &BTreeMap::new(), "preserve-both", true);
-
-        assert_eq!(plan.summary.conflict_count, 1);
-        assert_eq!(plan.queue_items[0].operation, "review_required");
-    }
-
-    #[test]
-    fn unanchored_local_only_file_uploads() {
-        let local = local_snapshot(vec![local_file("alpha.txt", 5, "alpha")]);
-        let remote = remote_snapshot(vec![]);
-
-        let plan = build_sync_plan(&local, &remote, &BTreeMap::new(), "preserve-both", true);
-
-        assert_eq!(plan.summary.upload_count, 1);
-        assert_eq!(plan.queue_items[0].operation, "upload");
-    }
-
-    #[test]
-    fn unanchored_remote_only_file_downloads() {
-        let local = local_snapshot(vec![]);
-        let remote = remote_snapshot(vec![remote_file("beta.txt", 7, "etag-1")]);
-
-        let plan = build_sync_plan(&local, &remote, &BTreeMap::new(), "preserve-both", true);
-
-        assert_eq!(plan.summary.download_count, 1);
-        assert_eq!(plan.queue_items[0].operation, "download");
-    }
-
-    #[test]
-    fn anchored_missing_remote_with_remote_base_is_review_required() {
-        let local = local_snapshot(vec![local_file("note.txt", 5, "alpha")]);
-        let remote = remote_snapshot(vec![]);
-        let mut anchors = BTreeMap::new();
-        anchors.insert(
-            "note.txt".into(),
-            file_anchor("note.txt", "alpha", Some("etag-base")),
-        );
-
-        let plan = build_sync_plan(&local, &remote, &anchors, "preserve-both", true);
-
-        assert_eq!(plan.summary.conflict_count, 1);
-        assert_eq!(plan.queue_items[0].operation, "review_required");
-    }
-
-    #[test]
-    fn directory_rules_remain_stable() {
-        let local = local_snapshot(vec![local_dir("docs")]);
-        let remote = remote_snapshot(vec![]);
-
-        let plan = build_sync_plan(&local, &remote, &BTreeMap::new(), "preserve-both", true);
-
-        assert_eq!(plan.summary.create_directory_count, 1);
-        assert_eq!(plan.queue_items[0].operation, "create_directory");
-    }
-
-    #[test]
-    fn file_directory_mismatch_is_conflict_review() {
-        let local = local_snapshot(vec![local_file("mixed", 4, "test")]);
-        let remote = remote_snapshot(vec![remote_dir("mixed")]);
-
-        let plan = build_sync_plan(&local, &remote, &BTreeMap::new(), "preserve-both", true);
-
-        assert_eq!(plan.summary.conflict_count, 1);
-        assert_eq!(plan.queue_items[0].operation, "conflict_review");
-    }
-
-    #[test]
-    fn conflict_strategy_applies_only_to_anchored_dual_drift() {
-        let local = local_snapshot(vec![local_file("note.txt", 5, "bravo")]);
-        let remote = remote_snapshot(vec![remote_file("note.txt", 5, "etag-new")]);
-        let mut anchors = BTreeMap::new();
-        anchors.insert(
-            "note.txt".into(),
-            file_anchor("note.txt", "alpha", Some("etag-base")),
-        );
-
+    fn anchored_dual_edit_honors_prefer_strategies() {
+        let local = local_snapshot(vec![local_file("a.txt", "local v2")]);
+        let remote = remote_snapshot(vec![remote_file("a.txt", 9, "e2")]);
+        let anchors = anchors_of(vec![file_anchor("a.txt", "v1", Some("e1"))]);
         let prefer_local = build_sync_plan(&local, &remote, &anchors, "prefer-local", true);
         let prefer_remote = build_sync_plan(&local, &remote, &anchors, "prefer-remote", true);
+        assert_eq!(operations(&prefer_local), vec![("a.txt", "upload")]);
+        assert_eq!(operations(&prefer_remote), vec![("a.txt", "download")]);
+    }
 
-        assert_eq!(prefer_local.queue_items[0].operation, "upload");
-        assert_eq!(prefer_remote.queue_items[0].operation, "download");
+    #[test]
+    fn anchored_local_delete_with_unchanged_remote_deletes_remote() {
+        let plan = build_sync_plan(
+            &local_snapshot(vec![]),
+            &remote_snapshot(vec![remote_file("a.txt", 2, "e1")]),
+            &anchors_of(vec![file_anchor("a.txt", "v1", Some("e1"))]),
+            "preserve-both",
+            true,
+        );
+        assert_eq!(operations(&plan), vec![("a.txt", "delete_remote")]);
+        assert_eq!(plan.summary.delete_count, 1);
+    }
+
+    #[test]
+    fn anchored_remote_delete_with_unchanged_local_deletes_local() {
+        let plan = build_sync_plan(
+            &local_snapshot(vec![local_file("a.txt", "v1")]),
+            &remote_snapshot(vec![]),
+            &anchors_of(vec![file_anchor("a.txt", "v1", Some("e1"))]),
+            "preserve-both",
+            true,
+        );
+        assert_eq!(operations(&plan), vec![("a.txt", "delete_local")]);
+    }
+
+    #[test]
+    fn anchored_local_delete_with_remote_edit_requires_review() {
+        let plan = build_sync_plan(
+            &local_snapshot(vec![]),
+            &remote_snapshot(vec![remote_file("a.txt", 2, "e2")]),
+            &anchors_of(vec![file_anchor("a.txt", "v1", Some("e1"))]),
+            "preserve-both",
+            true,
+        );
+        assert_eq!(operations(&plan), vec![("a.txt", "review_required")]);
+    }
+
+    #[test]
+    fn anchored_remote_delete_with_local_edit_requires_review() {
+        let plan = build_sync_plan(
+            &local_snapshot(vec![local_file("a.txt", "v2")]),
+            &remote_snapshot(vec![]),
+            &anchors_of(vec![file_anchor("a.txt", "v1", Some("e1"))]),
+            "preserve-both",
+            true,
+        );
+        assert_eq!(operations(&plan), vec![("a.txt", "review_required")]);
+    }
+
+    #[test]
+    fn anchored_gone_on_both_sides_forgets_the_anchor() {
+        let plan = build_sync_plan(
+            &local_snapshot(vec![]),
+            &remote_snapshot(vec![]),
+            &anchors_of(vec![file_anchor("a.txt", "v1", Some("e1"))]),
+            "preserve-both",
+            true,
+        );
+        assert_eq!(operations(&plan), vec![("a.txt", "forget_anchor")]);
+    }
+
+    // -- decision table: unanchored states ----------------------------------
+
+    #[test]
+    fn unanchored_local_only_uploads_and_remote_only_downloads() {
+        let plan = build_sync_plan(
+            &local_snapshot(vec![local_file("up.txt", "u")]),
+            &remote_snapshot(vec![remote_file("down.txt", 1, "e1")]),
+            &BTreeMap::new(),
+            "preserve-both",
+            true,
+        );
+        let ops = operations(&plan);
+        assert!(ops.contains(&("up.txt", "upload")));
+        assert!(ops.contains(&("down.txt", "download")));
+    }
+
+    #[test]
+    fn unanchored_identical_content_anchors_without_transfer() {
+        let plan = build_sync_plan(
+            &local_snapshot(vec![local_file("same.txt", "bytes")]),
+            &remote_snapshot(vec![remote_file_with_content(
+                "same.txt", "bytes", "opaque",
+            )]),
+            &BTreeMap::new(),
+            "preserve-both",
+            true,
+        );
+        assert_eq!(operations(&plan), vec![("same.txt", "anchor_only")]);
+        assert_eq!(plan.summary.anchor_count, 1);
+    }
+
+    #[test]
+    fn unanchored_identical_content_matches_via_fingerprint_style_etag() {
+        let fingerprint = bytes_fingerprint(b"bytes");
+        let etag = format!("\"{fingerprint}\"");
+        let plan = build_sync_plan(
+            &local_snapshot(vec![local_file("same.txt", "bytes")]),
+            &remote_snapshot(vec![remote_file("same.txt", 5, &etag)]),
+            &BTreeMap::new(),
+            "preserve-both",
+            true,
+        );
+        assert_eq!(operations(&plan), vec![("same.txt", "anchor_only")]);
+    }
+
+    #[test]
+    fn unanchored_different_content_requires_review() {
+        let plan = build_sync_plan(
+            &local_snapshot(vec![local_file("clash.txt", "mine")]),
+            &remote_snapshot(vec![remote_file_with_content("clash.txt", "theirs", "e1")]),
+            &BTreeMap::new(),
+            "preserve-both",
+            true,
+        );
+        assert_eq!(operations(&plan), vec![("clash.txt", "review_required")]);
+    }
+
+    // -- structure: directories, kind mismatch, cold storage ----------------
+
+    #[test]
+    fn local_directory_plans_remote_placeholder() {
+        let plan = build_sync_plan(
+            &local_snapshot(vec![local_dir("docs")]),
+            &remote_snapshot(vec![]),
+            &BTreeMap::new(),
+            "preserve-both",
+            true,
+        );
+        assert_eq!(operations(&plan), vec![("docs", "create_directory")]);
+    }
+
+    #[test]
+    fn kind_mismatch_is_conflict_review() {
+        let mut remote_dir_entry = remote_file("mixed", 0, "e");
+        remote_dir_entry.kind = "directory".into();
+        let plan = build_sync_plan(
+            &local_snapshot(vec![local_file("mixed", "data")]),
+            &remote_snapshot(vec![remote_dir_entry]),
+            &BTreeMap::new(),
+            "preserve-both",
+            true,
+        );
+        assert_eq!(operations(&plan), vec![("mixed", "conflict_review")]);
+    }
+
+    #[test]
+    fn cold_storage_class_is_skipped() {
+        let mut frozen = remote_file("cold.bin", 10, "e1");
+        frozen.storage_class = Some("GLACIER".into());
+        let plan = build_sync_plan(
+            &local_snapshot(vec![]),
+            &remote_snapshot(vec![frozen]),
+            &BTreeMap::new(),
+            "preserve-both",
+            true,
+        );
+        assert!(plan.queue_items.is_empty());
+        assert_eq!(plan.summary.noop_count, 1);
+    }
+
+    // -- rename pairing ------------------------------------------------------
+
+    #[test]
+    fn local_rename_pairs_into_move_remote() {
+        let plan = build_sync_plan(
+            &local_snapshot(vec![local_file("new-name.txt", "contents")]),
+            &remote_snapshot(vec![remote_file("old-name.txt", 8, "e1")]),
+            &anchors_of(vec![file_anchor("old-name.txt", "contents", Some("e1"))]),
+            "preserve-both",
+            true,
+        );
+        assert_eq!(operations(&plan), vec![("old-name.txt", "move_remote")]);
+        assert_eq!(
+            plan.queue_items[0].target_path.as_deref(),
+            Some("new-name.txt")
+        );
+        assert_eq!(plan.summary.move_count, 1);
+        assert_eq!(plan.summary.delete_count, 0);
+    }
+
+    #[test]
+    fn remote_rename_pairs_into_move_local() {
+        let plan = build_sync_plan(
+            &local_snapshot(vec![local_file("old-name.txt", "contents")]),
+            &remote_snapshot(vec![remote_file("new-name.txt", 8, "e1")]),
+            &anchors_of(vec![file_anchor("old-name.txt", "contents", Some("e1"))]),
+            "preserve-both",
+            true,
+        );
+        assert_eq!(operations(&plan), vec![("old-name.txt", "move_local")]);
+        assert_eq!(
+            plan.queue_items[0].target_path.as_deref(),
+            Some("new-name.txt")
+        );
+    }
+
+    #[test]
+    fn ambiguous_rename_degrades_to_upload_plus_delete() {
+        // Two new local files with identical content: pairing is ambiguous,
+        // so the old path deletes and both new paths upload.
+        let plan = build_sync_plan(
+            &local_snapshot(vec![
+                local_file("copy-a.txt", "contents"),
+                local_file("copy-b.txt", "contents"),
+            ]),
+            &remote_snapshot(vec![remote_file("old-name.txt", 8, "e1")]),
+            &anchors_of(vec![file_anchor("old-name.txt", "contents", Some("e1"))]),
+            "preserve-both",
+            true,
+        );
+        let ops = operations(&plan);
+        assert!(ops.contains(&("copy-a.txt", "upload")));
+        assert!(ops.contains(&("copy-b.txt", "upload")));
+        assert!(ops.contains(&("old-name.txt", "delete_remote")));
+        assert_eq!(plan.summary.move_count, 0);
+    }
+
+    // -- mass-delete circuit breaker ----------------------------------------
+
+    #[test]
+    fn mass_delete_is_suppressed_into_review() {
+        let mut anchors = Vec::new();
+        let mut remote = Vec::new();
+        for index in 0..(MAX_AUTO_DELETE_COUNT + 5) {
+            let path = format!("bulk/file-{index}.txt");
+            let content = format!("content-{index}");
+            let etag = format!("etag-{index}");
+            anchors.push(file_anchor(&path, &content, Some(&etag)));
+            remote.push(remote_file(&path, content.len() as u64, &etag));
+        }
+
+        let plan = build_sync_plan(
+            &local_snapshot(vec![]),
+            &remote_snapshot(remote),
+            &anchors_of(anchors),
+            "preserve-both",
+            true,
+        );
+
+        assert_eq!(plan.summary.delete_count, 0);
+        assert_eq!(
+            plan.summary.suppressed_delete_count,
+            MAX_AUTO_DELETE_COUNT + 5
+        );
+        assert!(plan
+            .queue_items
+            .iter()
+            .all(|item| item.operation == "review_required"));
+    }
+
+    #[test]
+    fn small_delete_batches_pass_the_breaker() {
+        let plan = build_sync_plan(
+            &local_snapshot(vec![]),
+            &remote_snapshot(vec![remote_file("a.txt", 2, "e1")]),
+            &anchors_of(vec![file_anchor("a.txt", "v1", Some("e1"))]),
+            "preserve-both",
+            true,
+        );
+        assert_eq!(plan.summary.delete_count, 1);
+        assert_eq!(plan.summary.suppressed_delete_count, 0);
+    }
+
+    // -- conflict copy naming ------------------------------------------------
+
+    #[test]
+    fn conflict_copy_naming_preserves_extension_and_avoids_collisions() {
+        let empty_local = BTreeMap::new();
+        let empty_remote = BTreeMap::new();
+        assert_eq!(
+            conflict_copy_path(
+                "docs/report.txt",
+                "2026-07-19T00:00:00Z",
+                &empty_local,
+                &empty_remote
+            ),
+            "docs/report (conflict 2026-07-19).txt"
+        );
+        assert_eq!(
+            conflict_copy_path(
+                "no-extension",
+                "2026-07-19T00:00:00Z",
+                &empty_local,
+                &empty_remote
+            ),
+            "no-extension (conflict 2026-07-19)"
+        );
+    }
+
+    #[test]
+    fn operation_round_trips_through_strings() {
+        for operation in [
+            Operation::Upload,
+            Operation::Download,
+            Operation::CreateDirectory,
+            Operation::DeleteRemote,
+            Operation::DeleteLocal,
+            Operation::MoveRemote,
+            Operation::MoveLocal,
+            Operation::DuplicateConflict,
+            Operation::AnchorOnly,
+            Operation::ForgetAnchor,
+            Operation::ConflictReview,
+            Operation::ReviewRequired,
+        ] {
+            assert_eq!(Operation::parse(operation.as_str()), Some(operation));
+        }
+        assert_eq!(Operation::parse("bogus"), None);
     }
 }

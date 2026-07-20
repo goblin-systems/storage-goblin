@@ -17,6 +17,12 @@ pub(crate) struct CycleOutcome {
     pub uploaded: Vec<String>,
     pub downloaded: Vec<String>,
     pub directories_created: Vec<String>,
+    pub deleted_remote: Vec<String>,
+    pub deleted_local: Vec<String>,
+    /// (from, to) pairs executed as moves.
+    pub moved: Vec<(String, String)>,
+    /// Paths whose anchors were written or dropped without a transfer.
+    pub anchored: Vec<String>,
     /// Paths the planner parked for human review (`conflict_review` /
     /// `review_required`).
     pub review: Vec<String>,
@@ -27,6 +33,17 @@ pub(crate) struct CycleOutcome {
 impl CycleOutcome {
     pub fn transfer_count(&self) -> usize {
         self.uploaded.len() + self.downloaded.len()
+    }
+
+    /// Anything that changed state this cycle (transfers, deletes, moves,
+    /// directory creation, anchor writes).
+    pub fn mutation_count(&self) -> usize {
+        self.transfer_count()
+            + self.directories_created.len()
+            + self.deleted_remote.len()
+            + self.deleted_local.len()
+            + self.moved.len()
+            + self.anchored.len()
     }
 }
 
@@ -228,6 +245,109 @@ impl SyncSimulator {
                         Err(error) => outcome.errors.push((item.path.clone(), error)),
                     }
                 }
+                "delete_remote" => match self.store.delete(&item.path) {
+                    Ok(()) => {
+                        self.anchors.remove(&item.path);
+                        outcome.deleted_remote.push(item.path.clone());
+                    }
+                    Err(error) => outcome.errors.push((item.path.clone(), error)),
+                },
+                "delete_local" => {
+                    // Production sends this to the OS trash; the simulator just
+                    // removes it from the in-memory tree.
+                    self.local_files.remove(&item.path);
+                    self.anchors.remove(&item.path);
+                    outcome.deleted_local.push(item.path.clone());
+                }
+                "move_remote" => {
+                    let Some(target) = item.target_path.clone() else {
+                        outcome.errors.push((
+                            item.path.clone(),
+                            SyncError::internal("move_remote without target_path".to_string()),
+                        ));
+                        continue;
+                    };
+                    match self
+                        .store
+                        .copy(&item.path, &target)
+                        .and_then(|record| self.store.delete(&item.path).map(|()| record))
+                    {
+                        Ok(record) => {
+                            self.anchors.remove(&item.path);
+                            if let Some(contents) = self.local_files.get(&target).cloned() {
+                                self.set_file_anchor(&target, &contents, &record);
+                            }
+                            outcome.moved.push((item.path.clone(), target));
+                        }
+                        Err(error) => outcome.errors.push((item.path.clone(), error)),
+                    }
+                }
+                "move_local" => {
+                    let Some(target) = item.target_path.clone() else {
+                        outcome.errors.push((
+                            item.path.clone(),
+                            SyncError::internal("move_local without target_path".to_string()),
+                        ));
+                        continue;
+                    };
+                    let Some(contents) = self.local_files.remove(&item.path) else {
+                        outcome.errors.push((
+                            item.path.clone(),
+                            SyncError::storage(format!("move source missing: '{}'", item.path)),
+                        ));
+                        continue;
+                    };
+                    self.local_files.insert(target.clone(), contents.clone());
+                    self.anchors.remove(&item.path);
+                    if let Ok(Some(record)) = self.store.head(&target) {
+                        self.set_file_anchor(&target, &contents, &record);
+                    }
+                    outcome.moved.push((item.path.clone(), target));
+                }
+                "duplicate_conflict" => {
+                    // Keep both: local edit moves to the conflict name and
+                    // uploads; the paired download restores the remote winner.
+                    let Some(target) = item.target_path.clone() else {
+                        outcome.errors.push((
+                            item.path.clone(),
+                            SyncError::internal(
+                                "duplicate_conflict without target_path".to_string(),
+                            ),
+                        ));
+                        continue;
+                    };
+                    let Some(contents) = self.local_files.remove(&item.path) else {
+                        outcome.errors.push((
+                            item.path.clone(),
+                            SyncError::storage(format!(
+                                "conflict duplicate source missing: '{}'",
+                                item.path
+                            )),
+                        ));
+                        continue;
+                    };
+                    self.local_files.insert(target.clone(), contents.clone());
+                    self.anchors.remove(&item.path);
+                    match self.store.put(&target, &contents) {
+                        Ok(record) => {
+                            self.set_file_anchor(&target, &contents, &record);
+                            outcome.uploaded.push(target);
+                        }
+                        Err(error) => outcome.errors.push((item.path.clone(), error)),
+                    }
+                }
+                "anchor_only" => {
+                    let contents = self.local_files.get(&item.path).cloned();
+                    let record = self.store.head(&item.path).ok().flatten();
+                    if let (Some(contents), Some(record)) = (contents, record) {
+                        self.set_file_anchor(&item.path, &contents, &record);
+                        outcome.anchored.push(item.path.clone());
+                    }
+                }
+                "forget_anchor" => {
+                    self.anchors.remove(&item.path);
+                    outcome.anchored.push(item.path.clone());
+                }
                 "conflict_review" | "review_required" => {
                     outcome.review.push(item.path.clone());
                 }
@@ -252,9 +372,7 @@ impl SyncSimulator {
         let mut outcomes = Vec::new();
         for _ in 0..max_cycles {
             let outcome = self.run_cycle()?;
-            let settled = outcome.transfer_count() == 0
-                && outcome.directories_created.is_empty()
-                && outcome.errors.is_empty();
+            let settled = outcome.mutation_count() == 0 && outcome.errors.is_empty();
             outcomes.push(outcome);
             if settled {
                 return Ok(outcomes);
@@ -306,5 +424,10 @@ fn record_to_entry(record: &ObjectRecord) -> RemoteObjectEntry {
         last_modified_at: None,
         etag: Some(record.etag.clone()),
         storage_class: record.storage_class.clone(),
+        fingerprint: if is_directory {
+            None
+        } else {
+            record.fingerprint.clone()
+        },
     }
 }

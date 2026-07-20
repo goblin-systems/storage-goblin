@@ -33,6 +33,7 @@ struct StoredObject {
     bytes: Vec<u8>,
     etag: String,
     storage_class: Option<String>,
+    fingerprint: String,
 }
 
 #[derive(Debug)]
@@ -117,6 +118,7 @@ impl MemoryObjectStore {
             bytes: bytes.to_vec(),
             etag,
             storage_class: None,
+            fingerprint: bytes_fingerprint(bytes),
         }
     }
 
@@ -141,6 +143,7 @@ impl MemoryObjectStore {
             size: object.bytes.len() as u64,
             etag: object.etag.clone(),
             storage_class: object.storage_class.clone(),
+            fingerprint: Some(object.fingerprint.clone()),
         }
     }
 }

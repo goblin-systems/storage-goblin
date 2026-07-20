@@ -159,6 +159,7 @@ mod tests {
                     last_modified_at: None,
                     etag: None,
                     storage_class: None,
+                    fingerprint: None,
                 },
                 RemoteObjectEntry {
                     key: "gamma.txt".into(),
@@ -168,6 +169,7 @@ mod tests {
                     last_modified_at: None,
                     etag: None,
                     storage_class: None,
+                    fingerprint: None,
                 },
             ],
         };
@@ -209,6 +211,7 @@ mod tests {
                 last_modified_at: None,
                 etag: None,
                 storage_class: None,
+                fingerprint: None,
             }],
         };
 
@@ -244,6 +247,7 @@ mod tests {
                 last_modified_at: None,
                 etag: None,
                 storage_class: None,
+                fingerprint: None,
             }],
         };
 
@@ -293,6 +297,7 @@ mod tests {
                     last_modified_at: None,
                     etag: None,
                     storage_class: None,
+                    fingerprint: None,
                 },
                 RemoteObjectEntry {
                     key: "nested/alpha.txt".into(),
@@ -302,6 +307,7 @@ mod tests {
                     last_modified_at: None,
                     etag: None,
                     storage_class: None,
+                    fingerprint: None,
                 },
             ],
         };
@@ -335,6 +341,7 @@ mod tests {
                     last_modified_at: None,
                     etag: None,
                     storage_class: None,
+                    fingerprint: None,
                 },
                 RemoteObjectEntry {
                     key: "frozen.txt".into(),
@@ -344,6 +351,7 @@ mod tests {
                     last_modified_at: None,
                     etag: None,
                     storage_class: Some("GLACIER_IR".into()),
+                    fingerprint: None,
                 },
             ],
         };
@@ -384,6 +392,7 @@ mod tests {
                 last_modified_at: None,
                 etag: None,
                 storage_class: None,
+                fingerprint: None,
             }],
         };
 

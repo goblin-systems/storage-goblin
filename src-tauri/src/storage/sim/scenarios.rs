@@ -80,17 +80,23 @@ fn remote_edit_downloads() {
 }
 
 #[test]
-fn both_edited_preserve_both_parks_for_review() {
-    // Phase 1.2 changes this: `preserve-both` should duplicate with a
-    // conflict suffix instead of parking (see truth case below).
+fn both_edited_preserve_both_keeps_both_versions_everywhere() {
     let mut sim = SyncSimulator::new();
     sim.seed_synced_file("a.txt", b"v1");
     sim.write_local("a.txt", b"local v2");
     sim.write_remote("a.txt", b"remote v2");
 
-    let outcome = sim.run_cycle().expect("cycle");
-    assert_eq!(outcome.review, vec!["a.txt"]);
-    assert_eq!(outcome.transfer_count(), 0);
+    sim.run_until_settled(4).expect("settle");
+    assert!(sim.is_converged());
+    assert_eq!(sim.local_files.len(), 2, "original + conflict copy");
+    assert_eq!(sim.local_files["a.txt"], b"remote v2");
+    let conflict_path = sim
+        .local_files
+        .keys()
+        .find(|path| path.contains("(conflict"))
+        .expect("conflict copy exists")
+        .clone();
+    assert_eq!(sim.local_files[&conflict_path], b"local v2");
 }
 
 #[test]
@@ -149,15 +155,15 @@ fn cold_storage_object_is_skipped() {
 }
 
 #[test]
-fn unanchored_same_content_both_sides_parks_for_review() {
-    // Phase 1.3 changes this: identical content should silently anchor
-    // (see `identical_first_sync_requires_no_transfers`).
+fn unanchored_same_content_both_sides_anchors_silently() {
     let mut sim = SyncSimulator::new();
     sim.write_local("shared.txt", b"same bytes");
     sim.write_remote("shared.txt", b"same bytes");
 
     let outcome = sim.run_cycle().expect("cycle");
-    assert_eq!(outcome.review, vec!["shared.txt"]);
+    assert_eq!(outcome.anchored, vec!["shared.txt"]);
+    assert_eq!(outcome.transfer_count(), 0);
+    assert!(outcome.review.is_empty());
 }
 
 #[test]
@@ -183,35 +189,30 @@ fn mixed_adds_converge() {
 }
 
 #[test]
-fn local_delete_currently_parks_for_review() {
-    // KNOWN GAP (phase 1.1): the delete should propagate to the remote side.
-    // This test documents today's behavior; the truth case below asserts the
-    // correct one.
+fn local_delete_with_concurrent_remote_edit_parks_for_review() {
+    // The genuinely ambiguous case: the file was deleted here but edited
+    // there. Never auto-resolve; a human decides.
     let mut sim = SyncSimulator::new();
     sim.seed_synced_file("a.txt", b"v1");
     sim.delete_local("a.txt");
+    sim.write_remote("a.txt", b"v2 remote edit");
 
     let outcome = sim.run_cycle().expect("cycle");
     assert_eq!(outcome.review, vec!["a.txt"]);
-    assert!(
-        sim.remote_files().contains_key("a.txt"),
-        "remote copy is stranded"
-    );
+    assert!(sim.remote_files().contains_key("a.txt"));
 }
 
 #[test]
-fn remote_delete_currently_parks_for_review() {
-    // KNOWN GAP (phase 1.1): the delete should propagate to the local side.
+fn remote_delete_with_concurrent_local_edit_parks_for_review() {
+    // Mirror ambiguity: deleted there, edited here.
     let mut sim = SyncSimulator::new();
     sim.seed_synced_file("a.txt", b"v1");
     sim.delete_remote("a.txt");
+    sim.write_local("a.txt", b"v2 local edit");
 
     let outcome = sim.run_cycle().expect("cycle");
     assert_eq!(outcome.review, vec!["a.txt"]);
-    assert!(
-        sim.local_files.contains_key("a.txt"),
-        "local copy is stranded"
-    );
+    assert!(sim.local_files.contains_key("a.txt"));
 }
 
 #[test]
@@ -279,7 +280,6 @@ fn plan_summary_counts_match_queue() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "phase 1.1: delete propagation (backlog/phase-1-sync-correctness.md)"]
 fn truth_local_delete_propagates_to_remote() {
     let mut sim = SyncSimulator::new();
     sim.seed_synced_file("a.txt", b"v1");
@@ -291,7 +291,6 @@ fn truth_local_delete_propagates_to_remote() {
 }
 
 #[test]
-#[ignore = "phase 1.1: delete propagation (backlog/phase-1-sync-correctness.md)"]
 fn truth_remote_delete_propagates_to_local() {
     let mut sim = SyncSimulator::new();
     sim.seed_synced_file("a.txt", b"v1");
@@ -303,7 +302,6 @@ fn truth_remote_delete_propagates_to_local() {
 }
 
 #[test]
-#[ignore = "phase 1.1: rename detection (backlog/phase-1-sync-correctness.md)"]
 fn truth_rename_propagates_without_review() {
     let mut sim = SyncSimulator::new();
     sim.seed_synced_file("old-name.txt", b"contents");
@@ -318,7 +316,6 @@ fn truth_rename_propagates_without_review() {
 }
 
 #[test]
-#[ignore = "phase 1.2: preserve-both must duplicate, not park (backlog/phase-1-sync-correctness.md)"]
 fn truth_preserve_both_duplicates_on_conflict() {
     let mut sim = SyncSimulator::new();
     sim.seed_synced_file("a.txt", b"v1");
@@ -333,7 +330,6 @@ fn truth_preserve_both_duplicates_on_conflict() {
 }
 
 #[test]
-#[ignore = "phase 1.3: identical first sync must merge silently (backlog/phase-1-sync-correctness.md)"]
 fn truth_identical_first_sync_requires_no_transfers() {
     let mut sim = SyncSimulator::new();
     sim.write_local("shared.txt", b"same bytes");
@@ -362,14 +358,19 @@ impl CycleOutcomeExt for super::simulator::CycleOutcome {
 }
 
 // ---------------------------------------------------------------------------
-// Property-style convergence skeleton (phase 1 enables and promotes to
-// proptest once delete propagation exists — random sequences that include
-// deletes cannot converge today).
+// Property-style convergence test (promote to proptest per phase 1.5).
+//
+// Full convergence is NOT the invariant: random sequences produce genuinely
+// ambiguous states (same path created differently on both sides, or
+// deleted-here-edited-there), which must park for review rather than
+// auto-resolve. The invariant is:
+//   1. the engine settles in bounded cycles,
+//   2. every path where local and remote still differ is parked for review —
+//      silent divergence is the bug class this guards against.
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "phase 1.5: enable once deletes propagate; promote to proptest (backlog/phase-1-sync-correctness.md)"]
-fn truth_random_mutation_sequences_converge_without_loss() {
+fn truth_random_mutation_sequences_settle_with_no_silent_divergence() {
     for seed in 0_u64..25 {
         let mut rng = Lcg::new(seed);
         let mut sim = SyncSimulator::new();
@@ -385,9 +386,32 @@ fn truth_random_mutation_sequences_converge_without_loss() {
             }
         }
 
-        sim.run_until_settled(10)
+        let outcomes = sim
+            .run_until_settled(10)
             .unwrap_or_else(|error| panic!("seed {seed} failed to settle: {error}"));
-        assert!(sim.is_converged(), "seed {seed} diverged");
+
+        let review: std::collections::BTreeSet<String> = outcomes
+            .last()
+            .expect("at least one cycle")
+            .review
+            .iter()
+            .cloned()
+            .collect();
+
+        let remote = sim.remote_files();
+        let mut divergent: Vec<String> = Vec::new();
+        for path in sim.local_files.keys().chain(remote.keys()) {
+            if sim.local_files.get(path) != remote.get(path) && !divergent.contains(path) {
+                divergent.push(path.clone());
+            }
+        }
+
+        for path in &divergent {
+            assert!(
+                review.contains(path),
+                "seed {seed}: path '{path}' diverged silently (not parked for review)"
+            );
+        }
     }
 }
 
