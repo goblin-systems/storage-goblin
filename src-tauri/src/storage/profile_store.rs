@@ -13,19 +13,17 @@ use super::{
     LOCAL_INDEX_FILE_NAME, PROFILE_FILE_NAME, REMOTE_INDEX_FILE_NAME,
 };
 
+use super::model::ConflictStrategy;
+
 const DEFAULT_REMOTE_BIN_RETENTION_DAYS: u32 = 7;
 
-const CONFLICT_STRATEGY_PRESERVE_BOTH: &str = "preserve-both";
-const CONFLICT_STRATEGY_PREFER_LOCAL: &str = "prefer-local";
-const CONFLICT_STRATEGY_PREFER_REMOTE: &str = "prefer-remote";
-
+/// Persisted strategies are normalized through the typed enum, so an unknown
+/// or malformed value always lands on the safe default rather than reaching
+/// the planner as an unrecognised string.
 pub fn normalize_conflict_strategy(value: &str) -> String {
-    match value.trim() {
-        CONFLICT_STRATEGY_PRESERVE_BOTH => CONFLICT_STRATEGY_PRESERVE_BOTH.into(),
-        CONFLICT_STRATEGY_PREFER_LOCAL => CONFLICT_STRATEGY_PREFER_LOCAL.into(),
-        CONFLICT_STRATEGY_PREFER_REMOTE => CONFLICT_STRATEGY_PREFER_REMOTE.into(),
-        _ => CONFLICT_STRATEGY_PRESERVE_BOTH.into(),
-    }
+    ConflictStrategy::parse_or_default(value.trim())
+        .as_str()
+        .to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -134,7 +132,7 @@ impl Default for StoredProfile {
             bucket: String::new(),
             remote_polling_enabled: true,
             poll_interval_seconds: 60,
-            conflict_strategy: CONFLICT_STRATEGY_PRESERVE_BOTH.into(),
+            conflict_strategy: ConflictStrategy::default().as_str().into(),
             remote_bin: RemoteBinConfig::default(),
             activity_debug_mode_enabled: false,
             credential_profile_id: None,
@@ -182,7 +180,7 @@ impl Default for PersistedProfile {
             bucket: String::new(),
             remote_polling_enabled: true,
             poll_interval_seconds: 60,
-            conflict_strategy: CONFLICT_STRATEGY_PRESERVE_BOTH.into(),
+            conflict_strategy: ConflictStrategy::default().as_str().into(),
             remote_bin: Some(RemoteBinConfig::default()),
             delete_safety_hours: None,
             activity_debug_mode_enabled: false,
@@ -463,7 +461,7 @@ impl Default for SyncPair {
             enabled: true,
             remote_polling_enabled: true,
             poll_interval_seconds: 60,
-            conflict_strategy: CONFLICT_STRATEGY_PRESERVE_BOTH.into(),
+            conflict_strategy: ConflictStrategy::default().as_str().into(),
             remote_bin: RemoteBinConfig::default(),
         }
     }
@@ -688,12 +686,12 @@ pub fn write_profile_to_disk<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
+    use crate::storage::model::ConflictStrategy;
+
     use super::{
         is_pair_configured, migrate_flat_fields_to_sync_pairs, normalize_conflict_strategy,
         validate_bucket_pair_invariant, PersistedProfile, PersistedSyncPair, ProfileDraft,
         RemoteBinConfig, SelectedCredentialState, StoredProfile, SyncPair,
-        CONFLICT_STRATEGY_PREFER_LOCAL, CONFLICT_STRATEGY_PREFER_REMOTE,
-        CONFLICT_STRATEGY_PRESERVE_BOTH,
     };
     use crate::storage::credentials_store::CredentialSummary;
     use crate::storage::provider::GCS_PROVIDER;
@@ -734,26 +732,29 @@ mod tests {
         assert!(stored.selected_credential.is_none());
         assert!(!stored.selected_credential_available);
         assert!(!stored.credentials_stored_securely);
-        assert_eq!(stored.conflict_strategy, CONFLICT_STRATEGY_PRESERVE_BOTH);
+        assert_eq!(
+            stored.conflict_strategy,
+            ConflictStrategy::PreserveBoth.as_str()
+        );
     }
 
     #[test]
     fn normalize_conflict_strategy_accepts_valid_values_and_falls_back() {
         assert_eq!(
             normalize_conflict_strategy("preserve-both"),
-            CONFLICT_STRATEGY_PRESERVE_BOTH
+            ConflictStrategy::PreserveBoth.as_str()
         );
         assert_eq!(
             normalize_conflict_strategy("prefer-local"),
-            CONFLICT_STRATEGY_PREFER_LOCAL
+            ConflictStrategy::PreferLocal.as_str()
         );
         assert_eq!(
             normalize_conflict_strategy("prefer-remote"),
-            CONFLICT_STRATEGY_PREFER_REMOTE
+            ConflictStrategy::PreferRemote.as_str()
         );
         assert_eq!(
             normalize_conflict_strategy("ignored"),
-            CONFLICT_STRATEGY_PRESERVE_BOTH
+            ConflictStrategy::PreserveBoth.as_str()
         );
     }
 
@@ -868,7 +869,10 @@ mod tests {
         assert_eq!(pair.credential_profile_id.as_deref(), Some("cred-1"));
         assert!(pair.object_versioning_enabled);
         assert_eq!(pair.poll_interval_seconds, 15);
-        assert_eq!(pair.conflict_strategy, CONFLICT_STRATEGY_PRESERVE_BOTH);
+        assert_eq!(
+            pair.conflict_strategy,
+            ConflictStrategy::PreserveBoth.as_str()
+        );
         assert_eq!(
             pair.remote_bin,
             RemoteBinConfig {
@@ -954,7 +958,10 @@ mod tests {
         assert_eq!(restored.bucket, "my-bucket");
         assert_eq!(restored.poll_interval_seconds, 120);
         assert!(!restored.enabled);
-        assert_eq!(restored.conflict_strategy, CONFLICT_STRATEGY_PRESERVE_BOTH);
+        assert_eq!(
+            restored.conflict_strategy,
+            ConflictStrategy::PreserveBoth.as_str()
+        );
         assert_eq!(
             restored.remote_bin,
             RemoteBinConfig {
@@ -1184,7 +1191,7 @@ mod tests {
         assert_eq!(profile.sync_pairs[0].bucket, "my-bucket");
         assert_eq!(
             profile.sync_pairs[0].conflict_strategy,
-            CONFLICT_STRATEGY_PRESERVE_BOTH
+            ConflictStrategy::PreserveBoth.as_str()
         );
         assert_eq!(profile.remote_bin.retention_days, 7);
         assert!(!profile.sync_pairs[0].remote_bin.enabled);
@@ -1193,19 +1200,22 @@ mod tests {
     #[test]
     fn stored_profile_normalization_keeps_valid_conflict_strategies() {
         let profile = StoredProfile {
-            conflict_strategy: CONFLICT_STRATEGY_PREFER_REMOTE.into(),
+            conflict_strategy: ConflictStrategy::PreferRemote.as_str().into(),
             sync_pairs: vec![SyncPair {
-                conflict_strategy: CONFLICT_STRATEGY_PREFER_LOCAL.into(),
+                conflict_strategy: ConflictStrategy::PreferLocal.as_str().into(),
                 ..SyncPair::default()
             }],
             ..StoredProfile::default()
         }
         .normalized();
 
-        assert_eq!(profile.conflict_strategy, CONFLICT_STRATEGY_PREFER_REMOTE);
+        assert_eq!(
+            profile.conflict_strategy,
+            ConflictStrategy::PreferRemote.as_str()
+        );
         assert_eq!(
             profile.sync_pairs[0].conflict_strategy,
-            CONFLICT_STRATEGY_PREFER_LOCAL
+            ConflictStrategy::PreferLocal.as_str()
         );
     }
 

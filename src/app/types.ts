@@ -1,6 +1,10 @@
-export const CONFLICT_STRATEGIES = ["preserve-both", "prefer-local", "prefer-remote"] as const;
+// The domain vocabulary is generated from the Rust enums so the two cannot
+// drift; see src-tauri/src/storage/model.rs.
+export type { EntryKind, FileEntryStatus, QueueStatus } from "./generated/domain";
+export { CONFLICT_STRATEGIES } from "./generated/domain";
+export type { ConflictStrategy } from "./generated/domain";
 
-export type ConflictStrategy = (typeof CONFLICT_STRATEGIES)[number];
+import type { ConflictStrategy } from "./generated/domain";
 
 export const PROVIDERS = ["aws", "gcs"] as const;
 
@@ -489,7 +493,8 @@ export function normalizeCredentialSummaryRecord(value: unknown): CredentialSumm
   };
 }
 
-export type SyncPhase = "unconfigured" | "idle" | "polling" | "syncing" | "paused" | "error";
+export type { SyncPhase } from "./generated/domain";
+import type { SyncPhase } from "./generated/domain";
 
 export interface CredentialTestContext {
   provider: Provider;

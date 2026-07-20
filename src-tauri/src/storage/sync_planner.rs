@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     local_index::LocalIndexSnapshot,
+    model::{ConflictStrategy, EntryKind, FileEntryStatus},
     now_iso,
-    profile_store::normalize_conflict_strategy,
     remote_index::{is_cold_storage_class, RemoteIndexSnapshot},
     sync_db::SyncAnchor,
 };
@@ -89,14 +89,14 @@ const AUTO_DELETE_RATIO_MIN_ANCHORS: u64 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LocalIndexedEntry {
-    kind: String,
+    kind: EntryKind,
     size: u64,
     fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RemoteIndexedEntry {
-    kind: String,
+    kind: EntryKind,
     size: u64,
     etag: Option<String>,
     storage_class: Option<String>,
@@ -189,23 +189,22 @@ pub(crate) fn file_entry_status(
     anchor: Option<&SyncAnchor>,
     current_local_fingerprint: Option<&str>,
     current_remote_etag: Option<&str>,
-) -> &'static str {
+) -> FileEntryStatus {
     match decide_file_sync(
         anchor,
         current_local_fingerprint,
         current_remote_etag,
         None,
-        "preserve-both",
+        ConflictStrategy::PreserveBoth,
     ) {
         FileSyncDecision::Noop | FileSyncDecision::AnchorOnly | FileSyncDecision::ForgetAnchor => {
-            "synced"
+            FileEntryStatus::Synced
         }
-        FileSyncDecision::Upload => "local-only",
-        FileSyncDecision::Download => "remote-only",
-        FileSyncDecision::DeleteRemote => "remote-only",
-        FileSyncDecision::DeleteLocal => "local-only",
-        FileSyncDecision::DuplicateConflict => "conflict",
-        FileSyncDecision::ReviewRequired => "review-required",
+        // A pending delete still shows as present on the surviving side.
+        FileSyncDecision::Upload | FileSyncDecision::DeleteLocal => FileEntryStatus::LocalOnly,
+        FileSyncDecision::Download | FileSyncDecision::DeleteRemote => FileEntryStatus::RemoteOnly,
+        FileSyncDecision::DuplicateConflict => FileEntryStatus::Conflict,
+        FileSyncDecision::ReviewRequired => FileEntryStatus::ReviewRequired,
     }
 }
 
@@ -216,17 +215,17 @@ pub fn build_sync_plan(
     conflict_strategy: &str,
     credentials_available: bool,
 ) -> SyncPlan {
-    let normalized_conflict_strategy = normalize_conflict_strategy(conflict_strategy);
+    let strategy = ConflictStrategy::parse_or_default(conflict_strategy);
     let local_entries = local_entry_map(local_snapshot);
     let remote_entries = remote_entry_map(remote_snapshot);
     let local_file_count = local_entries
         .values()
-        .filter(|entry| entry.kind == "file")
+        .filter(|entry| entry.kind == EntryKind::File)
         .count() as u64;
     let remote_object_count = remote_entries
         .values()
         .filter(|entry| {
-            entry.kind == "file" && !is_cold_storage_class(entry.storage_class.as_deref())
+            entry.kind == EntryKind::File && !is_cold_storage_class(entry.storage_class.as_deref())
         })
         .count() as u64;
     let anchored_file_count = anchors
@@ -264,7 +263,7 @@ pub fn build_sync_plan(
         }
 
         match (local, remote) {
-            (Some(local), None) if local.kind == "directory" => {
+            (Some(local), None) if local.kind.is_directory() => {
                 create_directory_count += 1;
                 observed_entries.push(ObservedEntry {
                     path: path.clone(),
@@ -283,7 +282,7 @@ pub fn build_sync_plan(
                 });
             }
             (Some(local), Some(remote))
-                if local.kind == "directory" && remote.kind == "directory" =>
+                if local.kind.is_directory() && remote.kind.is_directory() =>
             {
                 noop_count += 1;
                 observed_entries.push(ObservedEntry {
@@ -293,7 +292,7 @@ pub fn build_sync_plan(
                     resolution: "noop".into(),
                 });
             }
-            (None, Some(remote)) if remote.kind == "directory" => {
+            (None, Some(remote)) if remote.kind.is_directory() => {
                 noop_count += 1;
                 observed_entries.push(ObservedEntry {
                     path,
@@ -321,8 +320,8 @@ pub fn build_sync_plan(
                 });
             }
             (local, remote)
-                if local.is_none_or(|entry| entry.kind == "file")
-                    && remote.is_none_or(|entry| entry.kind == "file") =>
+                if local.is_none_or(|entry| entry.kind == EntryKind::File)
+                    && remote.is_none_or(|entry| entry.kind == EntryKind::File) =>
             {
                 if local.is_none() && remote.is_none() && anchor.is_none() {
                     continue;
@@ -332,7 +331,7 @@ pub fn build_sync_plan(
                     local.and_then(|entry| entry.fingerprint.as_deref()),
                     remote.and_then(|entry| entry.etag.as_deref()),
                     remote.and_then(|entry| entry.fingerprint.as_deref()),
-                    normalized_conflict_strategy.as_str(),
+                    strategy,
                 );
                 actions.push(PlannedAction {
                     path,
@@ -702,7 +701,7 @@ fn decide_file_sync(
     current_local_fingerprint: Option<&str>,
     current_remote_etag: Option<&str>,
     current_remote_fingerprint: Option<&str>,
-    conflict_strategy: &str,
+    strategy: ConflictStrategy,
 ) -> FileSyncDecision {
     let Some(anchor) = anchor.filter(|anchor| anchor.kind == "file") else {
         // No sync history for this path.
@@ -731,10 +730,10 @@ fn decide_file_sync(
                 (false, false) => FileSyncDecision::Noop,
                 (true, false) => FileSyncDecision::Upload,
                 (false, true) => FileSyncDecision::Download,
-                (true, true) => match conflict_strategy {
-                    "prefer-local" => FileSyncDecision::Upload,
-                    "prefer-remote" => FileSyncDecision::Download,
-                    _ => FileSyncDecision::DuplicateConflict,
+                (true, true) => match strategy {
+                    ConflictStrategy::PreferLocal => FileSyncDecision::Upload,
+                    ConflictStrategy::PreferRemote => FileSyncDecision::Download,
+                    ConflictStrategy::PreserveBoth => FileSyncDecision::DuplicateConflict,
                 },
             }
         }
@@ -788,13 +787,13 @@ trait FileSized {
 
 impl FileSized for LocalIndexedEntry {
     fn file_size(&self) -> Option<u64> {
-        (self.kind == "file").then_some(self.size)
+        (self.kind == EntryKind::File).then_some(self.size)
     }
 }
 
 impl FileSized for RemoteIndexedEntry {
     fn file_size(&self) -> Option<u64> {
-        (self.kind == "file").then_some(self.size)
+        (self.kind == EntryKind::File).then_some(self.size)
     }
 }
 
@@ -806,7 +805,7 @@ fn local_entry_map(snapshot: &LocalIndexSnapshot) -> BTreeMap<String, LocalIndex
             (
                 entry.relative_path.clone(),
                 LocalIndexedEntry {
-                    kind: entry.kind.clone(),
+                    kind: EntryKind::parse_or_file(&entry.kind),
                     size: entry.size,
                     fingerprint: entry.fingerprint.clone(),
                 },
@@ -823,7 +822,7 @@ fn remote_entry_map(snapshot: &RemoteIndexSnapshot) -> BTreeMap<String, RemoteIn
             (
                 entry.relative_path.clone(),
                 RemoteIndexedEntry {
-                    kind: entry.kind.clone(),
+                    kind: EntryKind::parse_or_file(&entry.kind),
                     size: entry.size,
                     etag: entry.etag.clone(),
                     storage_class: entry.storage_class.clone(),

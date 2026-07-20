@@ -10,6 +10,7 @@ use tauri::{Manager, State};
 use super::{
     inventory_compare::{compare_snapshots, InventoryComparisonSummary},
     local_index::LocalIndexSnapshot,
+    model::{aggregate_phase, SyncPhase},
     profile_store::{is_pair_configured, is_profile_configured, StoredProfile, SyncPair},
     remote_index::RemoteIndexSnapshot,
     sync_db::DurablePlannerSummary,
@@ -657,23 +658,13 @@ pub(crate) fn synthesize_status_from_pairs(pair_statuses: &[PairSyncStatus]) -> 
         return SyncStatus::default();
     }
 
-    // Phase priority: syncing > polling > error > paused > unconfigured > idle
-    let phase = if pair_statuses.iter().any(|s| s.phase == "syncing") {
-        "syncing"
-    } else if pair_statuses.iter().any(|s| s.phase == "polling") {
-        "polling"
-    } else if pair_statuses.iter().any(|s| s.phase == "error") {
-        "error"
-    } else if pair_statuses
-        .iter()
-        .all(|s| s.phase == "paused" || s.phase == "unconfigured")
-    {
-        "paused"
-    } else if pair_statuses.iter().all(|s| s.phase == "unconfigured") {
-        "unconfigured"
-    } else {
-        "idle"
-    };
+    let phase = aggregate_phase(
+        &pair_statuses
+            .iter()
+            .map(|status| SyncPhase::parse(&status.phase).unwrap_or(SyncPhase::Unconfigured))
+            .collect::<Vec<_>>(),
+    )
+    .as_str();
 
     // Most-recent timestamp helper (lexicographic max of ISO-8601 strings)
     fn most_recent(opts: impl Iterator<Item = Option<String>>) -> Option<String> {
@@ -864,22 +855,15 @@ pub(crate) fn aggregate_pair_statuses(statuses: &[PairSyncStatus]) -> AggregateS
         .filter(|s| s.phase != "unconfigured")
         .count();
 
-    let aggregate_phase = if statuses.is_empty() {
-        "unconfigured".into()
-    } else if statuses.iter().any(|s| s.phase == "syncing") {
-        "syncing".into()
-    } else if statuses.iter().any(|s| s.phase == "polling") {
-        "polling".into()
-    } else if statuses.iter().any(|s| s.phase == "error") {
-        "error".into()
-    } else if statuses
-        .iter()
-        .all(|s| s.phase == "paused" || s.phase == "unconfigured")
-    {
-        "paused".into()
-    } else {
-        "idle".into()
-    };
+    // Same rules as synthesize_status_from_pairs — one implementation now.
+    let aggregate_phase = aggregate_phase(
+        &statuses
+            .iter()
+            .map(|status| SyncPhase::parse(&status.phase).unwrap_or(SyncPhase::Unconfigured))
+            .collect::<Vec<_>>(),
+    )
+    .as_str()
+    .to_string();
 
     AggregateSyncStatus {
         pair_count: statuses.len(),

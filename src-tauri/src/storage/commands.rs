@@ -44,6 +44,7 @@ use super::{
         read_local_index_snapshot, read_local_index_snapshot_for_pair, scan_local_folder,
         write_local_index_snapshot_for_pair, LocalIndexSnapshot,
     },
+    model::FileEntryStatus,
     now_iso, object_store,
     platform::{
         cleanup_empty_ancestors, normalize_directory_delete_path, open_path_with_default_app,
@@ -1966,17 +1967,19 @@ pub(crate) fn build_file_entry_responses(
             });
 
             let status = match (in_local, in_remote) {
-                (Some(local), Some(remote)) if local.kind != remote.kind => "conflict",
+                (Some(local), Some(remote)) if local.kind != remote.kind => {
+                    FileEntryStatus::Conflict
+                }
                 (Some(local), Some(_remote)) if local.kind == "directory" => {
                     if remote_is_glacier {
-                        "glacier"
+                        FileEntryStatus::Glacier
                     } else {
-                        "synced"
+                        FileEntryStatus::Synced
                     }
                 }
                 (Some(_local), Some(_remote)) => {
                     if remote_is_glacier {
-                        "glacier"
+                        FileEntryStatus::Glacier
                     } else {
                         let current_local_fingerprint = local_snapshot
                             .and_then(|snapshot| local_fingerprint_for_path(snapshot, path));
@@ -1989,9 +1992,9 @@ pub(crate) fn build_file_entry_responses(
                         )
                     }
                 }
-                (Some(_), None) => "local-only",
-                (None, Some(_remote)) if remote_is_glacier => "glacier",
-                (None, Some(_)) => "remote-only",
+                (Some(_), None) => FileEntryStatus::LocalOnly,
+                (None, Some(_remote)) if remote_is_glacier => FileEntryStatus::Glacier,
+                (None, Some(_)) => FileEntryStatus::RemoteOnly,
                 (None, None) => unreachable!(),
             };
 
@@ -2001,7 +2004,7 @@ pub(crate) fn build_file_entry_responses(
                     .map(|entry| entry.kind.clone())
                     .or_else(|| in_remote.map(|entry| entry.kind.clone()))
                     .expect("listed entries must exist in either snapshot"),
-                status: status.into(),
+                status: status.as_str().into(),
                 has_local_copy: in_local.is_some(),
                 storage_class: in_remote.and_then(|entry| entry.storage_class.clone()),
                 bin_key: None,
@@ -4178,7 +4181,7 @@ mod tests {
             None,
         );
         assert_eq!(docs_entry.kind, "file");
-        assert_eq!(docs_entry.status, expected_status);
+        assert_eq!(docs_entry.status, expected_status.as_str());
         assert!(docs_entry.has_local_copy);
         assert!(entries.iter().any(|entry| {
             entry.path == "local-only-dir"
@@ -4220,7 +4223,7 @@ mod tests {
             None,
         );
         assert_eq!(changed_entry.kind, "file");
-        assert_eq!(changed_entry.status, expected_status);
+        assert_eq!(changed_entry.status, expected_status.as_str());
         assert!(changed_entry.has_local_copy);
         assert_eq!(changed_entry.local_kind.as_deref(), Some("file"));
         assert_eq!(changed_entry.remote_kind.as_deref(), Some("file"));

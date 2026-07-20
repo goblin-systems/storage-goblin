@@ -6,3 +6,7 @@ bun.lock
 *.md
 index.html
 src/styles.css
+
+# Rendered from the Rust domain enums; formatting is fixed by the generator
+# and a drift test compares it byte-for-byte.
+src/app/generated/

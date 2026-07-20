@@ -6,10 +6,29 @@ use tauri::{AppHandle, Runtime};
 
 use super::{
     app_storage_path,
+    model::QueueStatus,
     profile_store::{StoredProfile, SyncPair},
     sync_planner::SyncPlan,
     SYNC_DB_FILE_NAME,
 };
+
+/// The queue statuses an executor may pick up, rendered for a SQL `IN` clause.
+/// Derived from [`QueueStatus::is_runnable`] so the schema and the type cannot
+/// disagree about what "runnable" means.
+fn runnable_queue_status_sql() -> String {
+    [
+        QueueStatus::Planned,
+        QueueStatus::InProgress,
+        QueueStatus::Completed,
+        QueueStatus::Failed,
+        QueueStatus::Interrupted,
+    ]
+    .into_iter()
+    .filter(|status| status.is_runnable())
+    .map(|status| format!("'{}'", status.as_str()))
+    .collect::<Vec<_>>()
+    .join(", ")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -286,10 +305,15 @@ fn load_planned_upload_queue_from_path(
     let connection = open_connection(path)?;
     let mut statement = connection
         .prepare(
-            "SELECT id, path, operation, target_path, local_size, remote_size, expected_local_fingerprint, expected_remote_etag
-             FROM sync_queue
-             WHERE profile_key = ?1 AND operation IN ('upload', 'create_directory', 'delete_remote', 'move_remote', 'duplicate_conflict', 'anchor_only', 'forget_anchor') AND queue_status IN ('planned', 'interrupted')
-             ORDER BY id ASC",
+            &format!(
+                "SELECT id, path, operation, target_path, local_size, remote_size, expected_local_fingerprint, expected_remote_etag
+                 FROM sync_queue
+                 WHERE profile_key = ?1
+                   AND operation IN ('upload', 'create_directory', 'delete_remote', 'move_remote', 'duplicate_conflict', 'anchor_only', 'forget_anchor')
+                   AND queue_status IN ({})
+                 ORDER BY id ASC",
+                runnable_queue_status_sql()
+            ),
         )
         .map_err(|error| format!("failed to prepare planned upload queue query: {error}"))?;
 
@@ -596,13 +620,16 @@ fn load_planned_download_queue_from_path(
 ) -> Result<Vec<PlannedDownloadQueueItem>, String> {
     let connection = open_connection(path)?;
     let mut statement = connection
-        .prepare(
-            "SELECT id, path, operation, target_path, local_size, remote_size
-             , expected_local_fingerprint, expected_remote_etag
-             FROM sync_queue
-             WHERE profile_key = ?1 AND operation IN ('download', 'delete_local', 'move_local') AND queue_status IN ('planned', 'interrupted')
-             ORDER BY id ASC",
-        )
+        .prepare(&format!(
+            "SELECT id, path, operation, target_path, local_size, remote_size,
+                        expected_local_fingerprint, expected_remote_etag
+                 FROM sync_queue
+                 WHERE profile_key = ?1
+                   AND operation IN ('download', 'delete_local', 'move_local')
+                   AND queue_status IN ({})
+                 ORDER BY id ASC",
+            runnable_queue_status_sql()
+        ))
         .map_err(|error| format!("failed to prepare planned download queue query: {error}"))?;
 
     let rows = statement
@@ -2246,5 +2273,34 @@ mod tests {
             .expect("absent anchor delete should succeed");
 
         let _ = fs::remove_file(&db_path);
+    }
+
+    /// The queue-status strings are written directly into this module's SQL.
+    /// If the enum's wire values ever drift from the schema, every queue query
+    /// silently stops matching rows — so pin them here, next to the SQL.
+    #[test]
+    fn queue_status_enum_matches_the_strings_used_in_this_module_sql() {
+        use crate::storage::model::QueueStatus;
+
+        let source = include_str!("sync_db.rs");
+        for status in [
+            QueueStatus::Planned,
+            QueueStatus::InProgress,
+            QueueStatus::Completed,
+            QueueStatus::Failed,
+            QueueStatus::Interrupted,
+        ] {
+            let literal = format!("'{}'", status.as_str());
+            assert!(
+                source.contains(&literal),
+                "QueueStatus::{status:?} serializes to {literal}, which no longer appears in sync_db SQL"
+            );
+        }
+
+        // The runnable set the loaders select on is derived from the type.
+        assert_eq!(
+            super::runnable_queue_status_sql(),
+            "'planned', 'interrupted'"
+        );
     }
 }

@@ -17,6 +17,7 @@ pub mod gcs_adapter;
 pub mod inventory_compare;
 pub mod lifecycle_service;
 pub mod local_index;
+pub mod model;
 pub mod object_store;
 pub mod platform;
 pub mod polling_service;
@@ -34,6 +35,8 @@ pub mod sync_planner;
 pub mod sync_service;
 pub mod sync_state;
 pub mod transfer_service;
+#[cfg(test)]
+mod ts_bindings;
 pub mod watchers;
 
 pub use sync_state::SyncState;
