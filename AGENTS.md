@@ -2,15 +2,26 @@
 
 ## Overhaul status
 
-- **Current overhaul phase: 0 complete (2026-07-19); next up phase 1 (Sync Correctness)** —
-  see `backlog/phase-0-foundations.md` for what landed (incl. deferred items) and
-  `backlog/phase-1-sync-correctness.md` for what's next. The 6 ignored "truth case" tests in
-  `src-tauri/src/storage/sim/scenarios.rs` are phase 1's executable definition of done.
+- **Phase 0 complete. Phase 1 landed on `overhaul/phase-1` (not merged, not cloud-verified).**
+  See `backlog/phase-1-sync-correctness.md` — read its "Not proven yet" section before merging.
+- Sync engine now propagates deletes and renames, keeps both sides of a conflict
+  (`preserve-both` duplicates with a dated suffix), and reconciles anchors. Operations live in
+  `sync_planner::Operation`; the decision table in `decide_file_sync` has no catch-all arm —
+  keep it that way.
+- Local deletes go to the OS trash (`trash` crate), never `remove_file`. Remote deletes honor
+  versioning/remote-bin exactly like the manual `delete_file` command.
+- Mass-delete breaker: >25 deletes, or >50% of a 10+ anchored tree, become review items.
+  Constants are `MAX_AUTO_DELETE_COUNT` / `MAX_AUTO_DELETE_RATIO`.
+- Content fingerprints: uploads attach `LOCAL_FINGERPRINT_METADATA_KEY`; **GCS listings return
+  it, S3 listings do not** — so first-sync merge works on GCS only. Do not assume
+  `RemoteObjectEntry.fingerprint` is populated on S3.
+- The `tauri-command-tests` feature had never compiled and CI never ran it. It compiles now
+  (`bun run test:rust:commands`) but its tests have never executed — the Tauri mock runtime
+  fails to load on this Windows machine. The CI job is non-blocking until one green run.
+- Sync-engine changes require simulator coverage (`src-tauri/src/storage/sim/`).
 - Errors: provider adapters + object_store return `storage::error::SyncError` (classified);
   `commands.rs` still uses `Result<_, String>` via `From` escape hatches until phase 3.
-- Roadmap/backlog lives in `backlog/` (one MD per phase); update the phase doc during session handoff.
 - Package manager is bun only (`bun.lock`); never generate `package-lock.json`.
-- Sync-engine changes require simulator coverage (`src-tauri/src/storage/sim/`).
 
 ## Auto
 

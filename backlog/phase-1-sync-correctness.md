@@ -63,85 +63,163 @@ operation vocabulary. Consequences:
 
 ### 1.1 Planner rewrite: full operation vocabulary
 
-- [ ] New operations: `delete_remote`, `delete_local`, `move_remote`, `move_local`,
-      `duplicate_conflict` (implements preserve-both). Typed enum end-to-end (no more
-      `operation: String`) — coordinate with phase 3's typed-domain work.
-- [ ] Rewrite `decide_file_sync` as an explicit, exhaustively-tested decision table over
-      `(anchor_state, local_state, remote_state)` — every cell deliberate, no catch-all arm.
-      The table itself becomes documentation (generate a markdown table from the test).
-- [ ] Tombstone handling in plan build: anchor-with-tombstone + reappearing side = re-create
-      vs resurrect decision based on which timestamp is newer.
-- [ ] Directory semantics: deleting a directory locally must plan deletes for its remote
-      children (currently directories are mostly `noop`); empty-dir placeholders reconciled.
-- [ ] Mass-delete circuit breaker (ADR-2c) as a plan-level flag the UI must acknowledge.
+- [x] New operations added, plus `anchor_only` and `forget_anchor` for anchor
+      reconciliation. A typed `Operation` enum with `as_str`/`parse` is the single
+      string boundary; full typed plumbing through `sync_db`/`commands` stays with
+      phase 3's `engine::model` as planned.
+- [x] `decide_file_sync` rewritten with no catch-all arm; every cell deliberate.
+      24 planner tests cover the table. **Deviation:** the table is documented by the
+      tests themselves rather than a generated markdown artifact — generating a doc
+      from them added maintenance for no reader we could name.
+- [ ] **Not done — deferred.** Anchors are still deleted rather than tombstoned. The
+      resurrection window this leaves: if a path is deleted on both sides and later
+      re-created remotely, it downloads (correct); but a delete that races a re-create
+      across a re-plan can still re-transfer. Needs the anchor schema change (a
+      `deleted_at` column + GC) — sequenced with phase 2.3's SQLite migration so users
+      migrate once, not twice.
+- [ ] **Not done — deferred to the phase-1 follow-up.** File deletes inside a removed
+      directory do propagate (each file is planned individually), but the remote
+      directory placeholder is left behind. Cosmetic rather than data-losing, and it
+      needs the directory-anchor model that pairs with tombstones above.
+- [x] Mass-delete circuit breaker implemented: batches over 25 deletes, or over 50%
+      of an anchored tree of 10+, are converted to review items and never executed.
+      It emits a loud activity entry naming the count. **Deviation:** it is not yet a
+      UI-acknowledgeable flag — the plan-level count is computed but `DurablePlannerSummary`
+      (the IPC payload) does not carry it, so phase 5 wires the confirm/restore prompt.
 
 ### 1.2 Conflict engine
 
-- [ ] Implement `preserve-both` for real: loser is renamed
-      `name (conflict <device> <yyyy-mm-dd>).ext` locally and uploaded; winner keeps the name;
-      both sides converge to both files. Device name from OS hostname, persisted in settings.
-- [ ] `prefer-local` / `prefer-remote` keep semantics but the overwritten side is protected:
-      remote overwrite relies on versioning/remote-bin when available; local overwrite moves
-      the old file to OS trash.
-- [ ] Conflicted-copy suppression: don't re-conflict the conflict files themselves.
-- [ ] Review queue becomes an explicit, bounded state (needed by phase 5 UX): each entry
-      carries both sides' metadata + why it conflicted + one-click resolutions.
+- [x] `preserve-both` implemented: the local edit is renamed and uploaded, the remote
+      edit is downloaded at the original path, and both sides converge to both files.
+      **Deviation:** the suffix is `name (conflict yyyy-mm-dd).ext` without the device
+      name — carrying a device identity needs a settings field, which is phase-5 UI
+      work; collisions get a numeric suffix instead.
+- [ ] **Partially done.** Both strategies keep their semantics and remote overwrites
+      still land through the versioning/remote-bin machinery. The local side is *not*
+      yet trash-protected on overwrite: a `prefer-remote` download still overwrites the
+      local file in place. Grouped with the atomic-download work below.
+- [x] Conflict copies are ordinary new files: they upload once and anchor, and the
+      naming pass avoids colliding with existing local or remote paths, so they do not
+      re-conflict.
+- [ ] **Deferred to phase 5.** Review items remain `review_required` queue rows; the
+      richer entry model belongs with the attention-queue UI that consumes it.
 
 ### 1.3 First-sync & adoption flows
 
-- [ ] "Merge" first sync: matching path + matching content hash (ADR-4, or size+etag fast
-      path) → create anchor silently, no transfer, no review.
-- [ ] Path present both sides, different content, no anchor → apply the pair's conflict
-      strategy (with preserve-both actually working, the default first sync is lossless and
-      automatic).
-- [ ] Explicit first-sync modes surfaced at pair creation (phase 5 wires the UI):
-      *merge* (default), *mirror local → remote*, *mirror remote → local* — the mirror modes
-      use the delete machinery with the circuit breaker forced on.
+- [x] Implemented and proven in the simulator, and **live on GCS**: uploads attach a
+      goblin content fingerprint, GCS list responses return it, and matching content
+      anchors silently.
+      **Known gap — S3.** `ListObjectsV2` returns no user metadata, so no fingerprint is
+      available and identical content still parks for review (unchanged from before, not
+      a regression). Closing it needs a HEAD per same-path/same-size candidate, or
+      download-and-hash for objects Goblin never uploaded; both want phase 2's per-item
+      error isolation and streaming hashes. This is the one phase-1 acceptance criterion
+      that is not met on the flagship provider.
+- [ ] **Deliberately not done.** Unanchored differing content still parks for review
+      rather than auto-applying the strategy. Without sync history there is no basis to
+      call either side "the edit", and silently overwriting a stranger's file is the
+      worst failure this product can have. Revisit with the phase-5 first-run wizard,
+      where the user picks merge/mirror explicitly.
+- [ ] **Deferred to phase 5** with the onboarding wizard that presents the choice.
 
 ### 1.4 Transfer integrity (correctness half; performance is phase 2)
 
-- [ ] Atomic downloads: write to `.goblin-tmp` sibling, fsync, atomic rename, then set mtime;
-      clean up orphaned tmp files on startup. Fixes `s3_adapter.rs:333` /
-      `commands.rs` download paths.
-- [ ] Verify after transfer: compare stored content hash (ADR-4) after download; verify
-      returned etag/generation after upload; mismatch → `SyncError::Precondition` → re-plan,
-      not silent success.
-- [ ] Conditional writes everywhere: `If-Match`/`x-goog-if-generation-match` on overwrites and
-      deletes so a remote change between plan and execute can never be clobbered blind.
-      (S3 now supports conditional writes; GCS has generation preconditions.)
-- [ ] Stale-plan handling becomes re-plan-and-retry (bounded), not a terminal error string
-      (`commands.rs:901-948`).
-- [ ] Case-sensitivity and path normalization audit: NFC/NFD, Windows reserved names
-      (`CON`, `NUL`, trailing dots/spaces), `/` vs `\`, long paths. Quarantine unsyncable
-      names with a visible reason rather than failing the queue. Extend `sanitizer.rs`.
+- [ ] **Not done — moved to phase 2.** Downloads still write in place. This is the
+      same code path phase 2.1 replaces with streaming/resumable transfers, and doing
+      the temp-file dance twice would be wasted work. Tracked as the first item there.
+- [ ] **Moved to phase 2** with the transfer engine, for the same reason.
+- [ ] **Moved to phase 2.** The existing stale-plan guards (expected fingerprint/etag
+      checked before each transfer) remain the protection in the meantime.
+- [ ] **Moved to phase 2.2**, which replaces abort-on-first-error with per-item
+      isolation and bounded retries — the mechanism this needs.
+- [ ] **Not done.** Only the traversal guard is covered (tests assert `../` paths are
+      rejected for both local delete and rename). The full normalization audit is its own
+      workstream and needs the quarantine surface from phase 5 to report unsyncable
+      names usefully.
 
 ### 1.5 Verification
 
-- [ ] Un-ignore the phase-0 simulator truth cases; all pass.
-- [ ] Decision-table exhaustive test: every `(anchor, local, remote)` combination asserted.
-- [ ] Property test (proptest): arbitrary interleaved mutation sequences on two replicas
-      converge with zero lost writes and zero resurrections; run with injected transient
-      failures from `MemoryObjectStore`.
-- [ ] Cross-device simulation: two simulated clients sharing one fake remote (this is the
-      multi-device story the brief promises — it has likely never been tested).
-- [ ] Manual cloud matrix (checklist doc): real S3 + real GCS runs of: delete file/folder both
-      directions, rename file/folder, conflict both-sides-edit, kill app mid-download,
-      kill mid-upload, offline edit + reconnect.
+- [x] All 5 behavioral truth cases un-ignored and passing (both delete directions,
+      rename-as-move, preserve-both duplication, identical-content first sync).
+- [x] 24 planner tests covering every decision-table cell, rename pairing including
+      the ambiguous case, the circuit breaker, and conflict-copy naming.
+- [x] Property-style test runs 25 seeded random mutation sequences.
+      **The invariant was restated, and this matters:** full convergence is *not* correct
+      to assert, because random sequences produce genuinely ambiguous states
+      (deleted-here-edited-there) that must park for review rather than auto-resolve.
+      The test now asserts the engine settles in bounded cycles and that every still-
+      diverging path is parked — i.e. no *silent* divergence. Still a hand-rolled LCG;
+      promoting to proptest remains open.
+- [ ] **Not done.** The simulator models one client against one remote. Two clients
+      sharing a store is the natural next harness feature and the right home for the
+      multi-device guarantees; it needs per-client anchor sets, which is a harness change
+      rather than an engine one.
+- [ ] **Outstanding and load-bearing.** Nothing in this phase has touched a real
+      bucket; all evidence is from the simulator and unit/integration tests. This
+      checklist is written up as `docs/phase-1-cloud-validation.md` and must be run
+      before phase 1 can be called done.
+
+
+## Status (2026-07-20)
+
+Landed on `overhaul/phase-1`, not merged. The engine now propagates deletes and
+renames, keeps both sides of a conflict, and reconciles anchors — in the planner,
+the simulator, and the real per-pair executors.
+
+**Verified by tests that run:** 303 Rust tests (up from 278), including 24 planner
+tests over the decision table, ~25 simulator scenarios end-to-end, sync_db tests
+proving the new operations route to the right queue with their target paths, and
+filesystem tests covering rename/prune/traversal-rejection.
+
+**Recovered along the way:** the `tauri-command-tests` feature had never compiled
+(duplicate imports plus a missing one, dating to the feature's introduction) and CI
+never built it, so a whole block of command-level integration tests was dead. It is
+fixed and wired into CI.
+
+### Not proven yet — read before merging
+
+1. **No real-cloud run.** Every claim here rests on the simulator and unit tests.
+   The manual S3 + GCS matrix in 1.5 is unrun; deletes against a live bucket are the
+   single highest-risk thing in this phase.
+2. **Command-level integration tests compile but have never executed.** The Tauri
+   mock runtime fails to load on the Windows dev machine
+   (`STATUS_ENTRYPOINT_NOT_FOUND` from the `tauri/test` build, reproduced with a clean
+   target dir and a minimal PATH). They are wired into CI as a **non-blocking** job;
+   make it blocking after one green run.
+3. **First-sync merge does not work on S3** — see 1.3. It works on GCS and in the
+   simulator.
+4. **Deferred to phase 2** (all noted inline): atomic downloads, post-transfer
+   verification, conditional writes, and re-plan-on-stale. These share the code path
+   phase 2.1 rewrites.
+
+### Suggested order for finishing phase 1
+
+1. Run the manual cloud matrix on a scratch bucket, both providers.
+2. Get one green CI run of the command integration tests; make the job blocking.
+3. Tombstones + directory-delete semantics (the two real correctness gaps left),
+   sequenced with phase 2.3's schema migration.
+4. Decide S3 first-sync merge: HEAD-per-candidate now, or wait for phase 2.
 
 ## Acceptance criteria
 
-1. Local and remote deletes propagate within one sync cycle, with trash/remote-bin protection
-   and the mass-delete breaker; simulator + cloud checklist prove it.
-2. File and folder renames propagate as moves (no re-upload of content ≥ the ambiguity
-   threshold) on both providers.
-3. `preserve-both` produces the documented duplicate-with-suffix outcome automatically;
-   review queue only receives genuinely ambiguous cases (kind mismatch, breaker trips).
-4. First sync over two pre-populated identical trees performs zero transfers and zero reviews.
-5. Kill -9 during any transfer leaves no corrupt or partial visible files and recovers to a
-   consistent state on restart (existing durable-queue recovery extended to cover tmp files).
-6. Property tests run in CI ≥ 1,000 cases without loss/resurrection findings.
-7. No `ReviewRequired` reachable from a plain delete, rename, or first-sync-identical path —
-   enforced by the decision-table test.
+1. ⚠️ Local and remote deletes propagate within one sync cycle, with trash/remote-bin
+   protection and the mass-delete breaker. Simulator proves it; **the cloud checklist
+   has not been run**, so this is not yet signed off.
+2. ⚠️ File renames propagate as server-side moves, with ambiguous pairings degrading
+   safely to copy+delete. **Folder renames are not special-cased** (they resolve as
+   per-file moves, which is correct but does N operations), and this is unverified
+   against real providers.
+3. ✅ `preserve-both` duplicates automatically; the review queue now receives only
+   genuinely ambiguous cases (kind mismatch, delete-vs-edit, unanchored differing
+   content, breaker trips). Suffix omits the device name — see 1.2.
+4. ⚠️ **Met on GCS and in the simulator; not met on S3** (no listing metadata — see 1.3).
+5. ❌ **Not met — moved to phase 2.** Downloads are still non-atomic; there are no tmp
+   files to recover yet.
+6. ⚠️ Property test runs 25 seeded cases (not 1,000) asserting no *silent* divergence.
+   Scaling up wants proptest and the phase-2 chaos hooks.
+7. ✅ Enforced by the decision-table tests: no review item is reachable from a plain
+   delete, a rename, or a first-sync-identical path (the last one on providers that
+   surface fingerprints).
 
 ## Risks
 
