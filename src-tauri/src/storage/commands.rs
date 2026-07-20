@@ -53,20 +53,21 @@ use super::{
     s3_adapter,
     sanitizer::sanitize_sensitive_text,
     sync_db::{
-        load_planned_download_queue, load_planned_download_queue_for_pair,
-        load_planned_upload_queue, load_planned_upload_queue_for_pair, load_planner_summary,
-        load_planner_summary_for_pair, load_sync_anchors, load_sync_anchors_for_pair,
-        mark_download_queue_item_completed, mark_download_queue_item_completed_for_pair,
-        mark_download_queue_item_failed, mark_download_queue_item_failed_for_pair,
-        mark_download_queue_item_in_progress, mark_download_queue_item_in_progress_for_pair,
-        mark_upload_queue_item_completed, mark_upload_queue_item_completed_for_pair,
-        mark_upload_queue_item_failed, mark_upload_queue_item_failed_for_pair,
-        mark_upload_queue_item_in_progress, mark_upload_queue_item_in_progress_for_pair,
-        persist_sync_plan, persist_sync_plan_for_pair, recover_interrupted_queue_items,
-        recover_interrupted_queue_items_for_pair, upsert_sync_anchor, upsert_sync_anchor_for_pair,
-        SyncAnchor,
+        delete_sync_anchor_for_pair, load_planned_download_queue,
+        load_planned_download_queue_for_pair, load_planned_upload_queue,
+        load_planned_upload_queue_for_pair, load_planner_summary, load_planner_summary_for_pair,
+        load_sync_anchors, load_sync_anchors_for_pair, mark_download_queue_item_completed,
+        mark_download_queue_item_completed_for_pair, mark_download_queue_item_failed,
+        mark_download_queue_item_failed_for_pair, mark_download_queue_item_in_progress,
+        mark_download_queue_item_in_progress_for_pair, mark_upload_queue_item_completed,
+        mark_upload_queue_item_completed_for_pair, mark_upload_queue_item_failed,
+        mark_upload_queue_item_failed_for_pair, mark_upload_queue_item_in_progress,
+        mark_upload_queue_item_in_progress_for_pair, persist_sync_plan, persist_sync_plan_for_pair,
+        recover_interrupted_queue_items, recover_interrupted_queue_items_for_pair,
+        upsert_sync_anchor, upsert_sync_anchor_for_pair, PlannedDownloadQueueItem,
+        PlannedUploadQueueItem, SyncAnchor,
     },
-    sync_planner,
+    sync_planner::{self, Operation},
     sync_state::{
         active_watcher_pair_paths, begin_polling_worker, clear_all_pair_watchers, clear_dirty_pair,
         clear_polling_worker, due_dirty_pairs, finish_sync_cycle, get_status_lock,
@@ -835,6 +836,324 @@ async fn perform_planned_download_for_pair(
         #[cfg(test)]
         PairTransferExecutor::Mock => mock_download_file(_path, local_path),
     }
+}
+
+/// Remove a remote object, honoring the pair's protection setting: object
+/// versioning leaves a delete marker, remote bin moves the object into the bin
+/// namespace, and only an unprotected pair hard-deletes. Mirrors the manual
+/// `delete_file` command so planned and manual deletes behave identically.
+async fn delete_remote_object_for_pair<R: Runtime>(
+    app: &AppHandle<R>,
+    executor: &PairTransferExecutor,
+    pair: &SyncPair,
+    path: &str,
+) -> Result<(), String> {
+    let key = s3_adapter::object_key(path);
+    match executor {
+        PairTransferExecutor::Real(client) => {
+            if !pair.object_versioning_enabled && pair.remote_bin.enabled {
+                if let Some(target) = target_for_pair(pair) {
+                    reconcile_remote_bin_lifecycle_target(app, &target).await?;
+                }
+                let bin_key = deleted_object_key(&pair.id, path);
+                object_store::move_object(client, &pair.bucket, &key, &bin_key, None)
+                    .await
+                    .map_err(String::from)
+            } else {
+                // Versioning leaves a restorable delete marker; without either
+                // protection this is a plain delete.
+                object_store::delete_object(client, &pair.bucket, &key)
+                    .await
+                    .map_err(String::from)
+            }
+        }
+        #[cfg(test)]
+        PairTransferExecutor::Mock => Ok(()),
+    }
+}
+
+/// Move a local file to the OS trash. A propagated delete must always be
+/// recoverable, so this never hard-unlinks (backlog phase 1, ADR-2b).
+fn trash_local_file_for_pair(pair: &SyncPair, path: &str) -> Result<(), String> {
+    let local_path = resolve_local_download_path(&pair.local_folder, path)?;
+
+    match std::fs::symlink_metadata(&local_path) {
+        Ok(_) => trash::delete(&local_path).map_err(|error| {
+            format!(
+                "failed to move '{}' to the trash: {error}",
+                local_path.display()
+            )
+        })?,
+        // Already gone: the delete is satisfied.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect '{}' before deleting: {error}",
+                local_path.display()
+            ));
+        }
+    }
+
+    cleanup_empty_ancestors(&local_path, Path::new(&pair.local_folder));
+    Ok(())
+}
+
+/// Rename a local file, creating the destination's parent directories.
+fn rename_local_file_for_pair(pair: &SyncPair, from: &str, to: &str) -> Result<(), String> {
+    let source = resolve_local_download_path(&pair.local_folder, from)?;
+    let destination = resolve_local_download_path(&pair.local_folder, to)?;
+
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create directory for '{}': {error}",
+                destination.display()
+            )
+        })?;
+    }
+
+    std::fs::rename(&source, &destination).map_err(|error| {
+        format!(
+            "failed to rename '{}' to '{}': {error}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+
+    cleanup_empty_ancestors(&source, Path::new(&pair.local_folder));
+    Ok(())
+}
+
+/// Write the anchor for `path` from the local file's fingerprint and the
+/// object's current etag in `snapshot`.
+fn anchor_path_from_snapshot<R: Runtime>(
+    app: &AppHandle<R>,
+    pair: &SyncPair,
+    path: &str,
+    local_fingerprint: &str,
+    snapshot: &RemoteIndexSnapshot,
+) -> Result<(), String> {
+    upsert_sync_anchor_for_pair(
+        app,
+        pair,
+        &sync_anchor_from_upload(
+            path,
+            local_fingerprint,
+            remote_etag_for_path(snapshot, path),
+        ),
+    )
+}
+
+/// Execute the phase-1 operations that are not file transfers. Returns `None`
+/// when `item.operation` is a transfer the caller should handle itself.
+async fn perform_structural_upload_operation_for_pair<R: Runtime>(
+    app: &AppHandle<R>,
+    executor: &PairTransferExecutor,
+    pair: &SyncPair,
+    credentials: &StoredCredentials,
+    item: &PlannedUploadQueueItem,
+) -> Option<Result<String, String>> {
+    let operation = Operation::parse(&item.operation)?;
+
+    let result = match operation {
+        Operation::DeleteRemote => {
+            match delete_remote_object_for_pair(app, executor, pair, &item.path).await {
+                Ok(()) => delete_sync_anchor_for_pair(app, pair, &item.path)
+                    .map(|()| format!("Deleted remote copy of '{}'.", item.path)),
+                Err(error) => Err(error),
+            }
+        }
+        Operation::MoveRemote => {
+            let Some(target) = item.target_path.as_deref() else {
+                return Some(Err(format!(
+                    "planned remote move for '{}' is missing its destination",
+                    item.path
+                )));
+            };
+            move_remote_object_for_pair(app, executor, pair, credentials, &item.path, target).await
+        }
+        Operation::DuplicateConflict => {
+            let Some(target) = item.target_path.as_deref() else {
+                return Some(Err(format!(
+                    "planned conflict copy for '{}' is missing its destination",
+                    item.path
+                )));
+            };
+            duplicate_conflict_for_pair(app, executor, pair, credentials, &item.path, target).await
+        }
+        Operation::AnchorOnly => anchor_only_for_pair(app, pair, &item.path),
+        Operation::ForgetAnchor => delete_sync_anchor_for_pair(app, pair, &item.path)
+            .map(|()| format!("Cleared stale sync record for '{}'.", item.path)),
+        Operation::Upload | Operation::CreateDirectory => return None,
+        // Download-queue operations never reach the upload executor.
+        Operation::Download
+        | Operation::DeleteLocal
+        | Operation::MoveLocal
+        | Operation::ConflictReview
+        | Operation::ReviewRequired => return None,
+    };
+
+    Some(result)
+}
+
+/// Server-side copy + delete, then re-anchor the destination path.
+async fn move_remote_object_for_pair<R: Runtime>(
+    app: &AppHandle<R>,
+    executor: &PairTransferExecutor,
+    pair: &SyncPair,
+    credentials: &StoredCredentials,
+    from: &str,
+    to: &str,
+) -> Result<String, String> {
+    let from_key = s3_adapter::object_key(from);
+    let to_key = s3_adapter::object_key(to);
+
+    match executor {
+        PairTransferExecutor::Real(client) => {
+            object_store::move_object(client, &pair.bucket, &from_key, &to_key, None).await?;
+        }
+        #[cfg(test)]
+        PairTransferExecutor::Mock => {}
+    }
+
+    delete_sync_anchor_for_pair(app, pair, from)?;
+
+    // Anchor the destination so the next cycle sees a settled path rather than
+    // an unanchored file it would have to review.
+    let local_path = resolve_local_download_path(&pair.local_folder, to)?;
+    if let Ok(fingerprint) = crate::storage::local_index::file_fingerprint(&local_path) {
+        let snapshot = refresh_remote_snapshot_for_pair(executor, pair, credentials, to).await?;
+        write_remote_index_snapshot_for_pair(app, &pair.id, &snapshot)?;
+        anchor_path_from_snapshot(app, pair, to, &fingerprint, &snapshot)?;
+    }
+
+    Ok(format!("Moved remote copy of '{from}' to '{to}'."))
+}
+
+/// preserve-both: rename the local file to the conflict name and upload it.
+/// The paired download restores the remote version at the original path.
+async fn duplicate_conflict_for_pair<R: Runtime>(
+    app: &AppHandle<R>,
+    executor: &PairTransferExecutor,
+    pair: &SyncPair,
+    credentials: &StoredCredentials,
+    path: &str,
+    target: &str,
+) -> Result<String, String> {
+    rename_local_file_for_pair(pair, path, target)?;
+
+    let local_path = resolve_local_download_path(&pair.local_folder, target)?;
+    let fingerprint = crate::storage::local_index::file_fingerprint(&local_path)?;
+    let key = s3_adapter::object_key(target);
+
+    let snapshot = perform_planned_upload_for_pair(
+        executor,
+        pair,
+        credentials,
+        target,
+        &key,
+        &local_path,
+        &fingerprint,
+    )
+    .await?;
+
+    write_remote_index_snapshot_for_pair(app, &pair.id, &snapshot)?;
+    anchor_path_from_snapshot(app, pair, target, &fingerprint, &snapshot)?;
+    // The original path is re-anchored by the paired download.
+    delete_sync_anchor_for_pair(app, pair, path)?;
+
+    Ok(format!(
+        "Kept both versions of '{path}': your copy is now '{target}'."
+    ))
+}
+
+/// Record an anchor for content that already matches on both sides, so a
+/// first sync over pre-existing data transfers nothing.
+fn anchor_only_for_pair<R: Runtime>(
+    app: &AppHandle<R>,
+    pair: &SyncPair,
+    path: &str,
+) -> Result<String, String> {
+    let local_path = resolve_local_download_path(&pair.local_folder, path)?;
+    let fingerprint = crate::storage::local_index::file_fingerprint(&local_path)?;
+    let snapshot = read_remote_index_snapshot_for_pair(app, &pair.id)?
+        .ok_or_else(|| "remote snapshot missing while anchoring existing content".to_string())?;
+    anchor_path_from_snapshot(app, pair, path, &fingerprint, &snapshot)?;
+    Ok(format!("Matched existing content for '{path}'."))
+}
+
+async fn refresh_remote_snapshot_for_pair(
+    executor: &PairTransferExecutor,
+    pair: &SyncPair,
+    credentials: &StoredCredentials,
+    _path: &str,
+) -> Result<RemoteIndexSnapshot, String> {
+    match executor {
+        PairTransferExecutor::Real(_) => list_remote_inventory_for_pair(pair, credentials).await,
+        #[cfg(test)]
+        PairTransferExecutor::Mock => mock_upload_refresh_snapshot(_path),
+    }
+}
+
+/// Execute the download-queue operations that are not file transfers.
+fn perform_structural_download_operation_for_pair<R: Runtime>(
+    app: &AppHandle<R>,
+    executor: &PairTransferExecutor,
+    pair: &SyncPair,
+    item: &PlannedDownloadQueueItem,
+) -> Option<Result<String, String>> {
+    let operation = Operation::parse(&item.operation)?;
+
+    let result = match operation {
+        Operation::DeleteLocal => {
+            let removed = match executor {
+                PairTransferExecutor::Real(_) => trash_local_file_for_pair(pair, &item.path),
+                // Tests assert on the resulting tree, not on OS trash behavior.
+                #[cfg(test)]
+                PairTransferExecutor::Mock => {
+                    remove_local_file_without_trash_for_pair(pair, &item.path)
+                }
+            };
+            match removed {
+                Ok(()) => delete_sync_anchor_for_pair(app, pair, &item.path)
+                    .map(|()| format!("Deleted local copy of '{}'.", item.path)),
+                Err(error) => Err(error),
+            }
+        }
+        Operation::MoveLocal => {
+            let Some(target) = item.target_path.as_deref() else {
+                return Some(Err(format!(
+                    "planned local move for '{}' is missing its destination",
+                    item.path
+                )));
+            };
+            match rename_local_file_for_pair(pair, &item.path, target) {
+                Ok(()) => delete_sync_anchor_for_pair(app, pair, &item.path)
+                    .map(|()| format!("Moved local copy of '{}' to '{target}'.", item.path)),
+                Err(error) => Err(error),
+            }
+        }
+        _ => return None,
+    };
+
+    Some(result)
+}
+
+#[cfg(test)]
+fn remove_local_file_without_trash_for_pair(pair: &SyncPair, path: &str) -> Result<(), String> {
+    let local_path = resolve_local_download_path(&pair.local_folder, path)?;
+    match std::fs::remove_file(&local_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "failed to remove '{}': {error}",
+                local_path.display()
+            ))
+        }
+    }
+    cleanup_empty_ancestors(&local_path, Path::new(&pair.local_folder));
+    Ok(())
 }
 
 fn persist_upload_success_for_pair<R: Runtime>(
@@ -4822,6 +5141,29 @@ fn rebuild_durable_plan_for_pair<R: Runtime>(
         &pair.conflict_strategy,
         credentials_available,
     );
+
+    if plan.summary.suppressed_delete_count > 0 {
+        // The mass-delete breaker tripped. Surface it loudly: the user sees
+        // review items and must be told why nothing was deleted.
+        // (Phase 5 turns this into an explicit confirm-or-restore prompt.)
+        if let Some(debug_state) = app.try_state::<ActivityDebugState>() {
+            emit_error_activity(
+                app,
+                &debug_state,
+                format!(
+                    "Held {} deletion(s) for '{}' pending review.",
+                    plan.summary.suppressed_delete_count, pair.label
+                ),
+                Some(format!(
+                    "pair='{}' suppressed_delete_count={} anchored_paths={}. Storage Goblin does not delete this many files automatically; review the flagged entries and confirm.",
+                    pair.label,
+                    plan.summary.suppressed_delete_count,
+                    anchors.len()
+                )),
+            );
+        }
+    }
+
     persist_sync_plan_for_pair(app, pair, &plan)
 }
 
@@ -4851,6 +5193,61 @@ async fn execute_planned_upload_queue_for_pair<R: Runtime>(
         {
             execution_error = Some(error);
             break;
+        }
+
+        // Deletes, moves, conflict duplication, and anchor reconciliation
+        // (backlog phase 1) are not file transfers.
+        if let Some(structural) =
+            perform_structural_upload_operation_for_pair(app, &executor, pair, credentials, &item)
+                .await
+        {
+            match structural {
+                Ok(message) => {
+                    let finished_at = now_iso();
+                    if let Err(error) =
+                        mark_upload_queue_item_completed_for_pair(app, pair, item.id, &finished_at)
+                    {
+                        execution_error = Some(error);
+                        break;
+                    }
+                    emit_success_activity(
+                        app,
+                        debug_state,
+                        &message,
+                        Some(format!(
+                            "pair='{}' queue_item_id={} operation='{}' path='{}' finished_at='{}'",
+                            pair.label, item.id, item.operation, item.path, finished_at
+                        )),
+                    );
+                }
+                Err(error) => {
+                    let finished_at = now_iso();
+                    let failure_message = format!(
+                        "{} failed for '{}': {error}",
+                        item.operation.replace('_', " "),
+                        item.path
+                    );
+                    let _ = mark_upload_queue_item_failed_for_pair(
+                        app,
+                        pair,
+                        item.id,
+                        &finished_at,
+                        &failure_message,
+                    );
+                    emit_error_activity(
+                        app,
+                        debug_state,
+                        "Planned sync operation failed.",
+                        Some(format!(
+                            "pair='{}' queue_item_id={} operation='{}' path='{}' finished_at='{}' error='{}'",
+                            pair.label, item.id, item.operation, item.path, finished_at, failure_message
+                        )),
+                    );
+                    execution_error = Some(failure_message);
+                    break;
+                }
+            }
+            continue;
         }
 
         if item.operation == "create_directory" {
@@ -5184,6 +5581,62 @@ async fn execute_planned_download_queue_for_pair<R: Runtime>(
         {
             execution_error = Some(error);
             break;
+        }
+
+        // Local deletes and local moves (backlog phase 1) are not transfers.
+        if let Some(structural) =
+            perform_structural_download_operation_for_pair(app, &executor, pair, &item)
+        {
+            match structural {
+                Ok(message) => {
+                    let finished_at = now_iso();
+                    if let Err(error) = mark_download_queue_item_completed_for_pair(
+                        app,
+                        pair,
+                        item.id,
+                        &finished_at,
+                    ) {
+                        execution_error = Some(error);
+                        break;
+                    }
+                    emit_success_activity(
+                        app,
+                        debug_state,
+                        &message,
+                        Some(format!(
+                            "pair='{}' queue_item_id={} operation='{}' path='{}' finished_at='{}'",
+                            pair.label, item.id, item.operation, item.path, finished_at
+                        )),
+                    );
+                }
+                Err(error) => {
+                    let finished_at = now_iso();
+                    let failure_message = format!(
+                        "{} failed for '{}': {error}",
+                        item.operation.replace('_', " "),
+                        item.path
+                    );
+                    let _ = mark_download_queue_item_failed_for_pair(
+                        app,
+                        pair,
+                        item.id,
+                        &finished_at,
+                        &failure_message,
+                    );
+                    emit_error_activity(
+                        app,
+                        debug_state,
+                        "Planned sync operation failed.",
+                        Some(format!(
+                            "pair='{}' queue_item_id={} operation='{}' path='{}' finished_at='{}' error='{}'",
+                            pair.label, item.id, item.operation, item.path, finished_at, failure_message
+                        )),
+                    );
+                    execution_error = Some(failure_message);
+                    break;
+                }
+            }
+            continue;
         }
 
         let local_path = match resolve_local_download_path(&pair.local_folder, &item.path) {
@@ -8776,13 +9229,13 @@ mod tests {
         path_matches_exact_or_descendant, persist_profile_with_remote_bin_reconciliation_for_test,
         planned_remote_bin_reconciliation, provider_supports_remote_bin_lifecycle_reconciliation,
         provider_supports_runtime_object_versioning, relative_path_from_key,
-        remote_bin_key_for_deleted_key, remove_local_directory_subtree,
+        remote_bin_key_for_deleted_key, remove_local_directory_subtree, rename_local_file_for_pair,
         resolve_local_download_path, resolve_session_credentials, s3_config_for_pair,
         should_defer_create_time_credential_test, should_poll_pair, should_scan_local_for_trigger,
-        sync_pair_for_location, upload_stale_plan_error, validate_bin_batch_requests,
-        validate_remote_restore_destination, versioned_bin_key, watcher_eligible_pairs,
-        BinEntryRequest, CredentialTestContext, PairSyncTrigger, VersionedBinEntry,
-        LOCAL_SNAPSHOT_STALE_TTL,
+        sync_pair_for_location, trash_local_file_for_pair, upload_stale_plan_error,
+        validate_bin_batch_requests, validate_remote_restore_destination, versioned_bin_key,
+        watcher_eligible_pairs, BinEntryRequest, CredentialTestContext, PairSyncTrigger,
+        VersionedBinEntry, LOCAL_SNAPSHOT_STALE_TTL,
     };
     use crate::storage::credentials_store::{
         CredentialSummary, CredentialValidationStatus, StoredCredentials,
@@ -10208,6 +10661,9 @@ mod tests {
     }
 
     #[cfg(feature = "tauri-command-tests")]
+    use super::refresh_pair_state_after_local_change;
+
+    #[cfg(feature = "tauri-command-tests")]
     #[test]
     fn refresh_pair_state_after_local_change_updates_local_snapshot_and_plan() {
         use crate::storage::commands::tauri_command_tests::CommandTestHarness;
@@ -10811,13 +11267,106 @@ mod tests {
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].id, "eligible");
     }
+
+    // -- phase 1: local filesystem effects of deletes and moves --------------
+
+    fn fs_helper_temp_dir(name: &str) -> std::path::PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("current time should be after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "storage-goblin-{name}-{}-{suffix}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+        dir
+    }
+
+    fn fs_helper_pair(root: &Path) -> SyncPair {
+        SyncPair {
+            id: "fs-helper".into(),
+            label: "fs-helper".into(),
+            local_folder: root.to_string_lossy().to_string(),
+            bucket: "bucket".into(),
+            enabled: true,
+            ..SyncPair::default()
+        }
+    }
+
+    #[test]
+    fn renaming_a_local_file_creates_parents_and_prunes_empty_source_dirs() {
+        let root = fs_helper_temp_dir("phase1-rename-local");
+        std::fs::create_dir_all(root.join("from/nested")).expect("source dirs should exist");
+        std::fs::write(root.join("from/nested/file.txt"), b"payload")
+            .expect("source should be written");
+
+        let pair = fs_helper_pair(&root);
+        rename_local_file_for_pair(&pair, "from/nested/file.txt", "to/deeper/renamed.txt")
+            .expect("rename should succeed");
+
+        assert_eq!(
+            std::fs::read(root.join("to/deeper/renamed.txt")).expect("destination should exist"),
+            b"payload"
+        );
+        assert!(!root.join("from/nested/file.txt").exists());
+        assert!(
+            !root.join("from/nested").exists(),
+            "emptied source directories should be pruned"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn renaming_reports_a_clear_error_when_the_source_is_missing() {
+        let root = fs_helper_temp_dir("phase1-rename-missing");
+        std::fs::create_dir_all(&root).expect("root should exist");
+
+        let pair = fs_helper_pair(&root);
+        let error = rename_local_file_for_pair(&pair, "nope.txt", "somewhere.txt")
+            .expect_err("renaming a missing file should fail");
+        assert!(
+            error.contains("failed to rename"),
+            "unexpected error: {error}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn local_delete_and_move_refuse_to_escape_the_sync_root() {
+        let root = fs_helper_temp_dir("phase1-path-escape");
+        std::fs::create_dir_all(&root).expect("root should exist");
+        let pair = fs_helper_pair(&root);
+
+        // A remote object named to climb out of the sync folder must never
+        // reach the filesystem (adversarial-path guard, backlog phase 1.4).
+        assert!(trash_local_file_for_pair(&pair, "../escape.txt").is_err());
+        assert!(rename_local_file_for_pair(&pair, "a.txt", "../escape.txt").is_err());
+        assert!(rename_local_file_for_pair(&pair, "../escape.txt", "a.txt").is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deleting_an_already_missing_local_file_is_a_no_op() {
+        let root = fs_helper_temp_dir("phase1-delete-missing");
+        std::fs::create_dir_all(&root).expect("root should exist");
+        let pair = fs_helper_pair(&root);
+
+        // Never touches the OS trash: there is nothing to remove.
+        trash_local_file_for_pair(&pair, "already-gone.txt")
+            .expect("deleting a missing file should succeed");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(all(test, feature = "tauri-command-tests"))]
 mod tauri_command_tests {
     use super::{
-        build_file_entry_responses, build_file_entry_responses, clear_planned_transfer_test_hooks,
-        clear_planned_transfer_test_hooks, compare_mode_external, compare_mode_external,
+        build_file_entry_responses, clear_planned_transfer_test_hooks, compare_mode_external,
         execute_planned_download_queue_for_pair, execute_planned_upload_queue_for_pair,
         finalize_conflict_compare_details, image_media_type_for_extension, is_probably_text_bytes,
         local_fingerprint_for_path, persist_download_success_for_pair,
@@ -10852,7 +11401,7 @@ mod tauri_command_tests {
     use std::collections::BTreeMap;
     use std::env;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -10974,6 +11523,7 @@ mod tauri_command_tests {
                     size: *size,
                     last_modified_at: None,
                     etag: None,
+                    fingerprint: None,
                     storage_class: None,
                 })
                 .collect(),
@@ -11460,7 +12010,7 @@ mod tauri_command_tests {
 
     #[test]
     fn inline_image_limit_constant_is_larger_than_text_limit() {
-        assert!(INLINE_IMAGE_COMPARE_MAX_BYTES > INLINE_TEXT_COMPARE_MAX_BYTES);
+        const { assert!(INLINE_IMAGE_COMPARE_MAX_BYTES > INLINE_TEXT_COMPARE_MAX_BYTES) };
     }
 
     #[test]
@@ -12462,6 +13012,358 @@ mod tauri_command_tests {
                 .expect("resolved entry should exist")
                 .status,
             "synced"
+        );
+    }
+
+    // -- phase 1: delete / move / anchor execution through the pair queues ---
+
+    fn remote_snapshot_with_etags(entries: &[(&str, u64, &str)]) -> RemoteIndexSnapshot {
+        RemoteIndexSnapshot {
+            version: 1,
+            bucket: "demo".into(),
+            excluded_prefixes: Vec::new(),
+            summary: RemoteIndexSummary {
+                indexed_at: "2026-04-06T00:00:00Z".into(),
+                object_count: entries.len() as u64,
+                total_bytes: entries.iter().map(|(_, size, _)| *size).sum(),
+            },
+            entries: entries
+                .iter()
+                .map(|(relative_path, size, etag)| RemoteObjectEntry {
+                    key: format!("archive/{relative_path}"),
+                    relative_path: (*relative_path).into(),
+                    kind: "file".into(),
+                    size: *size,
+                    last_modified_at: None,
+                    etag: Some((*etag).to_string()),
+                    storage_class: None,
+                    fingerprint: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn phase_one_pair(id: &str, local_root: &Path) -> SyncPair {
+        SyncPair {
+            id: id.into(),
+            label: id.into(),
+            local_folder: local_root.to_string_lossy().to_string(),
+            bucket: format!("bucket-{id}"),
+            enabled: true,
+            ..SyncPair::default()
+        }
+    }
+
+    fn anchor_for(path: &str, fingerprint: &str, etag: &str) -> SyncAnchor {
+        SyncAnchor {
+            path: path.into(),
+            kind: "file".into(),
+            local_fingerprint: Some(fingerprint.into()),
+            remote_etag: Some(etag.into()),
+            synced_at: "2026-04-12T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn planned_remote_delete_removes_the_anchor_and_clears_the_queue() {
+        let harness = CommandTestHarness::new("phase1-delete-remote");
+        let handle = harness.app_handle();
+
+        // Local tree is empty: the user deleted the file locally.
+        let local_root = harness.storage_dir.join("delete-remote-root");
+        fs::create_dir_all(&local_root).expect("local root should exist");
+        let pair = phase_one_pair("pair-delete-remote", &local_root);
+
+        let local_snapshot =
+            super::scan_local_folder(&local_root).expect("local scan should succeed");
+        write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
+            .expect("local snapshot should persist");
+
+        let remote_snapshot = remote_snapshot_with_etags(&[("gone.txt", 5, "etag-base")]);
+        write_remote_index_snapshot_for_pair(&handle, &pair.id, &remote_snapshot)
+            .expect("remote snapshot should persist");
+
+        upsert_sync_anchor_for_pair(
+            &handle,
+            &pair,
+            &anchor_for("gone.txt", "fingerprint-base", "etag-base"),
+        )
+        .expect("anchor should persist");
+
+        let plan =
+            rebuild_durable_plan_for_pair(&handle, &pair, &local_snapshot, &remote_snapshot, true)
+                .expect("plan should build");
+        assert_eq!(plan.pending_operation_count, 1);
+
+        let queue =
+            load_planned_upload_queue_for_pair(&handle, &pair).expect("upload queue should load");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].operation, "delete_remote");
+
+        set_planned_transfer_test_hooks(PlannedTransferTestHooks {
+            upload_refresh_snapshots: BTreeMap::new(),
+            download_payloads: BTreeMap::new(),
+        });
+
+        let outcome = super::run_async_blocking(execute_planned_upload_queue_for_pair(
+            &handle,
+            &harness.app.state::<ActivityDebugState>(),
+            &pair,
+            &test_credentials(),
+        ))
+        .expect("delete execution should succeed");
+        assert_eq!(outcome.execution_error, None);
+
+        let anchors = load_sync_anchors_for_pair(&handle, &pair).expect("anchors should load");
+        assert!(
+            anchors.is_empty(),
+            "propagated delete must drop the anchor, got {anchors:?}"
+        );
+        let remaining =
+            load_planned_upload_queue_for_pair(&handle, &pair).expect("queue should reload");
+        assert!(remaining.is_empty(), "queue item should be completed");
+    }
+
+    #[test]
+    fn planned_local_delete_removes_the_file_and_the_anchor() {
+        let harness = CommandTestHarness::new("phase1-delete-local");
+        let handle = harness.app_handle();
+
+        let local_root = harness.storage_dir.join("delete-local-root");
+        fs::create_dir_all(local_root.join("docs")).expect("local dirs should exist");
+        fs::write(local_root.join("docs/orphan.txt"), b"alpha").expect("local file should exist");
+
+        let pair = phase_one_pair("pair-delete-local", &local_root);
+        let local_snapshot =
+            super::scan_local_folder(&local_root).expect("local scan should succeed");
+        write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
+            .expect("local snapshot should persist");
+
+        // Remote is empty: the object was deleted on the other side.
+        let remote_snapshot = remote_snapshot_with_etags(&[]);
+        write_remote_index_snapshot_for_pair(&handle, &pair.id, &remote_snapshot)
+            .expect("remote snapshot should persist");
+
+        let local_fingerprint = local_fingerprint_for_path(&local_snapshot, "docs/orphan.txt")
+            .expect("local fingerprint should exist");
+        upsert_sync_anchor_for_pair(
+            &handle,
+            &pair,
+            &anchor_for("docs/orphan.txt", &local_fingerprint, "etag-base"),
+        )
+        .expect("anchor should persist");
+
+        rebuild_durable_plan_for_pair(&handle, &pair, &local_snapshot, &remote_snapshot, true)
+            .expect("plan should build");
+
+        let queue = load_planned_download_queue_for_pair(&handle, &pair)
+            .expect("download queue should load");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].operation, "delete_local");
+
+        set_planned_transfer_test_hooks(PlannedTransferTestHooks {
+            upload_refresh_snapshots: BTreeMap::new(),
+            download_payloads: BTreeMap::new(),
+        });
+
+        let outcome = super::run_async_blocking(execute_planned_download_queue_for_pair(
+            &handle,
+            &harness.app.state::<ActivityDebugState>(),
+            &pair,
+            &test_credentials(),
+        ))
+        .expect("local delete execution should succeed");
+        assert_eq!(outcome.execution_error, None);
+
+        assert!(
+            !local_root.join("docs/orphan.txt").exists(),
+            "local file should be gone"
+        );
+        let anchors = load_sync_anchors_for_pair(&handle, &pair).expect("anchors should load");
+        assert!(anchors.is_empty(), "anchor should be dropped");
+    }
+
+    #[test]
+    fn planned_local_move_renames_the_file_without_re_downloading() {
+        let harness = CommandTestHarness::new("phase1-move-local");
+        let handle = harness.app_handle();
+
+        let local_root = harness.storage_dir.join("move-local-root");
+        fs::create_dir_all(&local_root).expect("local root should exist");
+        fs::write(local_root.join("old-name.txt"), b"contents").expect("local file should exist");
+
+        let pair = phase_one_pair("pair-move-local", &local_root);
+        let local_snapshot =
+            super::scan_local_folder(&local_root).expect("local scan should succeed");
+        write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
+            .expect("local snapshot should persist");
+
+        // The remote side renamed the object.
+        let remote_snapshot = remote_snapshot_with_etags(&[("new-name.txt", 8, "etag-base")]);
+        write_remote_index_snapshot_for_pair(&handle, &pair.id, &remote_snapshot)
+            .expect("remote snapshot should persist");
+
+        let local_fingerprint = local_fingerprint_for_path(&local_snapshot, "old-name.txt")
+            .expect("local fingerprint should exist");
+        upsert_sync_anchor_for_pair(
+            &handle,
+            &pair,
+            &anchor_for("old-name.txt", &local_fingerprint, "etag-base"),
+        )
+        .expect("anchor should persist");
+
+        rebuild_durable_plan_for_pair(&handle, &pair, &local_snapshot, &remote_snapshot, true)
+            .expect("plan should build");
+
+        let queue = load_planned_download_queue_for_pair(&handle, &pair)
+            .expect("download queue should load");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].operation, "move_local");
+        assert_eq!(queue[0].target_path.as_deref(), Some("new-name.txt"));
+
+        set_planned_transfer_test_hooks(PlannedTransferTestHooks {
+            upload_refresh_snapshots: BTreeMap::new(),
+            download_payloads: BTreeMap::new(),
+        });
+
+        let outcome = super::run_async_blocking(execute_planned_download_queue_for_pair(
+            &handle,
+            &harness.app.state::<ActivityDebugState>(),
+            &pair,
+            &test_credentials(),
+        ))
+        .expect("local move execution should succeed");
+        assert_eq!(outcome.execution_error, None);
+
+        assert!(
+            !local_root.join("old-name.txt").exists(),
+            "source should be gone"
+        );
+        assert_eq!(
+            fs::read(local_root.join("new-name.txt")).expect("renamed file should exist"),
+            b"contents"
+        );
+    }
+
+    #[test]
+    fn planned_anchor_only_records_the_anchor_without_transferring() {
+        let harness = CommandTestHarness::new("phase1-anchor-only");
+        let handle = harness.app_handle();
+
+        let local_root = harness.storage_dir.join("anchor-only-root");
+        fs::create_dir_all(&local_root).expect("local root should exist");
+        fs::write(local_root.join("same.txt"), b"identical").expect("local file should exist");
+
+        let pair = phase_one_pair("pair-anchor-only", &local_root);
+        let local_snapshot =
+            super::scan_local_folder(&local_root).expect("local scan should succeed");
+        write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
+            .expect("local snapshot should persist");
+
+        let local_fingerprint = local_fingerprint_for_path(&local_snapshot, "same.txt")
+            .expect("local fingerprint should exist");
+
+        // A provider that surfaces our content fingerprint on listing: the
+        // remote object is byte-identical, so a first sync must not transfer.
+        let mut remote_snapshot = remote_snapshot_with_etags(&[("same.txt", 9, "opaque-etag")]);
+        remote_snapshot.entries[0].fingerprint = Some(local_fingerprint.clone());
+        write_remote_index_snapshot_for_pair(&handle, &pair.id, &remote_snapshot)
+            .expect("remote snapshot should persist");
+
+        let plan =
+            rebuild_durable_plan_for_pair(&handle, &pair, &local_snapshot, &remote_snapshot, true)
+                .expect("plan should build");
+        assert_eq!(plan.upload_count, 0);
+        assert_eq!(plan.download_count, 0);
+        assert_eq!(plan.conflict_count, 0);
+
+        let queue =
+            load_planned_upload_queue_for_pair(&handle, &pair).expect("upload queue should load");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].operation, "anchor_only");
+
+        set_planned_transfer_test_hooks(PlannedTransferTestHooks {
+            upload_refresh_snapshots: BTreeMap::new(),
+            download_payloads: BTreeMap::new(),
+        });
+
+        let outcome = super::run_async_blocking(execute_planned_upload_queue_for_pair(
+            &handle,
+            &harness.app.state::<ActivityDebugState>(),
+            &pair,
+            &test_credentials(),
+        ))
+        .expect("anchor execution should succeed");
+        assert_eq!(outcome.execution_error, None);
+
+        let anchors = load_sync_anchors_for_pair(&handle, &pair).expect("anchors should load");
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].path, "same.txt");
+        assert_eq!(
+            anchors[0].local_fingerprint.as_deref(),
+            Some(local_fingerprint.as_str())
+        );
+        assert_eq!(anchors[0].remote_etag.as_deref(), Some("opaque-etag"));
+
+        // Re-planning against the same state is now a clean no-op.
+        let after =
+            rebuild_durable_plan_for_pair(&handle, &pair, &local_snapshot, &remote_snapshot, true)
+                .expect("plan should rebuild");
+        assert_eq!(after.pending_operation_count, 0);
+        assert_eq!(after.noop_count, 1);
+    }
+
+    #[test]
+    fn mass_delete_batches_are_held_for_review_instead_of_executing() {
+        let harness = CommandTestHarness::new("phase1-mass-delete-breaker");
+        let handle = harness.app_handle();
+
+        // Local tree emptied (e.g. a drive that failed to mount): every
+        // anchored path would otherwise plan a remote delete.
+        let local_root = harness.storage_dir.join("mass-delete-root");
+        fs::create_dir_all(&local_root).expect("local root should exist");
+        let pair = phase_one_pair("pair-mass-delete", &local_root);
+
+        let local_snapshot =
+            super::scan_local_folder(&local_root).expect("local scan should succeed");
+        write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
+            .expect("local snapshot should persist");
+
+        let entries: Vec<(String, u64, String)> = (0..40)
+            .map(|index| (format!("bulk/file-{index}.txt"), 4, format!("etag-{index}")))
+            .collect();
+        let borrowed: Vec<(&str, u64, &str)> = entries
+            .iter()
+            .map(|(path, size, etag)| (path.as_str(), *size, etag.as_str()))
+            .collect();
+        let remote_snapshot = remote_snapshot_with_etags(&borrowed);
+        write_remote_index_snapshot_for_pair(&handle, &pair.id, &remote_snapshot)
+            .expect("remote snapshot should persist");
+
+        for (path, _, etag) in &entries {
+            upsert_sync_anchor_for_pair(
+                &handle,
+                &pair,
+                &anchor_for(path, &format!("fingerprint-{path}"), etag),
+            )
+            .expect("anchor should persist");
+        }
+
+        rebuild_durable_plan_for_pair(&handle, &pair, &local_snapshot, &remote_snapshot, true)
+            .expect("plan should build");
+
+        let queue =
+            load_planned_upload_queue_for_pair(&handle, &pair).expect("upload queue should load");
+        assert!(
+            queue.is_empty(),
+            "suppressed deletes must not reach the executable queue, got {queue:?}"
+        );
+
+        let anchors = load_sync_anchors_for_pair(&handle, &pair).expect("anchors should load");
+        assert_eq!(
+            anchors.len(),
+            40,
+            "no anchors may be dropped while deletes are held for review"
         );
     }
 }

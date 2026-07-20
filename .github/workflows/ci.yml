@@ -136,6 +136,16 @@ jobs:
       - name: Rust tests
         run: bun run test:rust
 
+      # The `tauri-command-tests` feature had never been compiled (it carried
+      # duplicate imports and a missing one) so its command-level integration
+      # tests were dead. They are fixed and wired here, but the Tauri mock
+      # runtime fails to load on the Windows dev machine, so this has not been
+      # observed green yet — non-blocking until one CI run proves it out, then
+      # fold it into the step above. See backlog/phase-1-sync-correctness.md.
+      - name: Rust command integration tests (unproven — see comment)
+        continue-on-error: true
+        run: bun run test:rust:commands
+
       - name: Build frontend
         run: bun run build
 

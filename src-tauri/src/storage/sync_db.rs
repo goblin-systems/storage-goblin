@@ -193,6 +193,17 @@ pub fn upsert_sync_anchor_for_pair<R: Runtime>(
     upsert_sync_anchor_at_path(&path, &sync_pair_key(pair), anchor)
 }
 
+/// Drop the last-known-synced record for a path (after a propagated delete,
+/// a move away from the path, or a `forget_anchor` reconciliation).
+pub fn delete_sync_anchor_for_pair<R: Runtime>(
+    app: &AppHandle<R>,
+    pair: &SyncPair,
+    anchor_path: &str,
+) -> Result<(), String> {
+    let path = app_storage_path(app, SYNC_DB_FILE_NAME)?;
+    delete_sync_anchor_at_path(&path, &sync_pair_key(pair), anchor_path)
+}
+
 pub fn mark_download_queue_item_in_progress(
     app: &AppHandle,
     profile: &StoredProfile,
@@ -1208,6 +1219,21 @@ fn upsert_sync_anchor_at_path(
     Ok(())
 }
 
+fn delete_sync_anchor_at_path(
+    path: &Path,
+    profile_key: &str,
+    anchor_path: &str,
+) -> Result<(), String> {
+    let connection = open_connection(path)?;
+    connection
+        .execute(
+            "DELETE FROM sync_anchors WHERE profile_key = ?1 AND path = ?2",
+            params![profile_key, anchor_path],
+        )
+        .map_err(|error| format!("failed to delete sync anchor '{anchor_path}': {error}"))?;
+    Ok(())
+}
+
 fn profile_key(profile: &StoredProfile) -> String {
     format!("{}|{}", profile.local_folder.trim(), profile.bucket.trim(),)
 }
@@ -1241,13 +1267,14 @@ fn option_u64_to_i64(value: Option<u64>) -> Result<Option<i64>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        load_planned_download_queue_from_path, load_planned_upload_queue_from_path,
-        load_planner_summary_from_path, load_sync_anchors_from_path,
-        mark_download_queue_item_completed_at_path, mark_download_queue_item_in_progress_at_path,
-        mark_upload_queue_item_completed_at_path, mark_upload_queue_item_failed_at_path,
-        mark_upload_queue_item_in_progress_at_path, open_connection, persist_sync_plan_to_path,
-        profile_key, recover_interrupted_queue_items_at_path, sync_pair_key,
-        upsert_sync_anchor_at_path, SyncAnchor,
+        delete_sync_anchor_at_path, load_planned_download_queue_from_path,
+        load_planned_upload_queue_from_path, load_planner_summary_from_path,
+        load_sync_anchors_from_path, mark_download_queue_item_completed_at_path,
+        mark_download_queue_item_in_progress_at_path, mark_upload_queue_item_completed_at_path,
+        mark_upload_queue_item_failed_at_path, mark_upload_queue_item_in_progress_at_path,
+        open_connection, persist_sync_plan_to_path, profile_key,
+        recover_interrupted_queue_items_at_path, sync_pair_key, upsert_sync_anchor_at_path,
+        SyncAnchor,
     };
     use crate::storage::profile_store::{StoredProfile, SyncPair};
     use crate::storage::sync_planner::{
@@ -2210,5 +2237,159 @@ mod tests {
         if db_path.exists() {
             fs::remove_file(db_path).expect("should remove temp sqlite database");
         }
+    }
+
+    // -- phase 1: new operations survive the durable queue -------------------
+
+    fn phase_one_plan(items: Vec<PlannedQueueItem>) -> SyncPlan {
+        SyncPlan {
+            summary: SyncPlanSummary {
+                planned_at: "2026-07-19T00:00:00Z".into(),
+                local_file_count: 0,
+                remote_object_count: 0,
+                observed_path_count: items.len() as u64,
+                upload_count: 0,
+                create_directory_count: 0,
+                download_count: 0,
+                conflict_count: 0,
+                noop_count: 0,
+                delete_count: 0,
+                move_count: 0,
+                anchor_count: 0,
+                suppressed_delete_count: 0,
+                pending_operation_count: items.len() as u64,
+                credentials_available: true,
+            },
+            observed_entries: Vec::new(),
+            queue_items: items,
+        }
+    }
+
+    fn queue_item(path: &str, operation: &str, target: Option<&str>) -> PlannedQueueItem {
+        PlannedQueueItem {
+            path: path.into(),
+            operation: operation.into(),
+            target_path: target.map(str::to_string),
+            local_size: None,
+            remote_size: None,
+            expected_local_fingerprint: None,
+            expected_remote_etag: None,
+        }
+    }
+
+    #[test]
+    fn phase_one_operations_route_to_the_right_queue_with_their_targets() {
+        let db_path = temp_path("phase1-queue-routing");
+        let key = "local|bucket";
+
+        let plan = phase_one_plan(vec![
+            queue_item("up.txt", "upload", None),
+            queue_item("down.txt", "download", None),
+            queue_item("gone.txt", "delete_remote", None),
+            queue_item("orphan.txt", "delete_local", None),
+            queue_item("old.txt", "move_remote", Some("new.txt")),
+            queue_item("here.txt", "move_local", Some("there.txt")),
+            queue_item(
+                "clash.txt",
+                "duplicate_conflict",
+                Some("clash (conflict).txt"),
+            ),
+            queue_item("same.txt", "anchor_only", None),
+            queue_item("stale.txt", "forget_anchor", None),
+            queue_item("hmm.txt", "review_required", None),
+        ]);
+
+        persist_sync_plan_to_path(&db_path, key, &plan).expect("plan should persist");
+
+        let upload_queue =
+            load_planned_upload_queue_from_path(&db_path, key).expect("upload queue should load");
+        let upload_ops: Vec<(&str, &str, Option<&str>)> = upload_queue
+            .iter()
+            .map(|item| {
+                (
+                    item.path.as_str(),
+                    item.operation.as_str(),
+                    item.target_path.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            upload_ops,
+            vec![
+                ("up.txt", "upload", None),
+                ("gone.txt", "delete_remote", None),
+                ("old.txt", "move_remote", Some("new.txt")),
+                (
+                    "clash.txt",
+                    "duplicate_conflict",
+                    Some("clash (conflict).txt")
+                ),
+                ("same.txt", "anchor_only", None),
+                ("stale.txt", "forget_anchor", None),
+            ]
+        );
+
+        let download_queue = load_planned_download_queue_from_path(&db_path, key)
+            .expect("download queue should load");
+        let download_ops: Vec<(&str, &str, Option<&str>)> = download_queue
+            .iter()
+            .map(|item| {
+                (
+                    item.path.as_str(),
+                    item.operation.as_str(),
+                    item.target_path.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            download_ops,
+            vec![
+                ("down.txt", "download", None),
+                ("orphan.txt", "delete_local", None),
+                ("here.txt", "move_local", Some("there.txt")),
+            ]
+        );
+
+        // Review items are recorded but never executable.
+        assert!(!upload_ops.iter().any(|(path, _, _)| *path == "hmm.txt"));
+        assert!(!download_ops.iter().any(|(path, _, _)| *path == "hmm.txt"));
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn deleting_a_sync_anchor_removes_only_that_path() {
+        let db_path = temp_path("phase1-anchor-delete");
+        let key = "local|bucket";
+
+        for path in ["keep.txt", "drop.txt"] {
+            upsert_sync_anchor_at_path(
+                &db_path,
+                key,
+                &SyncAnchor {
+                    path: path.into(),
+                    kind: "file".into(),
+                    local_fingerprint: Some("fingerprint".into()),
+                    remote_etag: Some("etag".into()),
+                    synced_at: "2026-07-19T00:00:00Z".into(),
+                },
+            )
+            .expect("anchor should persist");
+        }
+
+        delete_sync_anchor_at_path(&db_path, key, "drop.txt").expect("anchor should delete");
+
+        let remaining: Vec<String> = load_sync_anchors_from_path(&db_path, key)
+            .expect("anchors should load")
+            .into_iter()
+            .map(|anchor| anchor.path)
+            .collect();
+        assert_eq!(remaining, vec!["keep.txt".to_string()]);
+
+        // Deleting an absent anchor is a no-op, not an error.
+        delete_sync_anchor_at_path(&db_path, key, "never-existed.txt")
+            .expect("absent anchor delete should succeed");
+
+        let _ = fs::remove_file(&db_path);
     }
 }

@@ -9,6 +9,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:rust:commands": "cargo test --manifest-path src-tauri/Cargo.toml --features tauri-command-tests",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
