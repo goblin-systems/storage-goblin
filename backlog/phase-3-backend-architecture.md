@@ -66,15 +66,19 @@ for `tauri::` outside `ipc`/`platform`).
 
 ### 3.1 Delete the legacy single-profile path (do this FIRST — it halves phases 1–2)
 
-- [ ] Confirm the frontend only calls the `*_sync_location` + `validate_storage_connection`
-      forms (grep `src/app/client.ts`); delete the alias commands from `lib.rs`.
-- [ ] Migrate any remaining profile-level state to pairs on startup (migration code exists —
-      `migrate_flat_fields_to_sync_pairs` in `profile_store.rs`; make it terminal: after one
-      release, drop the legacy read path).
-- [ ] Delete `run_sync_cycle`, `execute_planned_*_queue` (non-pair), `snapshot_for_profile`,
-      `start_polling_worker` (non-pair) and friends; keep only `_for_pair` implementations,
-      then drop the suffix.
-- [ ] Expected outcome: `commands.rs` shrinks by roughly a third before any real refactor.
+- [x] Confirmed and deleted. The frontend used the `*_sync_location` forms throughout;
+      the `*_sync_pair` aliases and `validate_s3_connection` are gone.
+- [x] The migration already ran on every `read_profile_from_disk` (and relocates the index
+      snapshots), so a configured flat profile becomes a location on first read. The legacy
+      *read* path is retained deliberately — it is what performs the migration — but every
+      legacy *execution* path is deleted, so there is nothing left for it to feed.
+- [x] All deleted, plus 23 further helpers the compiler then reported unreachable, the 12
+      flat-profile variants in `sync_db`, and the flat index writers. **Deviation:** the
+      `_for_pair` suffixes were *kept*. Renaming ~40 functions would have churned every call
+      site and test for cosmetics; better done when phase 3.3's module boundaries make the
+      suffix genuinely redundant.
+- [x] Outcome: 12,890 -> 10,926 lines (~2,800 production lines removed; the file also
+      carries ~4,000 lines of tests).
 
 ### 3.2 Typed domain model
 
@@ -87,18 +91,23 @@ for `tauri::` outside `ipc`/`platform`).
 
 ### 3.3 Extract services & engine
 
-- [ ] Mechanical moves first (functions relocated verbatim + imports), one domain per PR:
-      credentials → `credential_service`, remote bin/versioning → `bin_service`,
-      shell/OS calls → `platform`, comparison prep → its own service.
-- [ ] `SyncState` (global mutable state) redesigned: per-pair actor or `tokio::sync` model
-      owned by `sync_service`; this is the enabler for phase 2.2's parallel scheduler —
-      **sequence 3.3 before 2.2**.
-- [ ] Planner moves into `engine` with phase 1's rewrite (do the move as part of the rewrite
-      to avoid double churn).
-- [ ] `run_async_blocking` eliminated; commands are `async fn`, services expose async APIs,
-      blocking file IO goes through `spawn_blocking`.
-- [ ] Module size gate in CI: no file > 800 lines in `src-tauri/src` (tests exempt);
-      clippy `too_many_lines` on.
+- [x] Done, and further than planned. Eleven modules extracted, all mechanical (bodies
+      unchanged): `platform`, `compare_service`, `bin_service`, `credential_service`,
+      `lifecycle_service`, `transfer_service`, `polling_service`, `sync_service`,
+      `queue_service`, `conflict_service`.
+- [ ] **Not done.** `SyncState` is still the shared-mutex model; the actor/`tokio::sync`
+      redesign has not started. This remains the blocker for phase 2.2's parallel scheduler,
+      and the sequencing note still holds. Related: phase 3.1 removed the legacy
+      cycle-overlap lock along with its only caller, and the per-pair path has never had
+      one — see the note in phase 2.
+- [ ] **Not done.** The planner was rewritten in place during phase 1; it still lives at
+      `storage/sync_planner.rs` rather than under an `engine/` directory. The rewrite avoided
+      double churn as intended, but the directory move did not happen.
+- [ ] **Not done.** `run_async_blocking` survives, and blocking file IO still runs on the
+      async executor rather than `spawn_blocking`.
+- [ ] **Not added.** Adding the gate now would fail: `commands.rs` (2,666 production lines)
+      and `bin_service.rs` (1,007) are still over. Worth adding together with the remaining
+      splits so it lands green.
 
 ### 3.4 State & persistence consolidation
 
@@ -125,17 +134,83 @@ for `tauri::` outside `ipc`/`platform`).
 3. 3.3 services/state — before phase 2.2 (scheduler needs the new state model).
 4. 3.4–3.5 — trailing, before phase 4 starts consuming generated types.
 
+
+## Status (2026-07-20)
+
+Landed on `overhaul/phase-1` (phase 3 work continued on the same branch rather
+than a fresh epic branch — see the caveat below). **3.1 is complete; 3.3 is
+substantially done; 3.2, 3.4, and 3.5 are not started.**
+
+### What the backend looks like now
+
+`commands.rs` went from 12,404 lines to **2,666 lines of production code**
+(plus ~4,000 lines of tests still co-located). Eleven modules now own one
+concern each:
+
+| Module | Prod lines | Owns |
+|--------|-----------:|------|
+| `commands.rs` | 2,666 | Tauri command surface, shared response types, profile/location CRUD |
+| `bin_service.rs` | 1,007 | remote bin: listing, restore, purge, destination validation |
+| `sync_service.rs` | 746 | per-location cycle, snapshots, plan rebuild, polling worker |
+| `queue_service.rs` | 737 | draining the durable upload/download queues |
+| `transfer_service.rs` | ~540 | executing one planned operation (transfer or structural) |
+| `compare_service.rs` | 356 | inline vs external comparison payloads |
+| `conflict_service.rs` | ~300 | manual conflict resolution |
+| `platform.rs` | ~270 | OS integration and local filesystem effects |
+| `lifecycle_service.rs` | 251 | per-bucket lifecycle rules, versioning application |
+| `polling_service.rs` | ~150 | when each location is due |
+| `credential_service.rs` | 138 | credential resolution, test contexts, capability messages |
+
+296 Rust tests and 219 frontend tests green; clippy clean at `-D warnings` in
+both feature configurations; rustfmt clean.
+
+### Not done — do not mistake this for phase 3 complete
+
+1. **3.2 typed domain model: not started.** The only typed enum is
+   `sync_planner::Operation` (from phase 1). `EntryKind`, `Resolution`, `Phase`,
+   `ConflictStrategy`, and `ProviderId` are still compared as raw strings, and
+   `src/app/types.ts` is still 781 hand-written lines rather than generated from
+   Rust. This is the highest-value remaining item: it is what stops IPC drift
+   from being a runtime surprise.
+2. **3.4 persistence consolidation: not started.** No repository layer, no
+   formal migration table — raw SQL still lives outside a repository boundary.
+   Note this is now entangled with two pending schema changes (phase 1's
+   tombstones, phase 2.3's indexes); doing all three as one migration is the
+   right sequencing.
+3. **3.5 test relocation: only what the compiler forced.** Tests moved when
+   their subject moved and the import broke; the two large test modules
+   (~4,000 lines) still sit in `commands.rs` testing code that now lives
+   elsewhere. Coverage targets (engine ≥ 85 %) are unmeasured.
+4. **The target directory layout was not adopted.** Modules are flat siblings
+   under `storage/` rather than `engine/` + `providers/` + `services/` + `ipc/`.
+   Consequently the layering rule is **not** enforced: services still take
+   `AppHandle`, so `tauri::` types reach into what should be a Tauri-free core.
+   The extraction did the hard part (separating concerns); the directory move
+   and the dependency rule are still open.
+5. **`SyncState` redesign not started**, which still blocks phase 2.2.
+6. **The Azure adapter spike (acceptance criterion 5) was not attempted.**
+
+### Process caveat
+
+CONTRIBUTING says overhaul work happens on `overhaul/phase-N` branches. Phases
+1 and 3 both landed on `overhaul/phase-1`, so that branch now carries two
+phases' worth of change and has never been pushed or CI-verified. Splitting it,
+or at minimum getting one green CI run before merging, is worth doing before
+this grows further.
+
 ## Acceptance criteria
 
-1. Zero duplicate command aliases; legacy profile path deleted; one orchestration code path.
-2. `commands.rs` no longer exists; largest backend file ≤ 800 lines; layering rule enforced
-   in CI; `tauri::` types absent from `engine/`.
-3. Domain enums replace operation/resolution/kind/phase/strategy strings in Rust;
-   `src/app/types.ts` is generated, not hand-written.
-4. All Rust tests green on 3 OSes in CI; engine coverage ≥ 85 %.
-5. A dry-run Azure adapter spike (stub implementing `ObjectStorage` against the simulator
-   contract tests) compiles without touching `engine` or `services` — proves the seam for
-   phase 6.
+1. ✅ Zero duplicate command aliases; legacy execution paths deleted; one orchestration
+   code path. (The legacy profile *read* path remains, because it is the migration.)
+2. ⚠️ Partially met. `commands.rs` still exists at 2,666 production lines (down from
+   12,404) and `bin_service.rs` is 1,007; the ≤ 800 gate is therefore not added. The
+   layering rule is **not** enforced and `tauri::` types are present throughout the
+   services, because the `engine/` boundary was not created.
+3. ❌ Not met. Only `Operation` is an enum; `types.ts` is still hand-written.
+4. ⚠️ Tests are green locally on Windows (296 Rust, 219 frontend) and CI is configured
+   for 3 OSes, but this branch has never been pushed, so "green in CI" is unverified.
+   Engine coverage is unmeasured.
+5. ❌ Not attempted.
 
 ## Risks
 
