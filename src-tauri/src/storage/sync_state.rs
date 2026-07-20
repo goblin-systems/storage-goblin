@@ -103,7 +103,6 @@ pub struct SyncState {
     polling_worker: Mutex<PollingWorkerState>,
     watcher_runtime: Mutex<WatcherRuntimeState>,
     dirty_pairs: Mutex<BTreeMap<String, DirtyPairState>>,
-    cycle_running: AtomicBool,
 }
 
 pub(crate) fn get_status_lock<'a>(
@@ -256,25 +255,6 @@ pub(crate) fn polling_worker_active(state: &State<'_, SyncState>) -> Result<bool
         .lock()
         .map(|worker| worker.active_worker_id.is_some())
         .map_err(|_| "polling worker lock poisoned".to_string())
-}
-
-pub(crate) fn try_begin_sync_cycle(state: &State<'_, SyncState>) -> bool {
-    try_begin_sync_cycle_inner(state)
-}
-
-fn try_begin_sync_cycle_inner(state: &SyncState) -> bool {
-    state
-        .cycle_running
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-}
-
-pub(crate) fn finish_sync_cycle(state: &State<'_, SyncState>) {
-    finish_sync_cycle_inner(state);
-}
-
-fn finish_sync_cycle_inner(state: &SyncState) {
-    state.cycle_running.store(false, Ordering::SeqCst);
 }
 
 pub(crate) fn install_pair_watcher(
@@ -919,10 +899,9 @@ pub(crate) fn aggregate_pair_statuses(statuses: &[PairSyncStatus]) -> AggregateS
 mod tests {
     use super::{
         aggregate_pair_statuses, begin_polling_worker_inner, clear_dirty_pair_inner,
-        clear_polling_worker_inner, due_dirty_pairs_inner, finish_sync_cycle_inner,
-        mark_pair_dirty_at_inner, pair_to_status, profile_to_status, stop_polling_worker_inner,
-        synthesize_status_from_pairs, try_begin_sync_cycle_inner, PairSyncStatus, SyncState,
-        SyncStatusStats,
+        clear_polling_worker_inner, due_dirty_pairs_inner, mark_pair_dirty_at_inner,
+        pair_to_status, profile_to_status, stop_polling_worker_inner, synthesize_status_from_pairs,
+        PairSyncStatus, SyncState, SyncStatusStats,
     };
     use crate::storage::{
         credentials_store::CredentialValidationStatus,
@@ -1079,18 +1058,6 @@ mod tests {
             .expect("stale worker cleanup should be ignored");
         assert!(stop_polling_worker_inner(&state).expect("active worker should still exist"));
         assert!(second_signal.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn sync_cycle_lock_prevents_overlap_until_finished() {
-        let state = SyncState::default();
-
-        assert!(try_begin_sync_cycle_inner(&state));
-        assert!(!try_begin_sync_cycle_inner(&state));
-
-        finish_sync_cycle_inner(&state);
-
-        assert!(try_begin_sync_cycle_inner(&state));
     }
 
     #[test]

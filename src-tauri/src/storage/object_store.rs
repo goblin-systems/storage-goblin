@@ -123,6 +123,7 @@ pub struct ValidationSummary {
     pub object_count_sampled: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BucketEnsureSummary {
@@ -415,6 +416,10 @@ pub async fn validate_connection(
     }
 }
 
+// Bucket creation is currently unreachable: it was only wired to the removed
+// connect_and_sync flow. Kept because phase 5's onboarding wizard needs it
+// (backlog/phase-5-ux-overhaul.md, 5.2). Delete if that design drops it.
+#[allow(dead_code)]
 pub async fn ensure_bucket_exists(
     config: &StorageConnectionConfig,
 ) -> Result<BucketEnsureSummary, SyncError> {

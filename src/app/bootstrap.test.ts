@@ -146,9 +146,7 @@ vi.mock("./client", () => ({
   createStorageGoblinClient: () => ({
     supportsNativeProfilePersistence: true,
     chooseLocalFolder: chooseLocalFolderMock,
-    connectAndSync: vi.fn(),
     validateConnection: vi.fn(),
-    validateS3Connection: vi.fn(),
     listCredentials: listCredentialsMock,
     createCredential: createCredentialMock,
     testCredential: testCredentialMock,
@@ -159,10 +157,6 @@ vi.mock("./client", () => ({
     getSyncStatus: getSyncStatusMock,
     startSync: vi.fn(),
     pauseSync: vi.fn(),
-    runFullRescan: vi.fn(),
-    refreshRemoteInventory: vi.fn(),
-    buildSyncPlan: vi.fn(),
-    executePlannedUploads: vi.fn(),
     listenSyncStatus: vi.fn().mockResolvedValue(() => undefined),
     listenNativeActivity: vi.fn().mockResolvedValue(() => undefined),
     getActivityDebugLogState: vi.fn().mockResolvedValue({

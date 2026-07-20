@@ -207,9 +207,7 @@ async function invokeProfileCommand(
 export interface StorageGoblinClient {
   readonly supportsNativeProfilePersistence: boolean;
   chooseLocalFolder(): Promise<string | null>;
-  connectAndSync(profile: StorageProfileDraft): Promise<SyncStatus>;
   validateConnection(profile: StorageProfileDraft): Promise<ConnectionValidationResult>;
-  validateS3Connection(profile: StorageProfileDraft): Promise<ConnectionValidationResult>;
   listCredentials(): Promise<CredentialSummary[]>;
   createCredential(draft: CredentialDraft): Promise<CredentialSummary>;
   testCredential(request: CredentialTestRequest): Promise<CredentialTestResult>;
@@ -220,10 +218,6 @@ export interface StorageGoblinClient {
   getSyncStatus(): Promise<SyncStatus>;
   startSync(): Promise<SyncStatus>;
   pauseSync(): Promise<SyncStatus>;
-  runFullRescan(): Promise<SyncStatus>;
-  refreshRemoteInventory(profile: StorageProfileDraft): Promise<SyncStatus>;
-  buildSyncPlan(): Promise<SyncStatus>;
-  executePlannedUploads(): Promise<SyncStatus>;
   listenSyncStatus(listener: StatusListener): Promise<() => void>;
   listenNativeActivity(listener: ActivityListener): Promise<() => void>;
   getActivityDebugLogState(): Promise<ActivityDebugLogState>;
@@ -277,27 +271,11 @@ export function createStorageGoblinClient(): StorageGoblinClient {
       const result = await dialog.open({ directory: true, multiple: false });
       return typeof result === "string" ? result : null;
     },
-    async connectAndSync(profile) {
-      if (!native) {
-        const stored = saveStoredProfileToBrowserStorage(profile);
-        browserStatus = {
-          ...createBrowserStatus(stored),
-          lastError:
-            "Browser preview saved your setup locally. Connect and sync runs only in the desktop app.",
-        };
-        emitBrowserStatus(browserStatus);
-        return { ...browserStatus };
-      }
-      return invokeCommand<SyncStatus>("connect_and_sync", { profile });
-    },
     async validateConnection(profile) {
       if (!native) return mockValidateConnection(profile);
       return invokeCommand<ConnectionValidationResult>("validate_storage_connection", {
         input: profile,
       });
-    },
-    async validateS3Connection(profile) {
-      return this.validateConnection(profile);
     },
     async listCredentials() {
       if (!native) return [];
@@ -421,66 +399,6 @@ export function createStorageGoblinClient(): StorageGoblinClient {
         return { ...browserStatus };
       }
       return invokeCommand<SyncStatus>("pause_sync");
-    },
-    async runFullRescan() {
-      if (!native) {
-        const profile = loadStoredProfileFromBrowserStorage();
-        browserStatus = {
-          ...createBrowserStatus(profile),
-          phase:
-            profile.localFolder && profile.bucket
-              ? profile.remotePollingEnabled
-                ? "polling"
-                : "idle"
-              : "unconfigured",
-          lastRescanAt: nowIsoString(),
-        };
-        emitBrowserStatus(browserStatus);
-        return { ...browserStatus };
-      }
-      return invokeCommand<SyncStatus>("run_full_rescan");
-    },
-    async refreshRemoteInventory(profile) {
-      if (!native) {
-        const stored = loadStoredProfileFromBrowserStorage();
-        browserStatus = {
-          ...createBrowserStatus(stored),
-          phase:
-            stored.localFolder && stored.bucket
-              ? stored.remotePollingEnabled
-                ? "polling"
-                : "idle"
-              : "unconfigured",
-          lastError: null,
-        };
-        emitBrowserStatus(browserStatus);
-        return { ...browserStatus };
-      }
-      return invokeCommand<SyncStatus>("refresh_remote_inventory", { input: profile });
-    },
-    async buildSyncPlan() {
-      if (!native) {
-        browserStatus = {
-          ...browserStatus,
-          lastError: "Durable sync planning is only available in the native desktop runtime.",
-        };
-        emitBrowserStatus(browserStatus);
-        return { ...browserStatus };
-      }
-      return invokeCommand<SyncStatus>("build_sync_plan");
-    },
-    async executePlannedUploads() {
-      if (!native) {
-        const profile = loadStoredProfileFromBrowserStorage();
-        browserStatus = {
-          ...createBrowserStatus(profile),
-          lastError:
-            "Manual upload execution is only available in the native desktop runtime. Browser fallback did not run uploads.",
-        };
-        emitBrowserStatus(browserStatus);
-        return { ...browserStatus };
-      }
-      return invokeCommand<SyncStatus>("execute_planned_uploads");
     },
     async listenSyncStatus(listener) {
       if (!native) {

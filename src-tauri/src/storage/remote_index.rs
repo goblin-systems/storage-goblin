@@ -66,14 +66,6 @@ pub fn read_remote_index_snapshot<R: Runtime>(
     read_remote_index_snapshot_file(&path).map(Some)
 }
 
-pub fn write_remote_index_snapshot<R: Runtime>(
-    app: &AppHandle<R>,
-    snapshot: &RemoteIndexSnapshot,
-) -> Result<(), String> {
-    let path = app_storage_path(app, REMOTE_INDEX_FILE_NAME)?;
-    write_remote_index_snapshot_file(&path, snapshot)
-}
-
 pub fn read_remote_index_snapshot_for_pair<R: Runtime>(
     app: &AppHandle<R>,
     pair_id: &str,

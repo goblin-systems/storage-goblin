@@ -73,71 +73,6 @@ describe("storage goblin client", () => {
     invokeMock.mockReset();
   });
 
-  it("saves browser connect requests locally without pretending sync ran", async () => {
-    const client = createStorageGoblinClient();
-    const status = await client.connectAndSync({
-      ...DEFAULT_STORED_PROFILE,
-      localFolder: "C:/sync",
-      bucket: "demo-bucket",
-      credentialProfileId: "cred-1",
-      selectedCredential: {
-        id: "cred-1",
-        name: "Primary",
-        provider: "aws",
-        ready: true,
-        validationStatus: "untested",
-        lastTestedAt: null,
-        lastTestMessage: null,
-      },
-      selectedCredentialAvailable: true,
-      credentialsStoredSecurely: true,
-    });
-
-    expect(
-      JSON.parse(window.localStorage.getItem(LOCAL_PROFILE_STORAGE_KEY) ?? "{}"),
-    ).toMatchObject({
-      localFolder: "C:/sync",
-      bucket: "demo-bucket",
-      credentialProfileId: "cred-1",
-      selectedCredential: {
-        id: "cred-1",
-        name: "Primary",
-        provider: "aws",
-        ready: true,
-        validationStatus: "untested",
-        lastTestedAt: null,
-        lastTestMessage: null,
-      },
-      selectedCredentialAvailable: false,
-      credentialsStoredSecurely: false,
-    });
-    expect(status.phase).toBe("idle");
-    expect(status.lastSyncAt).toBeNull();
-    expect(status.lastError).toBe(
-      "Browser preview saved your setup locally. Connect and sync runs only in the desktop app.",
-    );
-  });
-
-  it("keeps browser upload execution as a safe no-op with a clear error", async () => {
-    window.localStorage.setItem(
-      LOCAL_PROFILE_STORAGE_KEY,
-      JSON.stringify({
-        ...DEFAULT_STORED_PROFILE,
-        localFolder: "C:/sync",
-        bucket: "demo-bucket",
-      }),
-    );
-
-    const client = createStorageGoblinClient();
-    const status = await client.executePlannedUploads();
-
-    expect(status.phase).toBe("idle");
-    expect(status.lastSyncAt).toBeNull();
-    expect(status.lastError).toBe(
-      "Manual upload execution is only available in the native desktop runtime. Browser fallback did not run uploads.",
-    );
-  });
-
   it("saves browser settings without needing credentials", async () => {
     const client = createStorageGoblinClient();
     const stored = await client.saveProfileSettings({
@@ -658,12 +593,8 @@ describe("storage goblin client", () => {
     };
 
     await client.validateConnection(profile);
-    await client.validateS3Connection(profile);
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, "validate_storage_connection", {
-      input: profile,
-    });
-    expect(invokeMock).toHaveBeenNthCalledWith(2, "validate_storage_connection", {
       input: profile,
     });
   });

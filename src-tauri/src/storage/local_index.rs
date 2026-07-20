@@ -45,14 +45,6 @@ pub fn read_local_index_snapshot<R: Runtime>(
     read_local_index_snapshot_file(&path).map(Some)
 }
 
-pub fn write_local_index_snapshot<R: Runtime>(
-    app: &AppHandle<R>,
-    snapshot: &LocalIndexSnapshot,
-) -> Result<(), String> {
-    let path = app_storage_path(app, LOCAL_INDEX_FILE_NAME)?;
-    write_local_index_snapshot_file(&path, snapshot)
-}
-
 pub fn read_local_index_snapshot_for_pair<R: Runtime>(
     app: &AppHandle<R>,
     pair_id: &str,

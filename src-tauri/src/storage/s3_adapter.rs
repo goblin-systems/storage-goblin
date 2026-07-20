@@ -118,6 +118,7 @@ pub struct BucketLifecycleState {
     pub transition_default_minimum_object_size: Option<TransitionDefaultMinimumObjectSize>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BucketEnsureSummary {
@@ -258,6 +259,10 @@ pub async fn validate_credentials(
     })
 }
 
+// Bucket creation is currently unreachable: it was only wired to the removed
+// connect_and_sync flow. Kept because phase 5's onboarding wizard needs it
+// (backlog/phase-5-ux-overhaul.md, 5.2). Delete if that design drops it.
+#[allow(dead_code)]
 pub async fn ensure_bucket_exists(
     config: &S3ConnectionConfig,
 ) -> Result<BucketEnsureSummary, SyncError> {
@@ -789,6 +794,7 @@ fn validate_required_fields(config: &S3ConnectionConfig) -> Result<(), SyncError
     Ok(())
 }
 
+#[allow(dead_code)]
 fn create_bucket_configuration(config: &S3ConnectionConfig) -> Option<CreateBucketConfiguration> {
     if should_skip_bucket_location_constraint(&config.region) {
         return None;
@@ -803,6 +809,7 @@ fn create_bucket_configuration(config: &S3ConnectionConfig) -> Option<CreateBuck
     )
 }
 
+#[allow(dead_code)]
 fn should_skip_bucket_location_constraint(region: &str) -> bool {
     region_or_default(region) == "us-east-1"
 }
@@ -830,6 +837,7 @@ pub(crate) fn copy_source(bucket: &str, key: &str) -> String {
     )
 }
 
+#[allow(dead_code)]
 fn is_missing_bucket_error<E>(error: &aws_sdk_s3::error::SdkError<E>) -> bool
 where
     E: ProvideErrorMetadata,
@@ -846,6 +854,7 @@ where
         })
 }
 
+#[allow(dead_code)]
 fn bucket_already_exists_for_caller<E>(error: &aws_sdk_s3::error::SdkError<E>) -> bool
 where
     E: ProvideErrorMetadata,

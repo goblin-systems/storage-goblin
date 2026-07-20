@@ -208,6 +208,7 @@ struct GcsBucketDetail {
     versioning: Option<GcsBucketVersioning>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 struct GcsCreateBucketRequest<'a> {
     name: &'a str,
@@ -412,6 +413,7 @@ impl GcsClient {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn bucket_exists(&self, bucket: &str) -> Result<bool, SyncError> {
         let response = self
             .authorized_get(&format!(
@@ -427,6 +429,7 @@ impl GcsClient {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn create_bucket(&self, bucket: &str, region: &str) -> Result<(), SyncError> {
         let request = GcsCreateBucketRequest {
             name: bucket,
@@ -1229,6 +1232,7 @@ async fn render_http_error(response: reqwest::Response, action: &str) -> SyncErr
     SyncError::from_http_status(status.as_u16(), message).with_retry_after(retry_after_seconds)
 }
 
+#[allow(dead_code)]
 fn normalize_region(region: &str) -> Option<String> {
     let value = region.trim();
     if value.is_empty() {
