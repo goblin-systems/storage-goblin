@@ -6,13 +6,18 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 pub mod activity;
 #[cfg(test)]
 mod bench_baseline;
+pub mod bin_service;
 pub mod commands;
+pub mod compare_service;
+pub mod credential_service;
 pub mod credentials_store;
 pub mod error;
 pub mod gcs_adapter;
 pub mod inventory_compare;
+pub mod lifecycle_service;
 pub mod local_index;
 pub mod object_store;
+pub mod platform;
 pub mod profile_store;
 pub mod provider;
 pub mod remote_bin;

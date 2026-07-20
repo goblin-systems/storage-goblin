@@ -2,19 +2,36 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     future::Future,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 use uuid::Uuid;
 
 use super::{
     activity::{emit_activity, ActivityDebugState, ActivityLevel},
-    app_storage_path,
+    bin_service::{
+        build_bin_entry_responses, build_versioned_bin_entry_responses,
+        collect_remote_bin_keys_for_request, collect_versioned_bin_entries_for_request,
+        collect_versioned_history_for_deleted_entries, destination_key_for_bin_restore,
+        normalize_bin_entry_kind, normalize_restore_relative_path, parse_versioned_bin_key,
+        validate_bin_batch_requests, validate_bulk_restore_destinations,
+        validate_local_restore_destination, validate_restore_destination, VersionedBinEntry,
+    },
+    compare_service::{
+        finalize_conflict_compare_details, finalize_version_compare_details,
+        temp_compare_file_path, temp_version_compare_file_path,
+    },
+    credential_service::{
+        format_permission_probe_summary, format_storage_validation_success_message,
+        provider_runtime_object_versioning_message, provider_supports_runtime_object_versioning,
+        resolve_credential_test_context, resolve_profile_credential_name,
+        resolve_selected_credential_state, should_defer_create_time_credential_test,
+        sync_location_runtime_object_versioning_message,
+    },
     credentials_store::{
         create_credential, delete_credential as delete_stored_credential,
         ensure_legacy_credentials_migrated, get_credential_summary, list_credentials,
@@ -23,25 +40,31 @@ use super::{
         CredentialValidationStatus, StoredCredentials,
     },
     default_provider,
+    lifecycle_service::{
+        load_credentials_for_remote_bin_target, persist_profile_with_remote_bin_reconciliation,
+        provider_supports_remote_bin_lifecycle_reconciliation,
+        remote_bin_lifecycle_reconciliation_unsupported_message, target_for_pair,
+        RemoteBinLifecycleTarget,
+    },
     local_index::{
         read_local_index_snapshot, read_local_index_snapshot_for_pair, scan_local_folder,
         write_local_index_snapshot_for_pair, LocalIndexSnapshot,
     },
     now_iso, object_store,
+    platform::{
+        cleanup_empty_ancestors, normalize_directory_delete_path, open_path_with_default_app,
+        remove_local_directory_subtree, rename_local_file_for_pair, resolve_local_download_path,
+        resolve_local_upload_path, reveal_in_file_manager, trash_local_file_for_pair,
+    },
     profile_store::{
         is_pair_configured, is_profile_configured, read_profile_from_disk, write_profile_to_disk,
         ConnectionValidationInput, ConnectionValidationResult, ProfileDraft,
         SelectedCredentialState, StoredProfile, SyncPair, SyncPairDraft,
     },
-    provider::{
-        normalize_provider, provider_capabilities, runtime_provider_capabilities,
-        supported_providers, GCS_PROVIDER,
-    },
+    provider::{normalize_provider, provider_capabilities, supported_providers, GCS_PROVIDER},
     remote_bin::{
-        bin_prefix_contains_bin_key, deleted_directory_key, deleted_object_key,
-        managed_lifecycle_rule_plan, namespace_prefix,
-        original_relative_path_from_bin_key_for_pair, pair_bin_prefix, ManagedLifecycleRulePlan,
-        DEFAULT_REMOTE_BIN_PAIR_ID,
+        deleted_directory_key, deleted_object_key, namespace_prefix,
+        original_relative_path_from_bin_key_for_pair, pair_bin_prefix,
     },
     remote_index::{
         directory_relative_paths_from_key, directory_relative_paths_from_relative_path,
@@ -74,15 +97,8 @@ use super::{
     watchers::{plan_watch_reconciliation, start_pair_watcher, WatchTarget, WatcherCallbackEvent},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct VersionedBinEntry {
-    key: String,
-    version_id: String,
-    relative_path: String,
-    kind: String,
-    storage_class: Option<String>,
-    deleted_at: Option<String>,
-}
+#[cfg(test)]
+use super::platform::remove_local_file_without_trash_for_pair;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -221,9 +237,6 @@ const PLANNED_UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 const PLANNED_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 const DIRTY_PAIR_DEBOUNCE: Duration = Duration::from_millis(750);
 const LOCAL_SNAPSHOT_STALE_TTL: Duration = Duration::from_secs(300);
-const INLINE_TEXT_COMPARE_MAX_BYTES: usize = 128 * 1024;
-const INLINE_IMAGE_COMPARE_MAX_BYTES: usize = 5 * 1024 * 1024;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PairSyncTrigger {
     Manual,
@@ -382,60 +395,6 @@ fn merge_snapshot_errors(
         (Some(local), None) => Some(local),
         (None, Some(remote)) => Some(remote),
         (None, None) => None,
-    }
-}
-
-fn resolve_local_upload_path(root: &str, relative_path: &str) -> Result<PathBuf, String> {
-    let relative = Path::new(relative_path);
-    let mut resolved = PathBuf::from(root);
-
-    for component in relative.components() {
-        match component {
-            Component::Normal(part) => resolved.push(part),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(format!(
-                    "planned upload path '{relative_path}' is not a safe relative file path"
-                ));
-            }
-        }
-    }
-
-    Ok(resolved)
-}
-
-fn resolve_local_download_path(root: &str, relative_path: &str) -> Result<PathBuf, String> {
-    let relative = Path::new(relative_path);
-    let mut resolved = PathBuf::from(root);
-
-    for component in relative.components() {
-        match component {
-            Component::Normal(part) => resolved.push(part),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(format!(
-                    "planned download path '{relative_path}' is not a safe relative file path"
-                ));
-            }
-        }
-    }
-
-    Ok(resolved)
-}
-
-/// Removes empty directories from `file_path`'s parent up to (but not including) `root`.
-/// Stops as soon as a directory is non-empty or cannot be removed.
-fn cleanup_empty_ancestors(file_path: &Path, root: &Path) {
-    let mut current = file_path.parent();
-    while let Some(dir) = current {
-        if dir == root {
-            break;
-        }
-        // remove_dir only succeeds on empty directories
-        if std::fs::remove_dir(dir).is_err() {
-            break;
-        }
-        current = dir.parent();
     }
 }
 
@@ -635,58 +594,6 @@ async fn delete_remote_object_for_pair<R: Runtime>(
         #[cfg(test)]
         PairTransferExecutor::Mock => Ok(()),
     }
-}
-
-/// Move a local file to the OS trash. A propagated delete must always be
-/// recoverable, so this never hard-unlinks (backlog phase 1, ADR-2b).
-fn trash_local_file_for_pair(pair: &SyncPair, path: &str) -> Result<(), String> {
-    let local_path = resolve_local_download_path(&pair.local_folder, path)?;
-
-    match std::fs::symlink_metadata(&local_path) {
-        Ok(_) => trash::delete(&local_path).map_err(|error| {
-            format!(
-                "failed to move '{}' to the trash: {error}",
-                local_path.display()
-            )
-        })?,
-        // Already gone: the delete is satisfied.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "failed to inspect '{}' before deleting: {error}",
-                local_path.display()
-            ));
-        }
-    }
-
-    cleanup_empty_ancestors(&local_path, Path::new(&pair.local_folder));
-    Ok(())
-}
-
-/// Rename a local file, creating the destination's parent directories.
-fn rename_local_file_for_pair(pair: &SyncPair, from: &str, to: &str) -> Result<(), String> {
-    let source = resolve_local_download_path(&pair.local_folder, from)?;
-    let destination = resolve_local_download_path(&pair.local_folder, to)?;
-
-    if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "failed to create directory for '{}': {error}",
-                destination.display()
-            )
-        })?;
-    }
-
-    std::fs::rename(&source, &destination).map_err(|error| {
-        format!(
-            "failed to rename '{}' to '{}': {error}",
-            source.display(),
-            destination.display()
-        )
-    })?;
-
-    cleanup_empty_ancestors(&source, Path::new(&pair.local_folder));
-    Ok(())
 }
 
 /// Write the anchor for `path` from the local file's fingerprint and the
@@ -919,23 +826,6 @@ fn perform_structural_download_operation_for_pair<R: Runtime>(
     Some(result)
 }
 
-#[cfg(test)]
-fn remove_local_file_without_trash_for_pair(pair: &SyncPair, path: &str) -> Result<(), String> {
-    let local_path = resolve_local_download_path(&pair.local_folder, path)?;
-    match std::fs::remove_file(&local_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "failed to remove '{}': {error}",
-                local_path.display()
-            ))
-        }
-    }
-    cleanup_empty_ancestors(&local_path, Path::new(&pair.local_folder));
-    Ok(())
-}
-
 fn persist_upload_success_for_pair<R: Runtime>(
     app: &AppHandle<R>,
     pair: &SyncPair,
@@ -1146,62 +1036,8 @@ struct DownloadExecutionOutcome {
     downloads_ran: bool,
 }
 
-fn resolve_selected_credential_state<R: Runtime>(
-    app: &AppHandle<R>,
-    credential_id: Option<&str>,
-) -> Result<SelectedCredentialState, String> {
-    let Some(credential_id) = credential_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(SelectedCredentialState::default());
-    };
-
-    let Some(summary) = get_credential_summary(app, credential_id)? else {
-        return Ok(SelectedCredentialState::default());
-    };
-
-    Ok(SelectedCredentialState {
-        selected_credential_available: summary.ready,
-        selected_credential: Some(summary),
-    })
-}
-
-fn format_storage_validation_success_message(summary: &object_store::ValidationSummary) -> String {
-    format!(
-        "Validated access to bucket '{}' and sampled {} remote object(s).",
-        summary.bucket, summary.object_count_sampled
-    )
-}
-
-fn provider_supports_runtime_object_versioning(provider: &str) -> bool {
-    runtime_provider_capabilities(provider)
-        .object_versioning
-        .status
-        == "supported"
-}
-
-fn provider_runtime_object_versioning_message(provider: &str) -> String {
-    let normalized = normalize_provider(provider);
-    let runtime = runtime_provider_capabilities(&normalized);
-    runtime.object_versioning.message.unwrap_or_else(|| {
-        format!(
-            "Provider '{}' does not support object versioning.",
-            normalized
-        )
-    })
-}
-
-fn sync_location_runtime_object_versioning_message(pair: &SyncPair) -> String {
-    format!(
-        "Sync location '{}' cannot use object versioning right now. {}",
-        pair.label,
-        provider_runtime_object_versioning_message(&pair.provider)
-    )
-}
-
 impl CredentialTestContext {
-    fn normalized(&self) -> Self {
+    pub(crate) fn normalized(&self) -> Self {
         Self {
             provider: normalize_provider(&self.provider),
             region: self.region.trim().to_string(),
@@ -1209,7 +1045,7 @@ impl CredentialTestContext {
         }
     }
 
-    fn has_bucket(&self) -> bool {
+    pub(crate) fn has_bucket(&self) -> bool {
         !self.bucket.is_empty()
     }
 
@@ -1226,33 +1062,6 @@ impl CredentialTestContext {
     }
 }
 
-fn credential_test_context_from_profile(profile: &StoredProfile) -> CredentialTestContext {
-    CredentialTestContext {
-        provider: profile.provider.clone(),
-        region: profile.region.trim().to_string(),
-        bucket: profile.bucket.trim().to_string(),
-    }
-}
-
-fn resolve_credential_test_context<R: Runtime>(
-    app: &AppHandle<R>,
-    context: Option<CredentialTestContext>,
-) -> Result<CredentialTestContext, String> {
-    if let Some(context) = context {
-        return Ok(context.normalized());
-    }
-
-    let profile = read_profile_from_disk(app)?;
-    Ok(credential_test_context_from_profile(&profile))
-}
-
-fn should_defer_create_time_credential_test(
-    credential: &CredentialSummary,
-    context: &CredentialTestContext,
-) -> bool {
-    normalize_provider(&credential.provider) == GCS_PROVIDER && !context.has_bucket()
-}
-
 async fn create_credential_with_optional_initial_validation<R: Runtime>(
     app: &AppHandle<R>,
     draft: CredentialDraft,
@@ -1267,33 +1076,6 @@ async fn create_credential_with_optional_initial_validation<R: Runtime>(
     Ok(test_credential_against_context(app, &created.id, &context)
         .await?
         .credential)
-}
-
-fn format_permission_probe_summary(probes: &[object_store::PermissionProbeResult]) -> String {
-    let labels: Vec<String> = probes
-        .iter()
-        .filter(|p| p.name != "head_bucket")
-        .map(|p| {
-            let icon = if p.allowed { "✓" } else { "✗" };
-            let label = match p.name.as_str() {
-                "put_object" => "write",
-                "get_object" => "read",
-                "delete_object" => "delete",
-                other => other,
-            };
-            format!("{label} {icon}")
-        })
-        .collect();
-
-    if labels.is_empty() {
-        let head = probes.iter().find(|p| p.name == "head_bucket");
-        match head {
-            Some(p) if !p.allowed => "Bucket not accessible.".into(),
-            _ => String::new(),
-        }
-    } else {
-        format!("Permissions: {}", labels.join(" · "))
-    }
 }
 
 async fn test_credential_against_context<R: Runtime>(
@@ -1399,15 +1181,6 @@ async fn test_credential_against_context<R: Runtime>(
     })
 }
 
-fn resolve_profile_credential_name(existing_profile: &StoredProfile) -> String {
-    existing_profile
-        .selected_credential
-        .as_ref()
-        .map(|summary| summary.name.clone())
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| "Default credential".into())
-}
-
 fn resolve_setup_credentials<R: Runtime>(
     app: &AppHandle<R>,
     existing_profile: &StoredProfile,
@@ -1508,237 +1281,6 @@ fn store_profile_settings<R: Runtime>(
     )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RemoteBinLifecycleTarget {
-    provider: String,
-    bucket: String,
-    region: String,
-    credential_profile_id: Option<String>,
-    source_labels: Vec<String>,
-    managed_rules: Vec<ManagedLifecycleRulePlan>,
-}
-
-fn target_for_profile(profile: &StoredProfile) -> Option<RemoteBinLifecycleTarget> {
-    if !is_profile_configured(profile) {
-        return None;
-    }
-
-    Some(RemoteBinLifecycleTarget {
-        provider: profile.provider.clone(),
-        bucket: profile.bucket.clone(),
-        region: profile.region.clone(),
-        credential_profile_id: profile.credential_profile_id.clone(),
-        source_labels: vec!["profile".into()],
-        managed_rules: if profile.remote_bin.enabled {
-            vec![managed_lifecycle_rule_plan(
-                DEFAULT_REMOTE_BIN_PAIR_ID,
-                profile.remote_bin.retention_days,
-            )]
-        } else {
-            vec![]
-        },
-    })
-}
-
-fn target_for_pair(pair: &SyncPair) -> Option<RemoteBinLifecycleTarget> {
-    if !is_pair_configured(pair) {
-        return None;
-    }
-
-    Some(RemoteBinLifecycleTarget {
-        provider: pair.provider.clone(),
-        bucket: pair.bucket.clone(),
-        region: pair.region.clone(),
-        credential_profile_id: pair.credential_profile_id.clone(),
-        source_labels: vec![format!("sync pair '{}'", pair.label)],
-        managed_rules: if pair.remote_bin.enabled {
-            vec![managed_lifecycle_rule_plan(
-                &pair.id,
-                pair.remote_bin.retention_days,
-            )]
-        } else {
-            vec![]
-        },
-    })
-}
-
-fn remote_bin_targets_by_bucket(
-    profile: &StoredProfile,
-) -> BTreeMap<String, RemoteBinLifecycleTarget> {
-    let mut targets = BTreeMap::new();
-
-    if profile.sync_pairs.is_empty() {
-        if let Some(target) = target_for_profile(profile) {
-            merge_remote_bin_target(&mut targets, target);
-        }
-    } else {
-        for pair in &profile.sync_pairs {
-            if let Some(target) = target_for_pair(pair) {
-                merge_remote_bin_target(&mut targets, target);
-            }
-        }
-    }
-
-    targets
-}
-
-fn merge_remote_bin_target(
-    targets: &mut BTreeMap<String, RemoteBinLifecycleTarget>,
-    target: RemoteBinLifecycleTarget,
-) {
-    let target_key = bucket_key_for_target(&target);
-    match targets.get_mut(&target_key) {
-        Some(existing) => {
-            existing.source_labels.extend(target.source_labels);
-            existing.managed_rules.extend(target.managed_rules);
-            if existing.credential_profile_id.is_none() {
-                existing.credential_profile_id = target.credential_profile_id;
-            }
-            existing.managed_rules.sort();
-            existing.managed_rules.dedup();
-            existing.source_labels.sort();
-            existing.source_labels.dedup();
-        }
-        None => {
-            targets.insert(target_key, target);
-        }
-    }
-}
-
-fn bucket_key_for_target(target: &RemoteBinLifecycleTarget) -> String {
-    format!(
-        "{}\n{}\n{}",
-        normalize_provider(&target.provider),
-        target.bucket,
-        target.region
-    )
-}
-
-fn target_source_label(target: &RemoteBinLifecycleTarget) -> String {
-    match target.source_labels.as_slice() {
-        [] => "remote-bin target".into(),
-        [only] => only.clone(),
-        many => many.join(", "),
-    }
-}
-
-fn planned_remote_bin_reconciliation(
-    current: &StoredProfile,
-    next: &StoredProfile,
-) -> Vec<RemoteBinLifecycleTarget> {
-    let current_targets = remote_bin_targets_by_bucket(current);
-    let next_targets = remote_bin_targets_by_bucket(next);
-    let buckets = current_targets
-        .keys()
-        .chain(next_targets.keys())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-
-    buckets
-        .into_iter()
-        .filter_map(
-            |bucket| match (current_targets.get(&bucket), next_targets.get(&bucket)) {
-                (_, Some(target)) if !target.managed_rules.is_empty() => Some(target.clone()),
-                (Some(current_target), Some(next_target))
-                    if !current_target.managed_rules.is_empty() =>
-                {
-                    let mut disabled_target = next_target.clone();
-                    disabled_target.managed_rules.clear();
-                    Some(disabled_target)
-                }
-                (Some(current_target), None) if !current_target.managed_rules.is_empty() => {
-                    let mut disabled_target = current_target.clone();
-                    disabled_target.managed_rules.clear();
-                    Some(disabled_target)
-                }
-                _ => None,
-            },
-        )
-        .collect()
-}
-
-fn persist_profile_with_remote_bin_reconciliation<R, Reconcile, Write>(
-    app: &AppHandle<R>,
-    current: &StoredProfile,
-    next: StoredProfile,
-    mut reconcile_bucket: Reconcile,
-    write_profile: Write,
-) -> Result<StoredProfile, String>
-where
-    R: Runtime,
-    Reconcile: FnMut(&AppHandle<R>, &RemoteBinLifecycleTarget) -> Result<(), String>,
-    Write: FnOnce(&AppHandle<R>, &StoredProfile) -> Result<(), String>,
-{
-    persist_profile_with_remote_bin_reconciliation_inner(
-        planned_remote_bin_reconciliation(current, &next),
-        next,
-        |target| reconcile_bucket(app, target),
-        |profile| write_profile(app, profile),
-    )
-}
-
-fn persist_profile_with_remote_bin_reconciliation_inner<Reconcile, Write>(
-    targets: Vec<RemoteBinLifecycleTarget>,
-    next: StoredProfile,
-    mut reconcile_bucket: Reconcile,
-    write_profile: Write,
-) -> Result<StoredProfile, String>
-where
-    Reconcile: FnMut(&RemoteBinLifecycleTarget) -> Result<(), String>,
-    Write: FnOnce(&StoredProfile) -> Result<(), String>,
-{
-    for target in filter_remote_bin_reconciliation_targets(targets) {
-        reconcile_bucket(&target)?;
-    }
-
-    write_profile(&next)?;
-    Ok(next)
-}
-
-fn load_credentials_for_remote_bin_target<R: Runtime>(
-    app: &AppHandle<R>,
-    target: &RemoteBinLifecycleTarget,
-) -> Result<StoredCredentials, String> {
-    let credential_id = target.credential_profile_id.as_deref().ok_or_else(|| {
-        format!(
-            "A saved credential is required to reconcile remote bin lifecycle for {} on bucket '{}'.",
-            target_source_label(target), target.bucket
-        )
-    })?;
-
-    load_credentials_by_id(app, credential_id)?.ok_or_else(|| {
-        format!(
-            "Credential '{}' for {} is unavailable.",
-            credential_id,
-            target_source_label(target)
-        )
-    })
-}
-
-fn provider_supports_remote_bin_lifecycle_reconciliation(provider: &str) -> bool {
-    object_store::supports_remote_bin_lifecycle_reconciliation(provider)
-}
-
-fn remote_bin_lifecycle_reconciliation_unsupported_message(
-    target: &RemoteBinLifecycleTarget,
-) -> String {
-    format!(
-        "Provider '{}' does not support remote-bin lifecycle reconciliation for {} on bucket '{}'.",
-        normalize_provider(&target.provider),
-        target_source_label(target),
-        target.bucket
-    )
-}
-
-fn filter_remote_bin_reconciliation_targets(
-    targets: Vec<RemoteBinLifecycleTarget>,
-) -> Vec<RemoteBinLifecycleTarget> {
-    targets
-        .into_iter()
-        .filter(|target| provider_supports_remote_bin_lifecycle_reconciliation(&target.provider))
-        .collect()
-}
-
 async fn reconcile_remote_bin_lifecycle_target<R: Runtime>(
     app: &AppHandle<R>,
     target: &RemoteBinLifecycleTarget,
@@ -1796,25 +1338,6 @@ async fn reconcile_pair_object_versioning<R: Runtime>(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-fn persist_profile_with_remote_bin_reconciliation_for_test<Reconcile, Write>(
-    current: &StoredProfile,
-    next: StoredProfile,
-    reconcile_bucket: Reconcile,
-    write_profile: Write,
-) -> Result<StoredProfile, String>
-where
-    Reconcile: FnMut(&RemoteBinLifecycleTarget) -> Result<(), String>,
-    Write: FnOnce(&StoredProfile) -> Result<(), String>,
-{
-    persist_profile_with_remote_bin_reconciliation_inner(
-        planned_remote_bin_reconciliation(current, &next),
-        next,
-        reconcile_bucket,
-        write_profile,
-    )
 }
 
 fn stop_requested(stop_signal: Option<&AtomicBool>) -> bool {
@@ -2722,7 +2245,7 @@ fn remote_snapshot_for_pair<R: Runtime>(
     }
 }
 
-async fn list_remote_inventory_for_pair(
+pub(crate) async fn list_remote_inventory_for_pair(
     pair: &SyncPair,
     credentials: &StoredCredentials,
 ) -> Result<RemoteIndexSnapshot, String> {
@@ -4406,314 +3929,6 @@ fn sync_pair_for_location(profile: &StoredProfile, location_id: &str) -> Result<
         .ok_or_else(|| format!("Sync pair '{location_id}' not found."))
 }
 
-#[allow(unreachable_code)]
-fn reveal_in_file_manager(path: &Path, highlight_file: bool) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        let mut command = std::process::Command::new("explorer");
-        if highlight_file {
-            let target = path.canonicalize().map_err(|error| {
-                format!(
-                    "failed to canonicalize '{}' for reveal: {error}",
-                    path.display()
-                )
-            })?;
-            let mut args = std::ffi::OsString::from("/select,");
-            args.push(&target);
-            command.arg(args);
-        } else {
-            command.arg(path);
-        }
-
-        command.spawn().map_err(|error| {
-            format!(
-                "failed to reveal '{}' in the file manager: {error}",
-                path.display()
-            )
-        })?;
-
-        return Ok(());
-    }
-
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut cmd = std::process::Command::new("open");
-        if highlight_file {
-            cmd.arg("-R").arg(path);
-        } else {
-            cmd.arg(path);
-        }
-        cmd
-    };
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut command = {
-        let mut cmd = std::process::Command::new("xdg-open");
-        let target = if highlight_file {
-            path.parent().unwrap_or(path)
-        } else {
-            path
-        };
-        cmd.arg(target);
-        cmd
-    };
-
-    #[cfg(any(target_os = "macos", all(unix, not(target_os = "macos"))))]
-    command.spawn().map_err(|error| {
-        format!(
-            "failed to reveal '{}' in the file manager: {error}",
-            path.display()
-        )
-    })?;
-
-    Ok(())
-}
-
-fn open_path_with_default_app(path: &Path) -> Result<(), String> {
-    // Use `explorer <path>` rather than `cmd /C start`: cmd.exe re-parses its
-    // command line, so a path containing shell metacharacters (`&`, `^`, `%`)
-    // could execute. `explorer` receives the path as a single argument and
-    // opens it with its default handler without a shell round-trip.
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut cmd = std::process::Command::new("explorer");
-        cmd.arg(path);
-        cmd
-    };
-
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut cmd = std::process::Command::new("open");
-        cmd.arg(path);
-        cmd
-    };
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut command = {
-        let mut cmd = std::process::Command::new("xdg-open");
-        cmd.arg(path);
-        cmd
-    };
-
-    command.spawn().map_err(|error| {
-        format!(
-            "failed to open '{}' with the default app: {error}",
-            path.display()
-        )
-    })?;
-
-    Ok(())
-}
-
-fn temp_compare_file_path<R: Runtime>(
-    app: &AppHandle<R>,
-    relative_path: &str,
-) -> Result<PathBuf, String> {
-    let extension = Path::new(relative_path)
-        .extension()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| format!(".{value}"))
-        .unwrap_or_default();
-    let file_name = format!(
-        "storage-goblin-conflict-compare-{}{}",
-        Uuid::new_v4(),
-        extension
-    );
-    app_storage_path(app, &file_name)
-}
-
-fn compare_mode_external(
-    location_id: String,
-    path: String,
-    local_path: Option<String>,
-    remote_temp_path: Option<String>,
-    fallback_reason: Option<String>,
-) -> ConflictResolutionDetails {
-    ConflictResolutionDetails {
-        location_id,
-        path,
-        mode: "external".into(),
-        local_path,
-        remote_temp_path,
-        local_text: None,
-        remote_text: None,
-        local_image_data_url: None,
-        remote_image_data_url: None,
-        fallback_reason,
-    }
-}
-
-fn image_media_type_for_extension(path: &str) -> Option<&'static str> {
-    let extension = Path::new(path)
-        .extension()
-        .and_then(|value| value.to_str())?
-        .trim()
-        .to_ascii_lowercase();
-
-    match extension.as_str() {
-        "png" => Some("image/png"),
-        "jpg" | "jpeg" => Some("image/jpeg"),
-        "gif" => Some("image/gif"),
-        "webp" => Some("image/webp"),
-        "bmp" => Some("image/bmp"),
-        "svg" => Some("image/svg+xml"),
-        "avif" => Some("image/avif"),
-        _ => None,
-    }
-}
-
-fn is_probably_text_bytes(bytes: &[u8]) -> bool {
-    if bytes.is_empty() {
-        return true;
-    }
-
-    if bytes.contains(&0) {
-        return false;
-    }
-
-    std::str::from_utf8(bytes).is_ok()
-}
-
-fn read_file_with_size_limit(path: &Path, max_bytes: usize) -> Result<Vec<u8>, String> {
-    let metadata = fs::metadata(path).map_err(|error| {
-        format!(
-            "Failed to inspect compare file '{}': {error}",
-            path.display()
-        )
-    })?;
-
-    let file_size = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
-    if file_size > max_bytes {
-        return Err(format!(
-            "File '{}' is too large for inline compare ({} bytes > {} byte limit).",
-            path.display(),
-            metadata.len(),
-            max_bytes
-        ));
-    }
-
-    fs::read(path)
-        .map_err(|error| format!("Failed to read compare file '{}': {error}", path.display()))
-}
-
-fn try_prepare_inline_image_details(
-    location_id: String,
-    path: String,
-    local_path: Option<String>,
-    remote_temp_path: Option<String>,
-) -> Result<ConflictResolutionDetails, String> {
-    let media_type = image_media_type_for_extension(&path).ok_or_else(|| {
-        "Unsupported inline image type; using external compare instead.".to_string()
-    })?;
-    let local_path_ref = local_path
-        .as_deref()
-        .ok_or_else(|| "Local file is unavailable for inline image compare.".to_string())?;
-    let remote_path_ref = remote_temp_path
-        .as_deref()
-        .ok_or_else(|| "Remote file is unavailable for inline image compare.".to_string())?;
-
-    let local_bytes =
-        read_file_with_size_limit(Path::new(local_path_ref), INLINE_IMAGE_COMPARE_MAX_BYTES)?;
-    let remote_bytes =
-        read_file_with_size_limit(Path::new(remote_path_ref), INLINE_IMAGE_COMPARE_MAX_BYTES)?;
-
-    Ok(ConflictResolutionDetails {
-        location_id,
-        path,
-        mode: "image".into(),
-        local_path,
-        remote_temp_path,
-        local_text: None,
-        remote_text: None,
-        local_image_data_url: Some(format!(
-            "data:{media_type};base64,{}",
-            BASE64_STANDARD.encode(local_bytes)
-        )),
-        remote_image_data_url: Some(format!(
-            "data:{media_type};base64,{}",
-            BASE64_STANDARD.encode(remote_bytes)
-        )),
-        fallback_reason: None,
-    })
-}
-
-fn try_prepare_inline_text_details(
-    location_id: String,
-    path: String,
-    local_path: Option<String>,
-    remote_temp_path: Option<String>,
-) -> Result<ConflictResolutionDetails, String> {
-    let local_path_ref = local_path
-        .as_deref()
-        .ok_or_else(|| "Local file is unavailable for inline text compare.".to_string())?;
-    let remote_path_ref = remote_temp_path
-        .as_deref()
-        .ok_or_else(|| "Remote file is unavailable for inline text compare.".to_string())?;
-
-    let local_bytes =
-        read_file_with_size_limit(Path::new(local_path_ref), INLINE_TEXT_COMPARE_MAX_BYTES)?;
-    let remote_bytes =
-        read_file_with_size_limit(Path::new(remote_path_ref), INLINE_TEXT_COMPARE_MAX_BYTES)?;
-
-    if !is_probably_text_bytes(&local_bytes) || !is_probably_text_bytes(&remote_bytes) {
-        return Err("One or both files look binary, so inline text compare is unavailable.".into());
-    }
-
-    let local_text = String::from_utf8(local_bytes).map_err(|_| {
-        "Local file is not valid UTF-8, so inline text compare is unavailable.".to_string()
-    })?;
-    let remote_text = String::from_utf8(remote_bytes).map_err(|_| {
-        "Remote file is not valid UTF-8, so inline text compare is unavailable.".to_string()
-    })?;
-
-    Ok(ConflictResolutionDetails {
-        location_id,
-        path,
-        mode: "text".into(),
-        local_path,
-        remote_temp_path,
-        local_text: Some(local_text),
-        remote_text: Some(remote_text),
-        local_image_data_url: None,
-        remote_image_data_url: None,
-        fallback_reason: None,
-    })
-}
-
-fn finalize_conflict_compare_details(
-    location_id: String,
-    path: String,
-    local_path: Option<String>,
-    remote_temp_path: Option<String>,
-) -> ConflictResolutionDetails {
-    if image_media_type_for_extension(&path).is_some() {
-        return match try_prepare_inline_image_details(
-            location_id.clone(),
-            path.clone(),
-            local_path.clone(),
-            remote_temp_path.clone(),
-        ) {
-            Ok(details) => details,
-            Err(error) => {
-                compare_mode_external(location_id, path, local_path, remote_temp_path, Some(error))
-            }
-        };
-    }
-
-    match try_prepare_inline_text_details(
-        location_id.clone(),
-        path.clone(),
-        local_path.clone(),
-        remote_temp_path.clone(),
-    ) {
-        Ok(details) => details,
-        Err(error) => {
-            compare_mode_external(location_id, path, local_path, remote_temp_path, Some(error))
-        }
-    }
-}
-
 fn file_entry_for_conflict(
     local_snapshot: Option<&LocalIndexSnapshot>,
     remote_snapshot: Option<&RemoteIndexSnapshot>,
@@ -4980,489 +4195,6 @@ async fn resolve_conflict_impl<R: Runtime>(
         }
         _ => Err(format!("Unsupported conflict resolution '{resolution}'.")),
     }
-}
-
-fn normalize_restore_relative_path(path: &str) -> String {
-    path.replace('\\', "/").trim_matches('/').to_string()
-}
-
-fn ancestor_restore_paths(path: &str) -> Vec<String> {
-    let normalized = normalize_restore_relative_path(path);
-    if normalized.is_empty() {
-        return Vec::new();
-    }
-
-    let parts: Vec<&str> = normalized
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect();
-    if parts.len() <= 1 {
-        return Vec::new();
-    }
-
-    (0..parts.len() - 1)
-        .map(|index| parts[..=index].join("/"))
-        .collect()
-}
-
-fn is_descendant_restore_path(candidate: &str, ancestor: &str) -> bool {
-    let candidate = normalize_restore_relative_path(candidate);
-    let ancestor = normalize_restore_relative_path(ancestor);
-
-    !candidate.is_empty()
-        && !ancestor.is_empty()
-        && candidate != ancestor
-        && candidate.starts_with(&format!("{ancestor}/"))
-}
-
-fn validate_local_restore_destination(root: &str, destination_path: &str) -> Result<(), String> {
-    let root_path = Path::new(root);
-    if let Ok(metadata) = std::fs::symlink_metadata(root_path) {
-        if !metadata.is_dir() {
-            return Err(format!(
-                "Cannot restore to '{}' because local root '{}' is not a directory.",
-                destination_path,
-                root_path.display()
-            ));
-        }
-    }
-
-    let target = resolve_local_download_path(root, destination_path)?;
-
-    match std::fs::symlink_metadata(&target) {
-        Ok(metadata) => {
-            let existing_kind = if metadata.is_dir() {
-                "directory"
-            } else {
-                "file"
-            };
-            return Err(format!(
-                "Cannot restore to '{}' because local destination already exists as a {}.",
-                destination_path, existing_kind
-            ));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "Failed to inspect local destination '{}': {error}",
-                target.display()
-            ));
-        }
-    }
-
-    for ancestor in ancestor_restore_paths(destination_path) {
-        let ancestor_path = resolve_local_download_path(root, &ancestor)?;
-        match std::fs::symlink_metadata(&ancestor_path) {
-            Ok(metadata) if !metadata.is_dir() => {
-                return Err(format!(
-                    "Cannot restore to '{}' because local ancestor '{}' is a file.",
-                    destination_path, ancestor
-                ));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(format!(
-                    "Failed to inspect local ancestor '{}': {error}",
-                    ancestor_path.display()
-                ));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_remote_restore_destination(
-    entries: &[RemoteObjectEntry],
-    destination_path: &str,
-) -> Result<(), String> {
-    let destination_path = normalize_restore_relative_path(destination_path);
-
-    if let Some(conflict) = entries
-        .iter()
-        .find(|entry| normalize_restore_relative_path(&entry.relative_path) == destination_path)
-    {
-        return Err(format!(
-            "Cannot restore to '{}' because remote destination already exists as a {}.",
-            destination_path, conflict.kind
-        ));
-    }
-
-    for ancestor in ancestor_restore_paths(&destination_path) {
-        if let Some(conflict) = entries.iter().find(|entry| {
-            normalize_restore_relative_path(&entry.relative_path) == ancestor
-                && entry.kind != "directory"
-        }) {
-            return Err(format!(
-                "Cannot restore to '{}' because remote ancestor '{}' exists as a {}.",
-                destination_path, ancestor, conflict.kind
-            ));
-        }
-    }
-
-    if let Some(conflict) = entries
-        .iter()
-        .find(|entry| is_descendant_restore_path(&entry.relative_path, &destination_path))
-    {
-        return Err(format!(
-            "Cannot restore to '{}' because remote descendant '{}' already exists.",
-            destination_path, conflict.relative_path
-        ));
-    }
-
-    Ok(())
-}
-
-async fn validate_restore_destination(
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-    client: &object_store::ObjectStoreClient,
-    destination_path: &str,
-) -> Result<(), String> {
-    validate_local_restore_destination(&pair.local_folder, destination_path)?;
-
-    let exact_file_key = s3_adapter::object_key(destination_path);
-    let exact_directory_key = s3_adapter::directory_key(destination_path);
-
-    if object_store::object_exists(client, &pair.bucket, &exact_file_key).await? {
-        return Err(format!(
-            "Cannot restore to '{}' because remote destination key already exists.",
-            destination_path
-        ));
-    }
-
-    if !exact_directory_key.is_empty()
-        && exact_directory_key != exact_file_key
-        && object_store::object_exists(client, &pair.bucket, &exact_directory_key).await?
-    {
-        return Err(format!(
-            "Cannot restore to '{}' because remote directory placeholder already exists.",
-            destination_path
-        ));
-    }
-
-    let remote_snapshot = list_remote_inventory_for_pair(pair, credentials).await?;
-    validate_remote_restore_destination(&remote_snapshot.entries, destination_path)
-}
-
-fn destination_key_for_bin_restore(bin_key: &str, original_relative_path: &str) -> String {
-    if bin_key.replace('\\', "/").ends_with('/') {
-        s3_adapter::directory_key(original_relative_path.trim_matches('/'))
-    } else {
-        s3_adapter::object_key(original_relative_path)
-    }
-}
-
-fn versioned_bin_key(key: &str, version_id: &str) -> String {
-    format!("versioned:{key}::{version_id}")
-}
-
-fn parse_versioned_bin_key(bin_key: &str) -> Result<(String, String), String> {
-    let Some(payload) = bin_key.strip_prefix("versioned:") else {
-        return Err(format!("Unsupported versioned bin entry key '{bin_key}'."));
-    };
-
-    let Some((key, version_id)) = payload.rsplit_once("::") else {
-        return Err(format!("Unsupported versioned bin entry key '{bin_key}'."));
-    };
-
-    if key.trim().is_empty() || version_id.trim().is_empty() {
-        return Err(format!("Unsupported versioned bin entry key '{bin_key}'."));
-    }
-
-    Ok((key.to_string(), version_id.to_string()))
-}
-
-fn bin_deleted_from(pair: &SyncPair) -> String {
-    if pair.object_versioning_enabled {
-        "object-versioning".into()
-    } else {
-        "remote-bin".into()
-    }
-}
-
-fn add_retention_days(timestamp: &str, retention_days: u32) -> Option<String> {
-    let deleted_at =
-        time::OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339)
-            .ok()?;
-    let retention = time::Duration::days(i64::from(retention_days));
-    deleted_at.checked_add(retention).and_then(|value| {
-        value
-            .format(&time::format_description::well_known::Rfc3339)
-            .ok()
-    })
-}
-
-fn bin_entry_lifecycle_fields(
-    pair: &SyncPair,
-    deleted_at: Option<&str>,
-) -> (Option<String>, Option<String>, Option<u32>, Option<String>) {
-    let deleted_at = deleted_at.map(str::to_string);
-    let deleted_from = Some(bin_deleted_from(pair));
-
-    if pair.object_versioning_enabled {
-        return (deleted_at, deleted_from, None, None);
-    }
-
-    if pair.remote_bin.enabled {
-        let retention_days = Some(pair.remote_bin.retention_days);
-        let expires_at = deleted_at
-            .as_deref()
-            .and_then(|value| add_retention_days(value, pair.remote_bin.retention_days));
-        return (deleted_at, deleted_from, retention_days, expires_at);
-    }
-
-    (deleted_at, deleted_from, None, None)
-}
-
-fn normalize_bin_entry_kind(kind: &str) -> Result<&str, String> {
-    match kind {
-        "file" | "directory" => Ok(kind),
-        other => Err(format!("Unsupported bin entry kind '{other}'.")),
-    }
-}
-
-fn collect_remote_bin_keys_for_request(
-    pair: &SyncPair,
-    request: &BinEntryRequest,
-    available_entries: &[RemoteObjectEntry],
-) -> Result<Vec<RemoteObjectEntry>, String> {
-    let request_kind = normalize_bin_entry_kind(&request.kind)?;
-    let normalized_path = normalize_restore_relative_path(&request.path);
-    if normalized_path.is_empty() {
-        return Err("Bin path must reference a non-empty relative path.".into());
-    }
-
-    if let Some(bin_key) = request.bin_key.as_deref() {
-        let normalized_bin_key = bin_key.replace('\\', "/");
-        let entry = available_entries
-            .iter()
-            .find(|entry| entry.key == normalized_bin_key)
-            .ok_or_else(|| format!("Bin entry '{bin_key}' was not found."))?;
-
-        if normalize_restore_relative_path(&entry.relative_path) != normalized_path {
-            return Err(format!(
-                "Bin entry '{bin_key}' does not match requested path '{}'.",
-                request.path
-            ));
-        }
-
-        if entry.kind != request_kind {
-            return Err(format!(
-                "Bin entry '{}' does not match requested kind '{}'.",
-                request.path, request.kind
-            ));
-        }
-
-        return Ok(vec![entry.clone()]);
-    }
-
-    let matches: Vec<RemoteObjectEntry> = if request_kind == "file" {
-        available_entries
-            .iter()
-            .filter(|entry| {
-                entry.kind == "file"
-                    && normalize_restore_relative_path(&entry.relative_path) == normalized_path
-            })
-            .cloned()
-            .collect()
-    } else {
-        available_entries
-            .iter()
-            .filter(|entry| {
-                path_matches_exact_or_descendant(&entry.relative_path, &normalized_path)
-                    || bin_prefix_contains_bin_key(&pair.id, &normalized_path, &entry.key)
-                        .unwrap_or(false)
-            })
-            .cloned()
-            .collect()
-    };
-
-    if matches.is_empty() {
-        return Err(format!("Bin path '{}' was not found.", request.path));
-    }
-
-    Ok(matches)
-}
-
-fn validate_bulk_restore_destinations(
-    remote_entries: &[RemoteObjectEntry],
-    destination_paths: &[String],
-) -> Result<(), String> {
-    for destination_path in destination_paths {
-        validate_remote_restore_destination(remote_entries, destination_path)?;
-    }
-
-    Ok(())
-}
-
-fn validate_bin_batch_requests(requests: &[BinEntryRequest], action: &str) -> Result<(), String> {
-    let mut planned: BTreeSet<String> = BTreeSet::new();
-
-    for request in requests {
-        normalize_bin_entry_kind(&request.kind)?;
-        let normalized = normalize_restore_relative_path(&request.path);
-        if normalized.is_empty() {
-            return Err("Bin path must reference a non-empty relative path.".into());
-        }
-
-        if planned.contains(&normalized) {
-            return Err(format!(
-                "Cannot {action} '{}' more than once in the same batch.",
-                request.path
-            ));
-        }
-
-        for existing in &planned {
-            if is_descendant_restore_path(existing, &normalized) {
-                return Err(format!(
-                    "Cannot {action} '{}' because the same batch already targets descendant '{}'.",
-                    request.path, existing
-                ));
-            }
-            if is_descendant_restore_path(&normalized, existing) {
-                return Err(format!(
-                    "Cannot {action} '{}' because the same batch already targets ancestor '{}'.",
-                    request.path, existing
-                ));
-            }
-        }
-
-        planned.insert(normalized);
-    }
-
-    Ok(())
-}
-
-fn path_matches_exact_or_descendant(candidate: &str, root: &str) -> bool {
-    let candidate = normalize_restore_relative_path(candidate);
-    let root = normalize_restore_relative_path(root);
-
-    candidate == root || is_descendant_restore_path(&candidate, &root)
-}
-
-fn collect_versioned_bin_entries_for_request(
-    request: &BinEntryRequest,
-    available_entries: &[VersionedBinEntry],
-) -> Result<Vec<VersionedBinEntry>, String> {
-    let request_kind = normalize_bin_entry_kind(&request.kind)?;
-    let normalized_path = normalize_restore_relative_path(&request.path);
-    if normalized_path.is_empty() {
-        return Err("Bin path must reference a non-empty relative path.".into());
-    }
-
-    if let Some(bin_key) = request.bin_key.as_deref() {
-        let (object_key, version_id) = parse_versioned_bin_key(bin_key)?;
-        let object_path = normalize_restore_relative_path(&relative_path_from_key(&object_key));
-        if object_path != normalized_path {
-            return Err(format!(
-                "Bin entry '{}' does not match requested path '{}'.",
-                bin_key, request.path
-            ));
-        }
-
-        let entry = available_entries
-            .iter()
-            .find(|entry| entry.key == object_key && entry.version_id == version_id)
-            .ok_or_else(|| format!("Bin entry '{bin_key}' was not found."))?;
-
-        if entry.kind != request_kind {
-            return Err(format!(
-                "Bin entry '{}' does not match requested kind '{}'.",
-                request.path, request.kind
-            ));
-        }
-
-        return Ok(vec![entry.clone()]);
-    }
-
-    let matches: Vec<VersionedBinEntry> = if request_kind == "file" {
-        available_entries
-            .iter()
-            .filter(|entry| {
-                entry.kind == "file"
-                    && normalize_restore_relative_path(&entry.relative_path) == normalized_path
-            })
-            .cloned()
-            .collect()
-    } else {
-        available_entries
-            .iter()
-            .filter(|entry| {
-                path_matches_exact_or_descendant(&entry.relative_path, &normalized_path)
-            })
-            .cloned()
-            .collect()
-    };
-
-    if matches.is_empty() {
-        return Err(format!("Bin path '{}' was not found.", request.path));
-    }
-
-    Ok(matches)
-}
-
-fn collect_versioned_history_for_deleted_entries(
-    deleted_entries: &[VersionedBinEntry],
-    history: &[(String, String)],
-) -> Vec<(String, String)> {
-    let deleted_keys: BTreeSet<&str> = deleted_entries
-        .iter()
-        .map(|entry| entry.key.as_str())
-        .collect();
-    let mut seen = BTreeSet::new();
-
-    history
-        .iter()
-        .filter(|(key, _)| deleted_keys.contains(key.as_str()))
-        .filter_map(|entry| {
-            let owned = entry.clone();
-            seen.insert(owned.clone()).then_some(owned)
-        })
-        .collect()
-}
-
-fn build_versioned_bin_entry_responses(
-    pair: &SyncPair,
-    entries: &[VersionedBinEntry],
-) -> Vec<FileEntryResponse> {
-    entries
-        .iter()
-        .filter_map(|entry| {
-            let path = match entry.kind.as_str() {
-                "directory" => entry.relative_path.trim_matches('/').to_string(),
-                _ => entry.relative_path.clone(),
-            };
-
-            if path.is_empty() {
-                return None;
-            }
-
-            let (deleted_at, deleted_from, retention_days, expires_at) =
-                bin_entry_lifecycle_fields(pair, entry.deleted_at.as_deref());
-
-            Some(FileEntryResponse {
-                path,
-                kind: entry.kind.clone(),
-                status: "deleted".into(),
-                has_local_copy: false,
-                storage_class: entry.storage_class.clone(),
-                bin_key: Some(versioned_bin_key(&entry.key, &entry.version_id)),
-                local_kind: None,
-                remote_kind: None,
-                local_size: None,
-                remote_size: None,
-                local_modified_at: None,
-                remote_modified_at: None,
-                remote_etag: None,
-                deleted_at,
-                deleted_from,
-                retention_days,
-                expires_at,
-            })
-        })
-        .collect()
 }
 
 async fn list_versioned_bin_inventory_for_pair(
@@ -5779,48 +4511,6 @@ async fn purge_remote_bin_entries(
     }
 
     Ok(results)
-}
-
-fn build_bin_entry_responses(
-    pair: &SyncPair,
-    entries: &[RemoteObjectEntry],
-) -> Vec<FileEntryResponse> {
-    entries
-        .iter()
-        .filter_map(|entry| {
-            let path = match entry.kind.as_str() {
-                "directory" => entry.relative_path.trim_matches('/').to_string(),
-                _ => entry.relative_path.clone(),
-            };
-
-            if path.is_empty() {
-                return None;
-            }
-
-            let (deleted_at, deleted_from, retention_days, expires_at) =
-                bin_entry_lifecycle_fields(pair, entry.last_modified_at.as_deref());
-
-            Some(FileEntryResponse {
-                path,
-                kind: entry.kind.clone(),
-                status: "deleted".into(),
-                has_local_copy: false,
-                storage_class: entry.storage_class.clone(),
-                bin_key: Some(entry.key.clone()),
-                local_kind: None,
-                remote_kind: None,
-                local_size: None,
-                remote_size: None,
-                local_modified_at: None,
-                remote_modified_at: None,
-                remote_etag: None,
-                deleted_at,
-                deleted_from,
-                retention_days,
-                expires_at,
-            })
-        })
-        .collect()
 }
 
 async fn list_remote_bin_inventory_for_pair(
@@ -6260,133 +4950,6 @@ pub async fn restore_file_version(
     Ok(())
 }
 
-fn temp_version_compare_file_path<R: Runtime>(
-    app: &AppHandle<R>,
-    relative_path: &str,
-    label: &str,
-) -> Result<PathBuf, String> {
-    let extension = Path::new(relative_path)
-        .extension()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| format!(".{value}"))
-        .unwrap_or_default();
-    let file_name = format!(
-        "storage-goblin-version-compare-{}-{}{}",
-        Uuid::new_v4(),
-        label,
-        extension
-    );
-    app_storage_path(app, &file_name)
-}
-
-fn finalize_version_compare_details(
-    path: String,
-    version_a_id: String,
-    version_b_id: String,
-    path_a: Option<String>,
-    path_b: Option<String>,
-) -> VersionComparisonDetails {
-    let media_type = image_media_type_for_extension(&path);
-
-    if media_type.is_some() {
-        let result = (|| -> Result<(String, String), String> {
-            let a = path_a
-                .as_deref()
-                .ok_or("Version A file is unavailable for inline image compare.")?;
-            let b = path_b
-                .as_deref()
-                .ok_or("Version B file is unavailable for inline image compare.")?;
-            let a_bytes = read_file_with_size_limit(Path::new(a), INLINE_IMAGE_COMPARE_MAX_BYTES)?;
-            let b_bytes = read_file_with_size_limit(Path::new(b), INLINE_IMAGE_COMPARE_MAX_BYTES)?;
-            let mt = media_type.unwrap();
-            Ok((
-                format!("data:{mt};base64,{}", BASE64_STANDARD.encode(a_bytes)),
-                format!("data:{mt};base64,{}", BASE64_STANDARD.encode(b_bytes)),
-            ))
-        })();
-
-        return match result {
-            Ok((a_url, b_url)) => VersionComparisonDetails {
-                path,
-                mode: "image".into(),
-                version_a_id,
-                version_b_id,
-                version_a_temp_path: path_a,
-                version_b_temp_path: path_b,
-                version_a_text: None,
-                version_b_text: None,
-                version_a_image_data_url: Some(a_url),
-                version_b_image_data_url: Some(b_url),
-                fallback_reason: None,
-            },
-            Err(reason) => VersionComparisonDetails {
-                path,
-                mode: "external".into(),
-                version_a_id,
-                version_b_id,
-                version_a_temp_path: path_a,
-                version_b_temp_path: path_b,
-                version_a_text: None,
-                version_b_text: None,
-                version_a_image_data_url: None,
-                version_b_image_data_url: None,
-                fallback_reason: Some(reason),
-            },
-        };
-    }
-
-    let result = (|| -> Result<(String, String), String> {
-        let a = path_a
-            .as_deref()
-            .ok_or("Version A file is unavailable for inline text compare.")?;
-        let b = path_b
-            .as_deref()
-            .ok_or("Version B file is unavailable for inline text compare.")?;
-        let a_bytes = read_file_with_size_limit(Path::new(a), INLINE_TEXT_COMPARE_MAX_BYTES)?;
-        let b_bytes = read_file_with_size_limit(Path::new(b), INLINE_TEXT_COMPARE_MAX_BYTES)?;
-        if !is_probably_text_bytes(&a_bytes) || !is_probably_text_bytes(&b_bytes) {
-            return Err(
-                "One or both versions look binary, so inline text compare is unavailable.".into(),
-            );
-        }
-        let a_text =
-            String::from_utf8(a_bytes).map_err(|_| "Version A is not valid UTF-8.".to_string())?;
-        let b_text =
-            String::from_utf8(b_bytes).map_err(|_| "Version B is not valid UTF-8.".to_string())?;
-        Ok((a_text, b_text))
-    })();
-
-    match result {
-        Ok((a_text, b_text)) => VersionComparisonDetails {
-            path,
-            mode: "text".into(),
-            version_a_id,
-            version_b_id,
-            version_a_temp_path: path_a,
-            version_b_temp_path: path_b,
-            version_a_text: Some(a_text),
-            version_b_text: Some(b_text),
-            version_a_image_data_url: None,
-            version_b_image_data_url: None,
-            fallback_reason: None,
-        },
-        Err(reason) => VersionComparisonDetails {
-            path,
-            mode: "external".into(),
-            version_a_id,
-            version_b_id,
-            version_a_temp_path: path_a,
-            version_b_temp_path: path_b,
-            version_a_text: None,
-            version_b_text: None,
-            version_a_image_data_url: None,
-            version_b_image_data_url: None,
-            fallback_reason: Some(reason),
-        },
-    }
-}
-
 #[tauri::command]
 pub async fn prepare_version_comparison(
     app: AppHandle,
@@ -6755,35 +5318,6 @@ pub async fn delete_file(app: AppHandle, location_id: String, path: String) -> R
         .map_err(|error| format!("Deleted '{path}', but refresh failed: {error}"))
 }
 
-fn normalize_directory_delete_path(path: &str) -> Result<String, String> {
-    let normalized = path.replace('\\', "/").trim_matches('/').to_string();
-    if normalized.is_empty() {
-        return Err("Folder delete requires a non-empty relative path.".into());
-    }
-
-    resolve_local_download_path(".", &normalized)?;
-    Ok(normalized)
-}
-
-fn remove_local_directory_subtree(root: &str, relative_path: &str) -> Result<(), String> {
-    let local_path = resolve_local_download_path(root, relative_path)?;
-
-    match std::fs::remove_dir_all(&local_path) {
-        Ok(()) => {
-            cleanup_empty_ancestors(&local_path, Path::new(root));
-            Ok(())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            cleanup_empty_ancestors(&local_path, Path::new(root));
-            Ok(())
-        }
-        Err(error) => Err(format!(
-            "Failed to remove '{}': {error}",
-            local_path.display()
-        )),
-    }
-}
-
 fn remote_bin_key_for_deleted_key(pair_id: &str, key: &str) -> String {
     let relative_path = relative_path_from_key(key);
     if key.ends_with('/') {
@@ -6900,25 +5434,30 @@ pub async fn change_storage_class(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        add_retention_days, append_error_context, build_bin_entry_responses,
-        build_file_entry_responses, build_versioned_bin_entry_responses,
-        collect_remote_bin_keys_for_request, collect_versioned_bin_entries_for_request,
-        collect_versioned_history_for_deleted_entries, destination_key_for_bin_restore,
-        directory_relative_paths_from_key, directory_relative_paths_from_relative_path,
-        download_stale_plan_error, due_polling_pairs, filter_remote_bin_reconciliation_targets,
-        local_fingerprint_for_path, local_snapshot_is_fresh, next_polling_deadline,
-        parse_versioned_bin_key, path_matches_exact_or_descendant,
+    use crate::storage::bin_service::{
+        add_retention_days, path_matches_exact_or_descendant, validate_remote_restore_destination,
+        versioned_bin_key,
+    };
+    use crate::storage::lifecycle_service::{
+        filter_remote_bin_reconciliation_targets,
         persist_profile_with_remote_bin_reconciliation_for_test, planned_remote_bin_reconciliation,
-        provider_supports_remote_bin_lifecycle_reconciliation,
+    };
+
+    use super::{
+        append_error_context, build_bin_entry_responses, build_file_entry_responses,
+        build_versioned_bin_entry_responses, collect_remote_bin_keys_for_request,
+        collect_versioned_bin_entries_for_request, collect_versioned_history_for_deleted_entries,
+        destination_key_for_bin_restore, directory_relative_paths_from_key,
+        directory_relative_paths_from_relative_path, download_stale_plan_error, due_polling_pairs,
+        local_fingerprint_for_path, local_snapshot_is_fresh, next_polling_deadline,
+        parse_versioned_bin_key, provider_supports_remote_bin_lifecycle_reconciliation,
         provider_supports_runtime_object_versioning, relative_path_from_key,
         remote_bin_key_for_deleted_key, remove_local_directory_subtree, rename_local_file_for_pair,
         resolve_local_download_path, s3_config_for_pair, should_defer_create_time_credential_test,
         should_poll_pair, should_scan_local_for_trigger, sync_pair_for_location,
         trash_local_file_for_pair, upload_stale_plan_error, validate_bin_batch_requests,
-        validate_remote_restore_destination, versioned_bin_key, watcher_eligible_pairs,
-        BinEntryRequest, CredentialTestContext, PairSyncTrigger, VersionedBinEntry,
-        LOCAL_SNAPSHOT_STALE_TTL,
+        watcher_eligible_pairs, BinEntryRequest, CredentialTestContext, PairSyncTrigger,
+        VersionedBinEntry, LOCAL_SNAPSHOT_STALE_TTL,
     };
     use crate::storage::credentials_store::{
         CredentialSummary, CredentialValidationStatus, StoredCredentials,
