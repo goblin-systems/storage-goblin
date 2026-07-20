@@ -18,6 +18,7 @@ pub mod lifecycle_service;
 pub mod local_index;
 pub mod object_store;
 pub mod platform;
+pub mod polling_service;
 pub mod profile_store;
 pub mod provider;
 pub mod remote_bin;
@@ -29,6 +30,7 @@ pub(crate) mod sim;
 pub mod sync_db;
 pub mod sync_planner;
 pub mod sync_state;
+pub mod transfer_service;
 pub mod watchers;
 
 pub use sync_state::SyncState;

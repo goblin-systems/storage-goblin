@@ -53,8 +53,13 @@ use super::{
     now_iso, object_store,
     platform::{
         cleanup_empty_ancestors, normalize_directory_delete_path, open_path_with_default_app,
-        remove_local_directory_subtree, rename_local_file_for_pair, resolve_local_download_path,
-        resolve_local_upload_path, reveal_in_file_manager, trash_local_file_for_pair,
+        remove_local_directory_subtree, resolve_local_download_path, resolve_local_upload_path,
+        reveal_in_file_manager,
+    },
+    polling_service::{
+        active_pair_for_manual_actions, due_polling_pairs, next_polling_deadline_at,
+        pair_watch_target, should_poll_pair, should_scan_local_for_trigger, stop_requested,
+        watcher_eligible_pairs, PairSyncTrigger,
     },
     profile_store::{
         is_pair_configured, is_profile_configured, read_profile_from_disk, write_profile_to_disk,
@@ -75,16 +80,14 @@ use super::{
     s3_adapter,
     sanitizer::sanitize_sensitive_text,
     sync_db::{
-        delete_sync_anchor_for_pair, load_planned_download_queue_for_pair,
-        load_planned_upload_queue_for_pair, load_planner_summary, load_planner_summary_for_pair,
-        load_sync_anchors_for_pair, mark_download_queue_item_completed_for_pair,
-        mark_download_queue_item_failed_for_pair, mark_download_queue_item_in_progress_for_pair,
-        mark_upload_queue_item_completed_for_pair, mark_upload_queue_item_failed_for_pair,
-        mark_upload_queue_item_in_progress_for_pair, persist_sync_plan_for_pair,
-        recover_interrupted_queue_items_for_pair, upsert_sync_anchor_for_pair,
-        PlannedDownloadQueueItem, PlannedUploadQueueItem, SyncAnchor,
+        load_planned_download_queue_for_pair, load_planned_upload_queue_for_pair,
+        load_planner_summary, load_planner_summary_for_pair, load_sync_anchors_for_pair,
+        mark_download_queue_item_completed_for_pair, mark_download_queue_item_failed_for_pair,
+        mark_download_queue_item_in_progress_for_pair, mark_upload_queue_item_completed_for_pair,
+        mark_upload_queue_item_failed_for_pair, mark_upload_queue_item_in_progress_for_pair,
+        persist_sync_plan_for_pair, recover_interrupted_queue_items_for_pair, SyncAnchor,
     },
-    sync_planner::{self, Operation},
+    sync_planner::{self},
     sync_state::{
         active_watcher_pair_paths, begin_polling_worker, clear_all_pair_watchers, clear_dirty_pair,
         clear_polling_worker, due_dirty_pairs, get_status_lock, install_pair_watcher,
@@ -94,11 +97,23 @@ use super::{
         set_status_from_handle, stop_polling_worker, synthesize_status_from_pairs, PairSyncStatus,
         SyncState, SyncStatus,
     },
+    transfer_service::{
+        build_pair_transfer_executor, download_stale_plan_error, local_fingerprint_for_path,
+        perform_planned_download_for_pair, perform_planned_upload_for_pair,
+        perform_structural_download_operation_for_pair,
+        perform_structural_upload_operation_for_pair, persist_download_success_for_pair,
+        persist_upload_success_for_pair, remote_etag_for_path, upload_stale_plan_error,
+        PairTransferExecutor,
+    },
     watchers::{plan_watch_reconciliation, start_pair_watcher, WatchTarget, WatcherCallbackEvent},
 };
 
 #[cfg(test)]
-use super::platform::remove_local_file_without_trash_for_pair;
+use super::polling_service::next_polling_deadline;
+#[cfg(test)]
+use super::transfer_service::{
+    mock_download_file, mock_upload_refresh_snapshot, planned_transfer_test_mode_enabled,
+};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -237,13 +252,6 @@ const PLANNED_UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 const PLANNED_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 const DIRTY_PAIR_DEBOUNCE: Duration = Duration::from_millis(750);
 const LOCAL_SNAPSHOT_STALE_TTL: Duration = Duration::from_secs(300);
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PairSyncTrigger {
-    Manual,
-    LocalDirty,
-    RemotePoll,
-}
-
 fn emit_status<R: Runtime>(app: &AppHandle<R>, status: &SyncStatus) {
     let _ = app.emit("storage://sync-status-changed", status);
 }
@@ -396,538 +404,6 @@ fn merge_snapshot_errors(
         (None, Some(remote)) => Some(remote),
         (None, None) => None,
     }
-}
-
-fn sync_anchor_from_upload(
-    path: &str,
-    fingerprint: &str,
-    remote_etag: Option<String>,
-) -> SyncAnchor {
-    SyncAnchor {
-        path: path.into(),
-        kind: "file".into(),
-        local_fingerprint: Some(fingerprint.into()),
-        remote_etag,
-        synced_at: now_iso(),
-    }
-}
-
-fn sync_anchor_from_download(
-    path: &str,
-    fingerprint: &str,
-    remote_etag: Option<String>,
-) -> SyncAnchor {
-    SyncAnchor {
-        path: path.into(),
-        kind: "file".into(),
-        local_fingerprint: Some(fingerprint.into()),
-        remote_etag,
-        synced_at: now_iso(),
-    }
-}
-
-enum PairTransferExecutor {
-    Real(object_store::ObjectStoreClient),
-    #[cfg(test)]
-    Mock,
-}
-
-#[cfg(test)]
-#[derive(Default)]
-struct PlannedTransferTestHooks {
-    upload_refresh_snapshots: BTreeMap<String, RemoteIndexSnapshot>,
-    download_payloads: BTreeMap<String, Vec<u8>>,
-}
-
-#[cfg(test)]
-fn planned_transfer_test_hooks() -> &'static std::sync::Mutex<Option<PlannedTransferTestHooks>> {
-    use std::sync::{Mutex, OnceLock};
-
-    static HOOKS: OnceLock<Mutex<Option<PlannedTransferTestHooks>>> = OnceLock::new();
-    HOOKS.get_or_init(|| Mutex::new(None))
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn set_planned_transfer_test_hooks(hooks: PlannedTransferTestHooks) {
-    *planned_transfer_test_hooks()
-        .lock()
-        .expect("planned transfer hooks lock should not be poisoned") = Some(hooks);
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn clear_planned_transfer_test_hooks() {
-    *planned_transfer_test_hooks()
-        .lock()
-        .expect("planned transfer hooks lock should not be poisoned") = None;
-}
-
-#[cfg(test)]
-fn planned_transfer_test_mode_enabled() -> bool {
-    planned_transfer_test_hooks()
-        .lock()
-        .expect("planned transfer hooks lock should not be poisoned")
-        .is_some()
-}
-
-#[cfg(test)]
-fn mock_upload_refresh_snapshot(path: &str) -> Result<RemoteIndexSnapshot, String> {
-    planned_transfer_test_hooks()
-        .lock()
-        .expect("planned transfer hooks lock should not be poisoned")
-        .as_mut()
-        .and_then(|hooks| hooks.upload_refresh_snapshots.remove(path))
-        .ok_or_else(|| format!("missing mocked upload refresh snapshot for '{path}'"))
-}
-
-#[cfg(test)]
-fn mock_download_file(path: &str, local_path: &Path) -> Result<(), String> {
-    let payload = planned_transfer_test_hooks()
-        .lock()
-        .expect("planned transfer hooks lock should not be poisoned")
-        .as_mut()
-        .and_then(|hooks| hooks.download_payloads.remove(path))
-        .ok_or_else(|| format!("missing mocked download payload for '{path}'"))?;
-    std::fs::write(local_path, payload).map_err(|error| {
-        format!(
-            "failed to write mocked download to '{}': {error}",
-            local_path.display()
-        )
-    })
-}
-
-async fn build_pair_transfer_executor(
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-) -> Result<PairTransferExecutor, String> {
-    #[cfg(test)]
-    if planned_transfer_test_mode_enabled() {
-        return Ok(PairTransferExecutor::Mock);
-    }
-
-    Ok(PairTransferExecutor::Real(
-        object_store::build_client(&storage_config_for_pair(pair, credentials)).await?,
-    ))
-}
-
-async fn perform_planned_upload_for_pair(
-    executor: &PairTransferExecutor,
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-    _path: &str,
-    key: &str,
-    local_path: &Path,
-    current_fingerprint: &str,
-) -> Result<RemoteIndexSnapshot, String> {
-    match executor {
-        PairTransferExecutor::Real(client) => {
-            object_store::upload_file(
-                client,
-                &pair.bucket,
-                key,
-                local_path,
-                Some(
-                    BTreeMap::from([(
-                        s3_adapter::LOCAL_FINGERPRINT_METADATA_KEY.to_string(),
-                        current_fingerprint.to_string(),
-                    )])
-                    .into_iter()
-                    .collect(),
-                ),
-            )
-            .await?;
-            list_remote_inventory_for_pair(pair, credentials).await
-        }
-        #[cfg(test)]
-        PairTransferExecutor::Mock => mock_upload_refresh_snapshot(_path),
-    }
-}
-
-async fn perform_planned_download_for_pair(
-    executor: &PairTransferExecutor,
-    pair: &SyncPair,
-    key: &str,
-    _path: &str,
-    local_path: &Path,
-) -> Result<(), String> {
-    match executor {
-        PairTransferExecutor::Real(client) => {
-            object_store::download_file(client, &pair.bucket, key, local_path)
-                .await
-                .map_err(String::from)
-        }
-        #[cfg(test)]
-        PairTransferExecutor::Mock => mock_download_file(_path, local_path),
-    }
-}
-
-/// Remove a remote object, honoring the pair's protection setting: object
-/// versioning leaves a delete marker, remote bin moves the object into the bin
-/// namespace, and only an unprotected pair hard-deletes. Mirrors the manual
-/// `delete_file` command so planned and manual deletes behave identically.
-async fn delete_remote_object_for_pair<R: Runtime>(
-    app: &AppHandle<R>,
-    executor: &PairTransferExecutor,
-    pair: &SyncPair,
-    path: &str,
-) -> Result<(), String> {
-    let key = s3_adapter::object_key(path);
-    match executor {
-        PairTransferExecutor::Real(client) => {
-            if !pair.object_versioning_enabled && pair.remote_bin.enabled {
-                if let Some(target) = target_for_pair(pair) {
-                    reconcile_remote_bin_lifecycle_target(app, &target).await?;
-                }
-                let bin_key = deleted_object_key(&pair.id, path);
-                object_store::move_object(client, &pair.bucket, &key, &bin_key, None)
-                    .await
-                    .map_err(String::from)
-            } else {
-                // Versioning leaves a restorable delete marker; without either
-                // protection this is a plain delete.
-                object_store::delete_object(client, &pair.bucket, &key)
-                    .await
-                    .map_err(String::from)
-            }
-        }
-        #[cfg(test)]
-        PairTransferExecutor::Mock => Ok(()),
-    }
-}
-
-/// Write the anchor for `path` from the local file's fingerprint and the
-/// object's current etag in `snapshot`.
-fn anchor_path_from_snapshot<R: Runtime>(
-    app: &AppHandle<R>,
-    pair: &SyncPair,
-    path: &str,
-    local_fingerprint: &str,
-    snapshot: &RemoteIndexSnapshot,
-) -> Result<(), String> {
-    upsert_sync_anchor_for_pair(
-        app,
-        pair,
-        &sync_anchor_from_upload(
-            path,
-            local_fingerprint,
-            remote_etag_for_path(snapshot, path),
-        ),
-    )
-}
-
-/// Execute the phase-1 operations that are not file transfers. Returns `None`
-/// when `item.operation` is a transfer the caller should handle itself.
-async fn perform_structural_upload_operation_for_pair<R: Runtime>(
-    app: &AppHandle<R>,
-    executor: &PairTransferExecutor,
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-    item: &PlannedUploadQueueItem,
-) -> Option<Result<String, String>> {
-    let operation = Operation::parse(&item.operation)?;
-
-    let result = match operation {
-        Operation::DeleteRemote => {
-            match delete_remote_object_for_pair(app, executor, pair, &item.path).await {
-                Ok(()) => delete_sync_anchor_for_pair(app, pair, &item.path)
-                    .map(|()| format!("Deleted remote copy of '{}'.", item.path)),
-                Err(error) => Err(error),
-            }
-        }
-        Operation::MoveRemote => {
-            let Some(target) = item.target_path.as_deref() else {
-                return Some(Err(format!(
-                    "planned remote move for '{}' is missing its destination",
-                    item.path
-                )));
-            };
-            move_remote_object_for_pair(app, executor, pair, credentials, &item.path, target).await
-        }
-        Operation::DuplicateConflict => {
-            let Some(target) = item.target_path.as_deref() else {
-                return Some(Err(format!(
-                    "planned conflict copy for '{}' is missing its destination",
-                    item.path
-                )));
-            };
-            duplicate_conflict_for_pair(app, executor, pair, credentials, &item.path, target).await
-        }
-        Operation::AnchorOnly => anchor_only_for_pair(app, pair, &item.path),
-        Operation::ForgetAnchor => delete_sync_anchor_for_pair(app, pair, &item.path)
-            .map(|()| format!("Cleared stale sync record for '{}'.", item.path)),
-        Operation::Upload | Operation::CreateDirectory => return None,
-        // Download-queue operations never reach the upload executor.
-        Operation::Download
-        | Operation::DeleteLocal
-        | Operation::MoveLocal
-        | Operation::ConflictReview
-        | Operation::ReviewRequired => return None,
-    };
-
-    Some(result)
-}
-
-/// Server-side copy + delete, then re-anchor the destination path.
-async fn move_remote_object_for_pair<R: Runtime>(
-    app: &AppHandle<R>,
-    executor: &PairTransferExecutor,
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-    from: &str,
-    to: &str,
-) -> Result<String, String> {
-    let from_key = s3_adapter::object_key(from);
-    let to_key = s3_adapter::object_key(to);
-
-    match executor {
-        PairTransferExecutor::Real(client) => {
-            object_store::move_object(client, &pair.bucket, &from_key, &to_key, None).await?;
-        }
-        #[cfg(test)]
-        PairTransferExecutor::Mock => {}
-    }
-
-    delete_sync_anchor_for_pair(app, pair, from)?;
-
-    // Anchor the destination so the next cycle sees a settled path rather than
-    // an unanchored file it would have to review.
-    let local_path = resolve_local_download_path(&pair.local_folder, to)?;
-    if let Ok(fingerprint) = crate::storage::local_index::file_fingerprint(&local_path) {
-        let snapshot = refresh_remote_snapshot_for_pair(executor, pair, credentials, to).await?;
-        write_remote_index_snapshot_for_pair(app, &pair.id, &snapshot)?;
-        anchor_path_from_snapshot(app, pair, to, &fingerprint, &snapshot)?;
-    }
-
-    Ok(format!("Moved remote copy of '{from}' to '{to}'."))
-}
-
-/// preserve-both: rename the local file to the conflict name and upload it.
-/// The paired download restores the remote version at the original path.
-async fn duplicate_conflict_for_pair<R: Runtime>(
-    app: &AppHandle<R>,
-    executor: &PairTransferExecutor,
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-    path: &str,
-    target: &str,
-) -> Result<String, String> {
-    rename_local_file_for_pair(pair, path, target)?;
-
-    let local_path = resolve_local_download_path(&pair.local_folder, target)?;
-    let fingerprint = crate::storage::local_index::file_fingerprint(&local_path)?;
-    let key = s3_adapter::object_key(target);
-
-    let snapshot = perform_planned_upload_for_pair(
-        executor,
-        pair,
-        credentials,
-        target,
-        &key,
-        &local_path,
-        &fingerprint,
-    )
-    .await?;
-
-    write_remote_index_snapshot_for_pair(app, &pair.id, &snapshot)?;
-    anchor_path_from_snapshot(app, pair, target, &fingerprint, &snapshot)?;
-    // The original path is re-anchored by the paired download.
-    delete_sync_anchor_for_pair(app, pair, path)?;
-
-    Ok(format!(
-        "Kept both versions of '{path}': your copy is now '{target}'."
-    ))
-}
-
-/// Record an anchor for content that already matches on both sides, so a
-/// first sync over pre-existing data transfers nothing.
-fn anchor_only_for_pair<R: Runtime>(
-    app: &AppHandle<R>,
-    pair: &SyncPair,
-    path: &str,
-) -> Result<String, String> {
-    let local_path = resolve_local_download_path(&pair.local_folder, path)?;
-    let fingerprint = crate::storage::local_index::file_fingerprint(&local_path)?;
-    let snapshot = read_remote_index_snapshot_for_pair(app, &pair.id)?
-        .ok_or_else(|| "remote snapshot missing while anchoring existing content".to_string())?;
-
-    // Re-verify before recording a match. Anchoring two different files as
-    // "already in sync" would silently strand one of them, so a stale or
-    // fingerprint-less snapshot must fail rather than guess.
-    let remote_fingerprint = snapshot
-        .entries
-        .iter()
-        .find(|entry| entry.relative_path == path && entry.kind == "file")
-        .and_then(|entry| entry.fingerprint.clone());
-    if remote_fingerprint.as_deref() != Some(fingerprint.as_str()) {
-        return Err(format!(
-            "content for '{path}' no longer matches the remote copy; leaving it for review"
-        ));
-    }
-
-    anchor_path_from_snapshot(app, pair, path, &fingerprint, &snapshot)?;
-    Ok(format!("Matched existing content for '{path}'."))
-}
-
-async fn refresh_remote_snapshot_for_pair(
-    executor: &PairTransferExecutor,
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-    _path: &str,
-) -> Result<RemoteIndexSnapshot, String> {
-    match executor {
-        PairTransferExecutor::Real(_) => list_remote_inventory_for_pair(pair, credentials).await,
-        #[cfg(test)]
-        PairTransferExecutor::Mock => mock_upload_refresh_snapshot(_path),
-    }
-}
-
-/// Execute the download-queue operations that are not file transfers.
-fn perform_structural_download_operation_for_pair<R: Runtime>(
-    app: &AppHandle<R>,
-    executor: &PairTransferExecutor,
-    pair: &SyncPair,
-    item: &PlannedDownloadQueueItem,
-) -> Option<Result<String, String>> {
-    let operation = Operation::parse(&item.operation)?;
-
-    let result = match operation {
-        Operation::DeleteLocal => {
-            let removed = match executor {
-                PairTransferExecutor::Real(_) => trash_local_file_for_pair(pair, &item.path),
-                // Tests assert on the resulting tree, not on OS trash behavior.
-                #[cfg(test)]
-                PairTransferExecutor::Mock => {
-                    remove_local_file_without_trash_for_pair(pair, &item.path)
-                }
-            };
-            match removed {
-                Ok(()) => delete_sync_anchor_for_pair(app, pair, &item.path)
-                    .map(|()| format!("Deleted local copy of '{}'.", item.path)),
-                Err(error) => Err(error),
-            }
-        }
-        Operation::MoveLocal => {
-            let Some(target) = item.target_path.as_deref() else {
-                return Some(Err(format!(
-                    "planned local move for '{}' is missing its destination",
-                    item.path
-                )));
-            };
-            match rename_local_file_for_pair(pair, &item.path, target) {
-                Ok(()) => delete_sync_anchor_for_pair(app, pair, &item.path)
-                    .map(|()| format!("Moved local copy of '{}' to '{target}'.", item.path)),
-                Err(error) => Err(error),
-            }
-        }
-        _ => return None,
-    };
-
-    Some(result)
-}
-
-fn persist_upload_success_for_pair<R: Runtime>(
-    app: &AppHandle<R>,
-    pair: &SyncPair,
-    path: &str,
-    local_fingerprint: &str,
-    refreshed_remote_snapshot: &RemoteIndexSnapshot,
-) -> Result<(), String> {
-    write_remote_index_snapshot_for_pair(app, &pair.id, refreshed_remote_snapshot)?;
-    upsert_sync_anchor_for_pair(
-        app,
-        pair,
-        &sync_anchor_from_upload(
-            path,
-            local_fingerprint,
-            remote_etag_for_path(refreshed_remote_snapshot, path),
-        ),
-    )
-}
-
-fn persist_download_success_for_pair<R: Runtime>(
-    app: &AppHandle<R>,
-    pair: &SyncPair,
-    path: &str,
-    local_path: &Path,
-    current_remote_etag: Option<String>,
-) -> Result<(), String> {
-    let downloaded_fingerprint = crate::storage::local_index::file_fingerprint(local_path)?;
-    upsert_sync_anchor_for_pair(
-        app,
-        pair,
-        &sync_anchor_from_download(path, &downloaded_fingerprint, current_remote_etag),
-    )
-}
-
-fn upload_stale_plan_error(
-    local_path: &Path,
-    current_local_fingerprint: &str,
-    expected_local_fingerprint: Option<&str>,
-    current_remote_etag: Option<&str>,
-    expected_remote_etag: Option<&str>,
-) -> Option<String> {
-    if expected_local_fingerprint != Some(current_local_fingerprint) {
-        return Some(format!(
-            "planned upload source '{}' changed on disk since planning (fingerprint mismatch)",
-            local_path.display()
-        ));
-    }
-
-    if current_remote_etag != expected_remote_etag {
-        return Some(format!(
-            "planned upload target '{}' changed remotely since planning",
-            local_path.display()
-        ));
-    }
-
-    None
-}
-
-fn download_stale_plan_error(
-    local_path: &Path,
-    current_local_fingerprint: Option<&str>,
-    expected_local_fingerprint: Option<&str>,
-    current_remote_etag: Option<&str>,
-    expected_remote_etag: Option<&str>,
-) -> Option<String> {
-    if current_remote_etag != expected_remote_etag {
-        return Some(format!(
-            "planned download source '{}' changed remotely since planning",
-            local_path.display()
-        ));
-    }
-
-    if current_local_fingerprint != expected_local_fingerprint {
-        return Some(format!(
-            "planned download destination '{}' changed locally since planning",
-            local_path.display()
-        ));
-    }
-
-    None
-}
-
-fn current_remote_entry<'a>(
-    snapshot: &'a RemoteIndexSnapshot,
-    path: &str,
-) -> Option<&'a RemoteObjectEntry> {
-    snapshot
-        .entries
-        .iter()
-        .find(|entry| entry.relative_path == path)
-}
-
-fn remote_etag_for_path(snapshot: &RemoteIndexSnapshot, path: &str) -> Option<String> {
-    current_remote_entry(snapshot, path).and_then(|entry| entry.etag.clone())
-}
-
-fn local_fingerprint_for_path(snapshot: &LocalIndexSnapshot, path: &str) -> Option<String> {
-    snapshot
-        .entries
-        .iter()
-        .find(|entry| entry.relative_path == path && entry.kind == "file")
-        .and_then(|entry| entry.fingerprint.clone())
 }
 
 fn status_with_snapshots(
@@ -1281,7 +757,7 @@ fn store_profile_settings<R: Runtime>(
     )
 }
 
-async fn reconcile_remote_bin_lifecycle_target<R: Runtime>(
+pub(crate) async fn reconcile_remote_bin_lifecycle_target<R: Runtime>(
     app: &AppHandle<R>,
     target: &RemoteBinLifecycleTarget,
 ) -> Result<(), String> {
@@ -1338,12 +814,6 @@ async fn reconcile_pair_object_versioning<R: Runtime>(
     }
 
     Ok(())
-}
-
-fn stop_requested(stop_signal: Option<&AtomicBool>) -> bool {
-    stop_signal
-        .map(|signal| signal.load(Ordering::SeqCst))
-        .unwrap_or(false)
 }
 
 async fn sleep_until_pair_work(
@@ -1880,7 +1350,7 @@ fn s3_config_for_pair(
     }
 }
 
-fn storage_config_for_pair(
+pub(crate) fn storage_config_for_pair(
     pair: &SyncPair,
     credentials: &StoredCredentials,
 ) -> object_store::StorageConnectionConfig {
@@ -2078,127 +1548,6 @@ fn refresh_aggregate_status<R: Runtime>(
 ) -> Result<SyncStatus, String> {
     let pair_statuses = configured_pair_statuses(profile, app);
     set_aggregate_status_from_pairs(app, pair_statuses)
-}
-
-fn active_pair_for_manual_actions(profile: &StoredProfile) -> Option<SyncPair> {
-    if profile.sync_pairs.is_empty() {
-        return None;
-    }
-
-    if let Some(active_id) = profile.active_location_id.as_deref() {
-        if let Some(pair) = profile.sync_pairs.iter().find(|pair| pair.id == active_id) {
-            return Some(pair.clone());
-        }
-    }
-
-    profile
-        .sync_pairs
-        .iter()
-        .find(|pair| pair.enabled && is_pair_configured(pair))
-        .cloned()
-        .or_else(|| {
-            profile
-                .sync_pairs
-                .iter()
-                .find(|pair| is_pair_configured(pair))
-                .cloned()
-        })
-}
-
-fn should_poll_pair(pair: &SyncPair) -> bool {
-    pair.enabled && pair.remote_polling_enabled && is_pair_configured(pair)
-}
-
-fn next_polling_deadline_at(
-    now: tokio::time::Instant,
-    pair: &SyncPair,
-    status: Option<&PairSyncStatus>,
-) -> tokio::time::Instant {
-    let interval = Duration::from_secs(pair.poll_interval_seconds.max(15) as u64);
-    let anchor = status
-        .and_then(|status| status.last_sync_at.as_deref())
-        .and_then(parse_poll_anchor_age)
-        .unwrap_or(interval);
-    let wait = if anchor >= interval {
-        Duration::ZERO
-    } else {
-        interval - anchor
-    };
-    now + wait
-}
-
-#[cfg(test)]
-fn next_polling_deadline(pair: &SyncPair, status: Option<&PairSyncStatus>) -> tokio::time::Instant {
-    next_polling_deadline_at(tokio::time::Instant::now(), pair, status)
-}
-
-fn due_polling_pairs(
-    pairs: &[SyncPair],
-    statuses: &BTreeMap<String, PairSyncStatus>,
-    now: tokio::time::Instant,
-) -> Vec<SyncPair> {
-    pairs
-        .iter()
-        .filter(|pair| should_poll_pair(pair))
-        .filter(|pair| next_polling_deadline_at(now, pair, statuses.get(&pair.id)) <= now)
-        .cloned()
-        .collect()
-}
-
-fn watcher_eligible_pairs(profile: &StoredProfile) -> Vec<SyncPair> {
-    profile
-        .sync_pairs
-        .iter()
-        .filter(|pair| should_poll_pair(pair))
-        .cloned()
-        .collect()
-}
-
-fn pair_watch_target(pair: &SyncPair) -> Option<WatchTarget> {
-    should_poll_pair(pair).then(|| WatchTarget {
-        pair_id: pair.id.clone(),
-        root_path: PathBuf::from(&pair.local_folder),
-    })
-}
-
-fn snapshot_age(value: &str, now: time::OffsetDateTime) -> Option<Duration> {
-    let parsed =
-        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()?;
-    let elapsed = now - parsed;
-    if elapsed.is_negative() {
-        Some(Duration::ZERO)
-    } else {
-        elapsed.try_into().ok()
-    }
-}
-
-fn local_snapshot_is_fresh(snapshot: &LocalIndexSnapshot, ttl: Duration) -> bool {
-    snapshot_age(
-        &snapshot.summary.indexed_at,
-        time::OffsetDateTime::now_utc(),
-    )
-    .is_some_and(|age| age <= ttl)
-}
-
-fn should_scan_local_for_trigger(
-    trigger: PairSyncTrigger,
-    cached_local_snapshot: Option<&LocalIndexSnapshot>,
-    watcher_active: bool,
-    ttl: Duration,
-) -> bool {
-    match trigger {
-        PairSyncTrigger::Manual | PairSyncTrigger::LocalDirty => true,
-        PairSyncTrigger::RemotePoll => {
-            cached_local_snapshot.is_none()
-                || !watcher_active
-                || cached_local_snapshot
-                    .is_some_and(|snapshot| !local_snapshot_is_fresh(snapshot, ttl))
-        }
-    }
-}
-
-fn parse_poll_anchor_age(value: &str) -> Option<Duration> {
-    snapshot_age(value, time::OffsetDateTime::now_utc())
 }
 
 fn snapshot_for_pair<R: Runtime>(
@@ -5434,6 +4783,9 @@ pub async fn change_storage_class(
 
 #[cfg(test)]
 mod tests {
+    use crate::storage::platform::{rename_local_file_for_pair, trash_local_file_for_pair};
+    use crate::storage::polling_service::local_snapshot_is_fresh;
+
     use crate::storage::bin_service::{
         add_retention_days, path_matches_exact_or_descendant, validate_remote_restore_destination,
         versioned_bin_key,
@@ -5449,15 +4801,15 @@ mod tests {
         collect_versioned_bin_entries_for_request, collect_versioned_history_for_deleted_entries,
         destination_key_for_bin_restore, directory_relative_paths_from_key,
         directory_relative_paths_from_relative_path, download_stale_plan_error, due_polling_pairs,
-        local_fingerprint_for_path, local_snapshot_is_fresh, next_polling_deadline,
-        parse_versioned_bin_key, provider_supports_remote_bin_lifecycle_reconciliation,
+        local_fingerprint_for_path, next_polling_deadline, parse_versioned_bin_key,
+        provider_supports_remote_bin_lifecycle_reconciliation,
         provider_supports_runtime_object_versioning, relative_path_from_key,
-        remote_bin_key_for_deleted_key, remove_local_directory_subtree, rename_local_file_for_pair,
+        remote_bin_key_for_deleted_key, remove_local_directory_subtree,
         resolve_local_download_path, s3_config_for_pair, should_defer_create_time_credential_test,
         should_poll_pair, should_scan_local_for_trigger, sync_pair_for_location,
-        trash_local_file_for_pair, upload_stale_plan_error, validate_bin_batch_requests,
-        watcher_eligible_pairs, BinEntryRequest, CredentialTestContext, PairSyncTrigger,
-        VersionedBinEntry, LOCAL_SNAPSHOT_STALE_TTL,
+        upload_stale_plan_error, validate_bin_batch_requests, watcher_eligible_pairs,
+        BinEntryRequest, CredentialTestContext, PairSyncTrigger, VersionedBinEntry,
+        LOCAL_SNAPSHOT_STALE_TTL,
     };
     use crate::storage::credentials_store::{
         CredentialSummary, CredentialValidationStatus, StoredCredentials,
