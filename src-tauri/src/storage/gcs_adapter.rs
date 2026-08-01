@@ -12,8 +12,10 @@ use std::{
 use super::error::SyncError;
 use super::remote_bin::{namespace_prefix, ManagedLifecycleRulePlan};
 use super::sanitizer::sanitize_sensitive_text;
+use super::transfer::DownloadWriter;
 
 const STORAGE_SCOPE: &str = "https://www.googleapis.com/auth/devstorage.full_control";
+
 const GCS_STORAGE_API_BASE_URL: &str = "https://storage.googleapis.com";
 const ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
@@ -43,10 +45,17 @@ pub struct GcsServiceAccountCredentials {
 
 #[derive(Debug, Clone)]
 pub struct GcsClient {
-    http: reqwest::Client,
-    token: String,
-    storage_api_base_url: String,
+    // Crate-visible so the upload paths in `gcs_upload` can drive the same
+    // client without a second constructor.
+    pub(crate) http: reqwest::Client,
+    pub(crate) token: String,
+    pub(crate) storage_api_base_url: String,
     pub credentials: GcsServiceAccountCredentials,
+    /// Objects at or above this size upload through a resumable session.
+    pub(crate) resumable_threshold_bytes: u64,
+    /// Bytes per resumable chunk. GCS requires a multiple of 256 KiB for every
+    /// chunk except the last.
+    pub(crate) resumable_chunk_size_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,10 +226,10 @@ struct GcsCreateBucketRequest<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct GcsObjectMetadata<'a> {
-    name: &'a str,
+pub(crate) struct GcsObjectMetadata<'a> {
+    pub(crate) name: &'a str,
     #[serde(skip_serializing_if = "HashMap::is_empty")]
-    metadata: HashMap<String, String>,
+    pub(crate) metadata: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -335,6 +344,8 @@ impl GcsClient {
             token,
             storage_api_base_url: GCS_STORAGE_API_BASE_URL.into(),
             credentials: credentials.clone(),
+            resumable_threshold_bytes: super::gcs_upload::RESUMABLE_UPLOAD_THRESHOLD_BYTES,
+            resumable_chunk_size_bytes: super::gcs_upload::RESUMABLE_CHUNK_SIZE_BYTES,
         })
     }
 
@@ -350,7 +361,18 @@ impl GcsClient {
             token: token.into(),
             storage_api_base_url: storage_api_base_url.into(),
             credentials,
+            resumable_threshold_bytes: super::gcs_upload::RESUMABLE_UPLOAD_THRESHOLD_BYTES,
+            resumable_chunk_size_bytes: super::gcs_upload::RESUMABLE_CHUNK_SIZE_BYTES,
         }
+    }
+
+    /// Shrink the resumable thresholds so tests can exercise the multi-chunk
+    /// protocol with byte-sized payloads.
+    #[cfg(test)]
+    fn with_resumable_sizing(mut self, threshold: u64, chunk_size: u64) -> Self {
+        self.resumable_threshold_bytes = threshold;
+        self.resumable_chunk_size_bytes = chunk_size;
+        self
     }
 
     pub async fn list_buckets(&self) -> Result<Vec<String>, SyncError> {
@@ -516,75 +538,6 @@ impl GcsClient {
         Ok(objects)
     }
 
-    pub async fn upload_object(
-        &self,
-        bucket: &str,
-        key: &str,
-        path: &Path,
-        metadata: Option<HashMap<String, String>>,
-    ) -> Result<(), SyncError> {
-        let body = std::fs::read(path).map_err(|error| {
-            SyncError::storage(format!(
-                "failed to read upload source '{}': {error}",
-                path.display()
-            ))
-        })?;
-        self.upload_object_bytes(bucket, key, body, metadata).await
-    }
-
-    pub async fn upload_object_bytes(
-        &self,
-        bucket: &str,
-        key: &str,
-        bytes: Vec<u8>,
-        metadata: Option<HashMap<String, String>>,
-    ) -> Result<(), SyncError> {
-        let boundary = "storage-goblin-gcs-boundary";
-        let object_metadata = serde_json::to_string(&GcsObjectMetadata {
-            name: key,
-            metadata: metadata.unwrap_or_default(),
-        })
-        .map_err(|error| format!("failed to serialize GCS object metadata: {error}"))?;
-
-        let mut payload = Vec::new();
-        payload.extend_from_slice(format!("--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{object_metadata}\r\n").as_bytes());
-        payload.extend_from_slice(
-            format!("--{boundary}\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes(),
-        );
-        payload.extend_from_slice(&bytes);
-        payload.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-
-        let response = self
-            .http
-            .post(format!(
-                "https://storage.googleapis.com/upload/storage/v1/b/{}/o?uploadType=multipart",
-                encode_component(bucket)
-            ))
-            .bearer_auth(&self.token)
-            .header(
-                reqwest::header::CONTENT_TYPE,
-                format!("multipart/related; boundary={boundary}"),
-            )
-            .body(payload)
-            .send()
-            .await
-            .map_err(|error| {
-                SyncError::transient(format!(
-                    "failed to upload '{key}' to GCS bucket '{bucket}': {error}"
-                ))
-            })?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(render_http_error(
-                response,
-                &format!("upload '{key}' to GCS bucket '{bucket}'"),
-            )
-            .await)
-        }
-    }
-
     pub async fn download_object(
         &self,
         bucket: &str,
@@ -607,26 +560,32 @@ impl GcsClient {
             .await);
         }
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| format!("failed to read GCS download body for '{key}': {error}"))?;
+        Self::stream_response_to_path(response, key, path).await
+    }
 
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                SyncError::storage(format!(
-                    "failed to create parent directory for '{}': {error}",
-                    path.display()
+    /// Stream a GCS response body to disk through the atomic download writer,
+    /// rather than buffering the whole object in memory first.
+    async fn stream_response_to_path(
+        mut response: reqwest::Response,
+        key: &str,
+        path: &Path,
+    ) -> Result<(), SyncError> {
+        let mut writer = DownloadWriter::create(path)?;
+
+        loop {
+            let chunk = response.chunk().await.map_err(|error| {
+                SyncError::transient(format!(
+                    "failed to read GCS download body for '{key}': {error}"
                 ))
             })?;
+            match chunk {
+                Some(bytes) => writer.write_chunk(&bytes)?,
+                None => break,
+            }
         }
 
-        std::fs::write(path, &bytes).map_err(|error| {
-            SyncError::storage(format!(
-                "failed to write downloaded file '{}': {error}",
-                path.display()
-            ))
-        })
+        writer.finish()?;
+        Ok(())
     }
 
     pub async fn delete_object(&self, bucket: &str, key: &str) -> Result<(), SyncError> {
@@ -905,26 +864,7 @@ impl GcsClient {
             .await);
         }
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| format!("failed to read GCS download body for '{key}': {error}"))?;
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                SyncError::storage(format!(
-                    "failed to create parent directory for '{}': {error}",
-                    path.display()
-                ))
-            })?;
-        }
-
-        std::fs::write(path, &bytes).map_err(|error| {
-            SyncError::storage(format!(
-                "failed to write downloaded file '{}': {error}",
-                path.display()
-            ))
-        })
+        Self::stream_response_to_path(response, key, path).await
     }
 
     pub async fn copy_object_version(
@@ -1030,7 +970,7 @@ impl GcsClient {
 }
 
 impl GcsClient {
-    fn storage_api_url(&self, path: &str) -> String {
+    pub(crate) fn storage_api_url(&self, path: &str) -> String {
         format!("{}{}", self.storage_api_base_url, path)
     }
 
@@ -1216,7 +1156,7 @@ async fn parse_json_response<T: for<'de> Deserialize<'de>>(
     })
 }
 
-async fn render_http_error(response: reqwest::Response, action: &str) -> SyncError {
+pub(crate) async fn render_http_error(response: reqwest::Response, action: &str) -> SyncError {
     let status = response.status();
     let retry_after_seconds = response
         .headers()
@@ -1242,7 +1182,7 @@ fn normalize_region(region: &str) -> Option<String> {
     }
 }
 
-fn encode_component(value: &str) -> String {
+pub(crate) fn encode_component(value: &str) -> String {
     utf8_percent_encode(value, ENCODE_SET).to_string()
 }
 
@@ -1277,12 +1217,29 @@ mod tests {
         path: String,
         authorization: Option<String>,
         body: String,
+        content_range: Option<String>,
     }
 
     #[derive(Debug, Clone)]
     struct TestResponse {
         status_code: u16,
         body: String,
+        headers: Vec<(String, String)>,
+    }
+
+    impl TestResponse {
+        fn new(status_code: u16, body: &str) -> Self {
+            Self {
+                status_code,
+                body: body.to_string(),
+                headers: Vec::new(),
+            }
+        }
+
+        fn with_header(mut self, name: &str, value: &str) -> Self {
+            self.headers.push((name.to_string(), value.to_string()));
+            self
+        }
     }
 
     struct TestServer {
@@ -1293,11 +1250,18 @@ mod tests {
 
     impl TestServer {
         fn spawn(responses: Vec<TestResponse>) -> Self {
+            Self::spawn_with(|_| responses)
+        }
+
+        /// Bind first, then let the caller build responses that reference the
+        /// bound address (a resumable session URI must point back here).
+        fn spawn_with(build: impl FnOnce(&str) -> Vec<TestResponse>) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("test server should bind");
             let base_url = format!(
                 "http://{}",
                 listener.local_addr().expect("address should resolve")
             );
+            let responses = build(&base_url);
             let requests = Arc::new(Mutex::new(Vec::new()));
             let captured_requests = Arc::clone(&requests);
 
@@ -1309,7 +1273,7 @@ mod tests {
                         .lock()
                         .expect("requests lock should succeed")
                         .push(request);
-                    write_http_response(&mut stream, response.status_code, &response.body);
+                    write_http_response(&mut stream, &response);
                 }
             });
 
@@ -1329,19 +1293,29 @@ mod tests {
         }
     }
 
-    fn write_http_response(stream: &mut TcpStream, status_code: u16, body: &str) {
+    fn write_http_response(stream: &mut TcpStream, response: &TestResponse) {
+        let status_code = response.status_code;
+        let body = response.body.as_str();
         let reason = match status_code {
             200 => "OK",
             204 => "No Content",
+            308 => "Resume Incomplete",
             400 => "Bad Request",
             _ => "OK",
         };
 
+        let extra = response
+            .headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect::<String>();
+
         let response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: application/json\r\n{}Connection: close\r\n\r\n{}",
             status_code,
             reason,
             body.len(),
+            extra,
             body
         );
         stream
@@ -1379,6 +1353,7 @@ mod tests {
         let path = request_parts.next().expect("path should exist").to_string();
 
         let mut authorization = None;
+        let mut content_range = None;
         let mut content_length = 0usize;
         for line in lines {
             if let Some((name, value)) = line.split_once(':') {
@@ -1386,6 +1361,9 @@ mod tests {
                 let header_value = value.trim().to_string();
                 if header_name.eq_ignore_ascii_case("authorization") {
                     authorization = Some(header_value.clone());
+                }
+                if header_name.eq_ignore_ascii_case("content-range") {
+                    content_range = Some(header_value.clone());
                 }
                 if header_name.eq_ignore_ascii_case("content-length") {
                     content_length = header_value
@@ -1407,8 +1385,174 @@ mod tests {
             method,
             path,
             authorization,
-            body: String::from_utf8(body).expect("body should be valid utf-8"),
+            body: String::from_utf8_lossy(&body).into_owned(),
+            content_range,
         }
+    }
+
+    fn resumable_temp_file(name: &str, size: usize) -> std::path::PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time should be after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "storage-goblin-gcs-upload-{name}-{}-{suffix}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir should create");
+        let path = dir.join("payload.bin");
+        // Deterministic ASCII so the recorded request bodies are readable and
+        // a mis-ordered or dropped chunk is obvious.
+        let payload: Vec<u8> = (0..size).map(|index| b'a' + (index % 26) as u8).collect();
+        std::fs::write(&path, &payload).expect("payload should write");
+        path
+    }
+
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build")
+    }
+
+    #[test]
+    fn large_uploads_use_a_resumable_session_and_send_every_byte_in_order() {
+        // 10 bytes with a 4-byte chunk: two full chunks plus a short final one.
+        let total = 10_usize;
+        let path = resumable_temp_file("resumable", total);
+
+        let server = TestServer::spawn_with(|base_url| {
+            vec![
+                // Session initiation answers with the session URI, which must
+                // point back here so the chunks land on this server.
+                TestResponse::new(200, "")
+                    .with_header("Location", &format!("{base_url}/resumable-session/abc")),
+                TestResponse::new(308, ""),
+                TestResponse::new(308, ""),
+                TestResponse::new(200, "{}"),
+            ]
+        });
+        let client = test_client(&server.base_url).with_resumable_sizing(8, 4);
+
+        let outcome = test_runtime().block_on(client.upload_object(
+            "demo-bucket",
+            "big.bin",
+            &path,
+            Some(std::collections::HashMap::from([(
+                "goblin".to_string(),
+                "fingerprint".to_string(),
+            )])),
+        ));
+
+        let requests = server.finish();
+        outcome.expect("resumable upload should succeed");
+
+        assert_eq!(requests.len(), 4, "initiate + three chunks");
+
+        // Session initiation carries the object metadata.
+        assert_eq!(requests[0].method, "POST");
+        assert!(
+            requests[0].path.contains("uploadType=resumable"),
+            "expected a resumable initiation, got {}",
+            requests[0].path
+        );
+        assert!(
+            requests[0].body.contains("fingerprint"),
+            "object metadata should be sent when the session opens"
+        );
+
+        // Chunks are PUTs with contiguous, correctly framed Content-Ranges.
+        let ranges: Vec<Option<&str>> = requests[1..]
+            .iter()
+            .map(|request| request.content_range.as_deref())
+            .collect();
+        assert_eq!(
+            ranges,
+            vec![
+                Some("bytes 0-3/10"),
+                Some("bytes 4-7/10"),
+                Some("bytes 8-9/10"),
+            ]
+        );
+        assert!(requests[1..].iter().all(|request| request.method == "PUT"));
+
+        // Every byte arrived exactly once, in order.
+        let sent: String = requests[1..]
+            .iter()
+            .map(|request| request.body.clone())
+            .collect();
+        assert_eq!(sent, "abcdefghij");
+
+        let _ = std::fs::remove_dir_all(path.parent().expect("temp dir"));
+    }
+
+    #[test]
+    fn small_uploads_stay_on_the_single_request_path() {
+        let path = resumable_temp_file("small", 4);
+        let server = TestServer::spawn(vec![TestResponse::new(200, "{}")]);
+        let client = test_client(&server.base_url).with_resumable_sizing(8, 4);
+
+        let outcome =
+            test_runtime().block_on(client.upload_object("demo-bucket", "small.bin", &path, None));
+
+        let requests = server.finish();
+        outcome.expect("small upload should succeed");
+
+        assert_eq!(requests.len(), 1, "a small object needs one request");
+        assert!(
+            requests[0].path.contains("uploadType=multipart"),
+            "small objects should not open a resumable session, got {}",
+            requests[0].path
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().expect("temp dir"));
+    }
+
+    #[test]
+    fn a_rejected_chunk_fails_the_upload_with_the_provider_message() {
+        let path = resumable_temp_file("chunk-fail", 10);
+
+        let server = TestServer::spawn_with(|base_url| {
+            vec![
+                TestResponse::new(200, "")
+                    .with_header("Location", &format!("{base_url}/resumable-session/abc")),
+                TestResponse::new(400, r#"{"error":{"message":"bad chunk"}}"#),
+            ]
+        });
+        let client = test_client(&server.base_url).with_resumable_sizing(8, 4);
+
+        let outcome =
+            test_runtime().block_on(client.upload_object("demo-bucket", "big.bin", &path, None));
+
+        let _ = server.finish();
+        let error = outcome.expect_err("a rejected chunk should fail the upload");
+        assert!(
+            error.message.contains("upload 'big.bin'"),
+            "unexpected error: {}",
+            error.message
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().expect("temp dir"));
+    }
+
+    #[test]
+    fn a_session_without_a_location_header_is_an_error_not_a_hang() {
+        let path = resumable_temp_file("no-location", 10);
+        let server = TestServer::spawn(vec![TestResponse::new(200, "{}")]);
+        let client = test_client(&server.base_url).with_resumable_sizing(8, 4);
+
+        let outcome =
+            test_runtime().block_on(client.upload_object("demo-bucket", "big.bin", &path, None));
+
+        let _ = server.finish();
+        let error = outcome.expect_err("a session with no location should fail");
+        assert!(
+            error.message.contains("no session location"),
+            "unexpected error: {}",
+            error.message
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().expect("temp dir"));
     }
 
     fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -1513,18 +1657,9 @@ mod tests {
     #[test]
     fn move_object_retries_rewrite_until_done_then_deletes_source() {
         let server = TestServer::spawn(vec![
-            TestResponse {
-                status_code: 200,
-                body: r#"{"done":false,"rewriteToken":"token-2"}"#.into(),
-            },
-            TestResponse {
-                status_code: 200,
-                body: r#"{"done":true}"#.into(),
-            },
-            TestResponse {
-                status_code: 204,
-                body: String::new(),
-            },
+            TestResponse::new(200, r#"{"done":false,"rewriteToken":"token-2"}"#),
+            TestResponse::new(200, r#"{"done":true}"#),
+            TestResponse::new(204, ""),
         ]);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1569,14 +1704,8 @@ mod tests {
     #[test]
     fn rewrite_storage_class_retries_rewrite_until_done() {
         let server = TestServer::spawn(vec![
-            TestResponse {
-                status_code: 200,
-                body: r#"{"done":false,"rewriteToken":"token-2"}"#.into(),
-            },
-            TestResponse {
-                status_code: 200,
-                body: r#"{"done":true}"#.into(),
-            },
+            TestResponse::new(200, r#"{"done":false,"rewriteToken":"token-2"}"#),
+            TestResponse::new(200, r#"{"done":true}"#),
         ]);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1649,10 +1778,10 @@ mod tests {
 
     #[test]
     fn gets_bucket_lifecycle_configuration_and_tracks_metageneration() {
-        let server = TestServer::spawn(vec![TestResponse {
-            status_code: 200,
-            body: r#"{"metageneration":"12","lifecycle":{"rule":[{"action":{"type":"SetStorageClass","storageClass":"ARCHIVE"},"condition":{"age":60,"matchesPrefix":["archive/"]}}]}}"#.into(),
-        }]);
+        let server = TestServer::spawn(vec![TestResponse::new(
+            200,
+            r#"{"metageneration":"12","lifecycle":{"rule":[{"action":{"type":"SetStorageClass","storageClass":"ARCHIVE"},"condition":{"age":60,"matchesPrefix":["archive/"]}}]}}"#,
+        )]);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1686,10 +1815,10 @@ mod tests {
 
     #[test]
     fn patches_bucket_lifecycle_configuration_with_metageneration_match() {
-        let server = TestServer::spawn(vec![TestResponse {
-            status_code: 200,
-            body: r#"{"metageneration":"13","lifecycle":{"rule":[{"action":{"type":"Delete"},"condition":{"age":7,"matchesPrefix":[".storage-goblin-bin/pairs/pair-1/"]}}]}}"#.into(),
-        }]);
+        let server = TestServer::spawn(vec![TestResponse::new(
+            200,
+            r#"{"metageneration":"13","lifecycle":{"rule":[{"action":{"type":"Delete"},"condition":{"age":7,"matchesPrefix":[".storage-goblin-bin/pairs/pair-1/"]}}]}}"#,
+        )]);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

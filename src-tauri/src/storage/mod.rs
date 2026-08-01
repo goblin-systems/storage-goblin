@@ -17,6 +17,7 @@ pub mod credentials_store;
 pub mod error;
 pub mod file_query_service;
 pub mod gcs_adapter;
+pub mod gcs_upload;
 pub mod inventory_compare;
 pub mod lifecycle_service;
 pub mod local_index;
@@ -40,6 +41,7 @@ pub mod sync_db;
 pub mod sync_planner;
 pub mod sync_service;
 pub mod sync_state;
+pub mod transfer;
 pub mod transfer_service;
 #[cfg(test)]
 mod ts_bindings;

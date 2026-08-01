@@ -15,6 +15,7 @@ use std::path::Path;
 
 use super::error::{SyncError, SyncErrorKind};
 use super::now_iso;
+use super::transfer::DownloadWriter;
 
 pub const LOCAL_FINGERPRINT_METADATA_KEY: &str = "storage-goblin-local-fingerprint";
 
@@ -385,29 +386,26 @@ pub async fn download_file(
             )
         })?;
 
-    let bytes = response
-        .body
-        .collect()
-        .await
-        .map_err(|error| format!("failed to read download body for '{key}': {error}"))?
-        .into_bytes();
+    stream_body_to_path(response.body, key, path).await
+}
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "failed to create parent directory for '{}': {error}",
-                path.display()
-            )
+/// Stream an S3 response body to disk through the atomic download writer,
+/// rather than buffering the whole object in memory first.
+async fn stream_body_to_path(
+    mut body: aws_sdk_s3::primitives::ByteStream,
+    key: &str,
+    path: &Path,
+) -> Result<(), SyncError> {
+    let mut writer = DownloadWriter::create(path)?;
+
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(|error| {
+            SyncError::transient(format!("failed to read download body for '{key}': {error}"))
         })?;
+        writer.write_chunk(&chunk)?;
     }
 
-    std::fs::write(path, &bytes).map_err(|error| {
-        format!(
-            "failed to write downloaded file '{}': {error}",
-            path.display()
-        )
-    })?;
-
+    writer.finish()?;
     Ok(())
 }
 
@@ -1096,32 +1094,12 @@ pub async fn download_file_version(
                 "failed to download version '{version_id}' of '{key}' from bucket '{bucket}': {error}"
             )))?;
 
-    let bytes = response
-        .body
-        .collect()
-        .await
-        .map_err(|error| {
-            format!("failed to read download body for version '{version_id}' of '{key}': {error}")
-        })?
-        .into_bytes();
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "failed to create parent directory for '{}': {error}",
-                path.display()
-            )
-        })?;
-    }
-
-    std::fs::write(path, &bytes).map_err(|error| {
-        format!(
-            "failed to write downloaded version file '{}': {error}",
-            path.display()
-        )
-    })?;
-
-    Ok(())
+    stream_body_to_path(
+        response.body,
+        &format!("version '{version_id}' of '{key}'"),
+        path,
+    )
+    .await
 }
 
 pub async fn copy_object_version(

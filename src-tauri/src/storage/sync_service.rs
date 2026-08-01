@@ -43,6 +43,7 @@ use super::sync_state::{
     due_dirty_pairs, next_dirty_pair_deadline, pair_has_active_watcher, pair_statuses_snapshot,
     pair_to_status, set_pair_status_from_handle, set_status_from_handle, PairSyncStatus, SyncState,
 };
+use super::transfer::cleanup_orphaned_temp_files;
 
 pub(crate) fn snapshot_for_pair<R: Runtime>(
     app: &AppHandle<R>,
@@ -156,6 +157,18 @@ pub(crate) async fn run_sync_cycle_for_pair(
             )),
         );
         return Ok(status);
+    }
+
+    // Sweep temp files from downloads a previous run never finished, before
+    // anything scans this tree (backlog phase 2.1 / 3.4 startup consistency).
+    let swept = cleanup_orphaned_temp_files(Path::new(&pair.local_folder));
+    if swept > 0 {
+        emit_info_activity(
+            app,
+            debug_state,
+            "Cleaned up interrupted downloads.",
+            Some(format!("pair='{}' removed_temp_files={swept}", pair.label)),
+        );
     }
 
     let credentials = match resolve_credentials_for_pair(app, pair) {

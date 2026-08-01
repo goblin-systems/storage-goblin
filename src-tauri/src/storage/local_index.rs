@@ -157,6 +157,13 @@ fn scan_directory_recursive(
             continue;
         }
 
+        // Never index an in-flight download's temp file: it is partial by
+        // definition, and indexing it would upload the partial content as if
+        // it were a real local file.
+        if metadata.is_file() && super::transfer::is_temp_download_path(&path) {
+            continue;
+        }
+
         if metadata.is_dir() {
             summary.directory_count += 1;
             entries.push(LocalIndexEntry {
