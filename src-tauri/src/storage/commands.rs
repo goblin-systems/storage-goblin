@@ -5161,8 +5161,9 @@ mod tauri_command_tests {
             ..SyncPair::default()
         };
 
-        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
-            .expect("local scan should succeed");
+        let local_snapshot =
+            crate::storage::local_index::scan_local_folder_with_cache(&local_root, None)
+                .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 
@@ -5287,8 +5288,9 @@ mod tauri_command_tests {
             ..SyncPair::default()
         };
 
-        let local_before = crate::storage::local_index::scan_local_folder(&local_root)
-            .expect("local scan should succeed");
+        let local_before =
+            crate::storage::local_index::scan_local_folder_with_cache(&local_root, None)
+                .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_before)
             .expect("local snapshot should persist");
 
@@ -5348,8 +5350,9 @@ mod tauri_command_tests {
         assert!(outcome.downloads_ran);
         assert_eq!(outcome.execution_error, None);
 
-        let local_after = crate::storage::local_index::scan_local_folder(&local_root)
-            .expect("post-download scan should succeed");
+        let local_after =
+            crate::storage::local_index::scan_local_folder_with_cache(&local_root, None)
+                .expect("post-download scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_after)
             .expect("post-download local snapshot should persist");
 
@@ -5446,8 +5449,9 @@ mod tauri_command_tests {
             ..SyncPair::default()
         };
 
-        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
-            .expect("local scan should succeed");
+        let local_snapshot =
+            crate::storage::local_index::scan_local_folder_with_cache(&local_root, None)
+                .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 
@@ -5541,8 +5545,9 @@ mod tauri_command_tests {
             ..SyncPair::default()
         };
 
-        let local_after = crate::storage::local_index::scan_local_folder(&local_root)
-            .expect("local scan should succeed");
+        let local_after =
+            crate::storage::local_index::scan_local_folder_with_cache(&local_root, None)
+                .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_after)
             .expect("local snapshot should persist");
 
@@ -5646,8 +5651,9 @@ mod tauri_command_tests {
         )
         .expect("profile should persist");
 
-        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
-            .expect("local scan should succeed");
+        let local_snapshot =
+            crate::storage::local_index::scan_local_folder_with_cache(&local_root, None)
+                .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 
@@ -5718,8 +5724,9 @@ mod tauri_command_tests {
         )
         .expect("profile should persist");
 
-        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
-            .expect("local scan should succeed");
+        let local_snapshot =
+            crate::storage::local_index::scan_local_folder_with_cache(&local_root, None)
+                .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 
@@ -5826,8 +5833,9 @@ mod tauri_command_tests {
         )
         .expect("profile should persist");
 
-        let local_before = crate::storage::local_index::scan_local_folder(&local_root)
-            .expect("local scan should succeed");
+        let local_before =
+            crate::storage::local_index::scan_local_folder_with_cache(&local_root, None)
+                .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_before)
             .expect("local snapshot should persist");
 
@@ -5955,8 +5963,9 @@ mod tauri_command_tests {
         fs::create_dir_all(&local_root).expect("local root should exist");
         let pair = phase_one_pair("pair-delete-remote", &local_root);
 
-        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
-            .expect("local scan should succeed");
+        let local_snapshot =
+            crate::storage::local_index::scan_local_folder_with_cache(&local_root, None)
+                .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 
@@ -6015,8 +6024,9 @@ mod tauri_command_tests {
         fs::write(local_root.join("docs/orphan.txt"), b"alpha").expect("local file should exist");
 
         let pair = phase_one_pair("pair-delete-local", &local_root);
-        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
-            .expect("local scan should succeed");
+        let local_snapshot =
+            crate::storage::local_index::scan_local_folder_with_cache(&local_root, None)
+                .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 
@@ -6074,8 +6084,9 @@ mod tauri_command_tests {
         fs::write(local_root.join("old-name.txt"), b"contents").expect("local file should exist");
 
         let pair = phase_one_pair("pair-move-local", &local_root);
-        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
-            .expect("local scan should succeed");
+        let local_snapshot =
+            crate::storage::local_index::scan_local_folder_with_cache(&local_root, None)
+                .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 
@@ -6136,8 +6147,9 @@ mod tauri_command_tests {
         fs::write(local_root.join("same.txt"), b"identical").expect("local file should exist");
 
         let pair = phase_one_pair("pair-anchor-only", &local_root);
-        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
-            .expect("local scan should succeed");
+        let local_snapshot =
+            crate::storage::local_index::scan_local_folder_with_cache(&local_root, None)
+                .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 
@@ -6205,8 +6217,9 @@ mod tauri_command_tests {
         fs::create_dir_all(&local_root).expect("local root should exist");
         let pair = phase_one_pair("pair-mass-delete", &local_root);
 
-        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
-            .expect("local scan should succeed");
+        let local_snapshot =
+            crate::storage::local_index::scan_local_folder_with_cache(&local_root, None)
+                .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 

@@ -12,7 +12,8 @@ use tauri::{AppHandle, Runtime};
 use super::commands::{list_remote_inventory_for_pair, FileEntryResponse};
 use super::credentials_store::StoredCredentials;
 use super::local_index::{
-    scan_local_folder, write_local_index_snapshot_for_pair, LocalIndexSnapshot,
+    read_local_index_snapshot_for_pair, scan_local_folder_with_cache,
+    write_local_index_snapshot_for_pair, LocalIndexSnapshot,
 };
 use super::model::FileEntryStatus;
 use super::now_iso;
@@ -44,7 +45,13 @@ pub(crate) async fn refresh_pair_state_after_remote_change<R: Runtime>(
     write_remote_index_snapshot_for_pair(app, &pair.id, &remote_snapshot)
         .map_err(|error| format!("Failed to save refreshed remote inventory: {error}"))?;
 
-    let local_snapshot = match scan_local_folder(Path::new(&pair.local_folder)) {
+    let previous_local = read_local_index_snapshot_for_pair(app, &pair.id)
+        .ok()
+        .flatten();
+    let local_snapshot = match scan_local_folder_with_cache(
+        Path::new(&pair.local_folder),
+        previous_local.as_ref(),
+    ) {
         Ok(snapshot) => {
             let _ = write_local_index_snapshot_for_pair(app, &pair.id, &snapshot);
             Some(snapshot)
@@ -63,12 +70,17 @@ pub(crate) fn refresh_pair_state_after_local_change<R: Runtime>(
     app: &AppHandle<R>,
     pair: &SyncPair,
 ) -> Result<(), String> {
-    let local_snapshot = scan_local_folder(Path::new(&pair.local_folder)).map_err(|error| {
-        format!(
-            "Failed to scan local folder '{}' for sync pair '{}': {error}",
-            pair.local_folder, pair.label
-        )
-    })?;
+    let previous_local = read_local_index_snapshot_for_pair(app, &pair.id)
+        .ok()
+        .flatten();
+    let local_snapshot =
+        scan_local_folder_with_cache(Path::new(&pair.local_folder), previous_local.as_ref())
+            .map_err(|error| {
+                format!(
+                    "Failed to scan local folder '{}' for sync pair '{}': {error}",
+                    pair.local_folder, pair.label
+                )
+            })?;
 
     write_local_index_snapshot_for_pair(app, &pair.id, &local_snapshot)
         .map_err(|error| format!("Failed to save refreshed local inventory: {error}"))?;

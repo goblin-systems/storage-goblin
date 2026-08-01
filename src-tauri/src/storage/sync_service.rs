@@ -19,8 +19,8 @@ use super::commands::{
     DIRTY_PAIR_DEBOUNCE, LOCAL_SNAPSHOT_STALE_TTL,
 };
 use super::local_index::{
-    read_local_index_snapshot_for_pair, scan_local_folder, write_local_index_snapshot_for_pair,
-    LocalIndexSnapshot,
+    read_local_index_snapshot_for_pair, scan_local_folder_with_cache,
+    write_local_index_snapshot_for_pair, LocalIndexSnapshot,
 };
 use super::now_iso;
 use super::polling_service::{
@@ -231,7 +231,7 @@ pub(crate) async fn run_sync_cycle_for_pair(
         watcher_active,
         LOCAL_SNAPSHOT_STALE_TTL,
     ) {
-        match scan_local_folder(Path::new(&pair.local_folder)) {
+        match scan_local_folder_with_cache(Path::new(&pair.local_folder), existing_local.as_ref()) {
             Ok(snapshot) => {
                 let _ = write_local_index_snapshot_for_pair(app, &pair.id, &snapshot);
                 snapshot
@@ -445,7 +445,10 @@ pub(crate) async fn run_sync_cycle_for_pair(
 
                 if outcome.downloads_ran {
                     // Rescan local folder after downloads
-                    if let Ok(updated_snapshot) = scan_local_folder(Path::new(&pair.local_folder)) {
+                    if let Ok(updated_snapshot) = scan_local_folder_with_cache(
+                        Path::new(&pair.local_folder),
+                        Some(&local_snapshot),
+                    ) {
                         let _ =
                             write_local_index_snapshot_for_pair(app, &pair.id, &updated_snapshot);
                         local_snapshot = updated_snapshot;

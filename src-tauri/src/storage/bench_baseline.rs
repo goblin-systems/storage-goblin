@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use super::local_index::{
-    scan_local_folder, LocalIndexEntry, LocalIndexSnapshot, LocalIndexSummary,
+    scan_local_folder_with_cache, LocalIndexEntry, LocalIndexSnapshot, LocalIndexSummary,
 };
 use super::now_iso;
 use super::remote_index::{RemoteIndexSnapshot, RemoteIndexSummary, RemoteObjectEntry};
@@ -50,13 +50,25 @@ fn bench_scan_10k_files() {
     println!("[bench] fixture setup: {:?}", setup_started.elapsed());
 
     let started = Instant::now();
-    let snapshot = scan_local_folder(&root).expect("scan");
+    let snapshot = scan_local_folder_with_cache(&root, None).expect("scan");
     let elapsed = started.elapsed();
 
     assert_eq!(snapshot.summary.file_count, 10_000);
     println!(
-        "[bench] scan_local_folder: 10,000 files in {elapsed:?} ({:.0} files/s)",
+        "[bench] scan_local_folder (cold, hashes every file): 10,000 files in {elapsed:?} ({:.0} files/s)",
         10_000.0 / elapsed.as_secs_f64()
+    );
+
+    // Phase 2.3: a rescan with nothing changed should reuse fingerprints.
+    let warm_started = Instant::now();
+    let warm = scan_local_folder_with_cache(&root, Some(&snapshot)).expect("cached scan");
+    let warm_elapsed = warm_started.elapsed();
+
+    assert_eq!(warm.summary.file_count, 10_000);
+    println!(
+        "[bench] scan_local_folder_with_cache (warm, no changes): 10,000 files in {warm_elapsed:?} ({:.0} files/s, {:.1}x faster)",
+        10_000.0 / warm_elapsed.as_secs_f64(),
+        elapsed.as_secs_f64() / warm_elapsed.as_secs_f64().max(f64::EPSILON)
     );
 
     let _ = fs::remove_dir_all(&root);

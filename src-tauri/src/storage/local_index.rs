@@ -68,8 +68,31 @@ pub fn write_local_index_snapshot_for_pair<R: Runtime>(
     write_local_index_snapshot_file(&path, snapshot)
 }
 
-pub fn scan_local_folder(root: &Path) -> Result<LocalIndexSnapshot, String> {
+/// Scan `root`, reusing fingerprints from `previous` for files whose size and
+/// modification time are unchanged (backlog phase 2.3).
+///
+/// Hashing dominates scan cost — the phase-0 baseline measured ~7.8k files/s,
+/// so a 100k-file tree spends ~13s hashing on every cycle even when nothing
+/// changed. This is the standard rsync-style heuristic.
+///
+/// The tradeoff is deliberate: a file modified without its size or mtime
+/// changing (a deliberate mtime restore, or an edit within the filesystem's
+/// timestamp granularity) will not be re-hashed and so will not be detected
+/// until a full rescan. That is the same bargain rsync, Dropbox, and every
+/// other sync client make; the alternative is re-reading every byte forever.
+pub fn scan_local_folder_with_cache(
+    root: &Path,
+    previous: Option<&LocalIndexSnapshot>,
+) -> Result<LocalIndexSnapshot, String> {
     ensure_scannable_root(root)?;
+
+    let cache = match previous {
+        Some(snapshot) if snapshot_matches_folder(snapshot, &root.to_string_lossy()) => {
+            FingerprintCache::from_snapshot(snapshot)
+        }
+        // A snapshot of a different folder tells us nothing about this one.
+        _ => FingerprintCache::empty(),
+    };
 
     let mut entries = Vec::new();
     let mut summary = LocalIndexSummary {
@@ -79,7 +102,7 @@ pub fn scan_local_folder(root: &Path) -> Result<LocalIndexSnapshot, String> {
         total_bytes: 0,
     };
 
-    scan_directory_recursive(root, root, &mut entries, &mut summary)?;
+    scan_directory_recursive(root, root, &mut entries, &mut summary, &cache)?;
 
     Ok(LocalIndexSnapshot {
         version: 2,
@@ -87,6 +110,54 @@ pub fn scan_local_folder(root: &Path) -> Result<LocalIndexSnapshot, String> {
         summary,
         entries,
     })
+}
+
+/// Fingerprints from the previous scan, keyed by path, valid only while a
+/// file's size and modification time both match.
+struct FingerprintCache {
+    entries: std::collections::HashMap<String, (u64, Option<String>, String)>,
+}
+
+impl FingerprintCache {
+    fn empty() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+        }
+    }
+
+    fn from_snapshot(snapshot: &LocalIndexSnapshot) -> Self {
+        let entries = snapshot
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == "file")
+            .filter_map(|entry| {
+                entry.fingerprint.as_ref().map(|fingerprint| {
+                    (
+                        entry.relative_path.clone(),
+                        (entry.size, entry.modified_at.clone(), fingerprint.clone()),
+                    )
+                })
+            })
+            .collect();
+        Self { entries }
+    }
+
+    /// The cached fingerprint, if this file looks untouched since last scan.
+    fn reuse(
+        &self,
+        relative_path: &str,
+        size: u64,
+        modified_at: &Option<String>,
+    ) -> Option<String> {
+        let (cached_size, cached_modified_at, fingerprint) = self.entries.get(relative_path)?;
+        // Both must match: size alone misses same-length edits, and mtime
+        // alone misses filesystems that preserve it across a write.
+        if *cached_size == size && cached_modified_at == modified_at {
+            Some(fingerprint.clone())
+        } else {
+            None
+        }
+    }
 }
 
 pub(crate) fn snapshot_matches_folder(snapshot: &LocalIndexSnapshot, folder: &str) -> bool {
@@ -134,6 +205,7 @@ fn scan_directory_recursive(
     current: &Path,
     entries: &mut Vec<LocalIndexEntry>,
     summary: &mut LocalIndexSummary,
+    cache: &FingerprintCache,
 ) -> Result<(), String> {
     let mut children = fs::read_dir(current)
         .map_err(|error| format!("Failed to read directory '{}': {error}", current.display()))?
@@ -174,19 +246,28 @@ fn scan_directory_recursive(
                 fingerprint: None,
             });
 
-            scan_directory_recursive(root, &path, entries, summary)?;
+            scan_directory_recursive(root, &path, entries, summary, cache)?;
             continue;
         }
 
         if metadata.is_file() {
             summary.file_count += 1;
             summary.total_bytes += metadata.len();
+
+            let relative = relative_path(root, &path)?;
+            let size = metadata.len();
+            let modified_at = metadata.modified().ok().and_then(system_time_to_iso);
+            let fingerprint = match cache.reuse(&relative, size, &modified_at) {
+                Some(cached) => cached,
+                None => file_fingerprint(&path)?,
+            };
+
             entries.push(LocalIndexEntry {
-                relative_path: relative_path(root, &path)?,
+                relative_path: relative,
                 kind: "file".into(),
-                size: metadata.len(),
-                modified_at: metadata.modified().ok().and_then(system_time_to_iso),
-                fingerprint: Some(file_fingerprint(&path)?),
+                size,
+                modified_at,
+                fingerprint: Some(fingerprint),
             });
         }
     }
@@ -248,12 +329,13 @@ fn write_local_index_snapshot_file(
 #[cfg(test)]
 mod tests {
     use super::{
-        local_index_file_name_for_pair, read_local_index_snapshot_file, scan_local_folder,
-        write_local_index_snapshot_file,
+        bytes_fingerprint, local_index_file_name_for_pair, read_local_index_snapshot_file,
+        scan_local_folder_with_cache, write_local_index_snapshot_file, LocalIndexEntry,
+        LocalIndexSnapshot, LocalIndexSummary,
     };
     use std::{
         env, fs,
-        path::PathBuf,
+        path::{Path, PathBuf},
         process,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -275,7 +357,7 @@ mod tests {
         fs::write(root.join("alpha.txt"), b"alpha").expect("should write root file");
         fs::write(nested.join("beta.txt"), b"beta-data").expect("should write nested file");
 
-        let snapshot = scan_local_folder(&root).expect("scan should succeed");
+        let snapshot = scan_local_folder_with_cache(&root, None).expect("scan should succeed");
 
         assert_eq!(snapshot.summary.file_count, 2);
         assert_eq!(snapshot.summary.directory_count, 1);
@@ -296,7 +378,8 @@ mod tests {
     #[test]
     fn rejects_missing_root_folder() {
         let missing = temp_path("missing");
-        let error = scan_local_folder(&missing).expect_err("scan should fail for missing root");
+        let error = scan_local_folder_with_cache(&missing, None)
+            .expect_err("scan should fail for missing root");
         assert!(error.contains("not found"));
     }
 
@@ -308,7 +391,7 @@ mod tests {
         fs::create_dir_all(&root).expect("should create roundtrip directory");
         fs::write(root.join("file.txt"), b"hello").expect("should write roundtrip file");
 
-        let snapshot = scan_local_folder(&root).expect("scan should succeed");
+        let snapshot = scan_local_folder_with_cache(&root, None).expect("scan should succeed");
         write_local_index_snapshot_file(&snapshot_path, &snapshot)
             .expect("should write snapshot json");
         let restored =
@@ -343,14 +426,169 @@ mod tests {
         let file_path = root.join("note.txt");
 
         fs::write(&file_path, b"alpha").expect("should write first content");
-        let first = scan_local_folder(&root).expect("first scan should succeed");
+        let first = scan_local_folder_with_cache(&root, None).expect("first scan should succeed");
 
         fs::write(&file_path, b"bravo").expect("should write second content");
-        let second = scan_local_folder(&root).expect("second scan should succeed");
+        let second = scan_local_folder_with_cache(&root, None).expect("second scan should succeed");
 
         assert_eq!(first.entries[0].size, second.entries[0].size);
         assert_ne!(first.entries[0].fingerprint, second.entries[0].fingerprint);
 
         fs::remove_dir_all(root).expect("should clean up fingerprint test directory");
+    }
+
+    /// A fingerprint that could never be computed from the file's bytes, so
+    /// seeing it in a scan result proves the value was reused rather than
+    /// recalculated.
+    const SENTINEL: &str = "cached-not-recomputed";
+
+    fn snapshot_claiming(
+        root: &Path,
+        relative_path: &str,
+        size: u64,
+        modified_at: Option<String>,
+    ) -> LocalIndexSnapshot {
+        LocalIndexSnapshot {
+            version: 2,
+            root_folder: root.to_string_lossy().into_owned(),
+            summary: LocalIndexSummary::default(),
+            entries: vec![LocalIndexEntry {
+                relative_path: relative_path.into(),
+                kind: "file".into(),
+                size,
+                modified_at,
+                fingerprint: Some(SENTINEL.into()),
+            }],
+        }
+    }
+
+    #[test]
+    fn an_unchanged_file_reuses_its_cached_fingerprint_instead_of_rehashing() {
+        let root = temp_path("cache-hit");
+        fs::create_dir_all(&root).expect("root should create");
+        fs::write(root.join("stable.txt"), b"contents").expect("file should write");
+
+        // Learn the real size/mtime, then claim a sentinel fingerprint for it.
+        let first = scan_local_folder_with_cache(&root, None).expect("first scan should succeed");
+        let entry = first
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == "stable.txt")
+            .expect("file should be indexed");
+        let previous =
+            snapshot_claiming(&root, "stable.txt", entry.size, entry.modified_at.clone());
+
+        let second = scan_local_folder_with_cache(&root, Some(&previous))
+            .expect("cached scan should succeed");
+
+        let cached = second
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == "stable.txt")
+            .expect("file should be indexed");
+        assert_eq!(
+            cached.fingerprint.as_deref(),
+            Some(SENTINEL),
+            "an untouched file should not be re-hashed"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_file_whose_size_changed_is_rehashed() {
+        let root = temp_path("cache-size");
+        fs::create_dir_all(&root).expect("root should create");
+        fs::write(root.join("grown.txt"), b"contents").expect("file should write");
+
+        let first = scan_local_folder_with_cache(&root, None).expect("first scan should succeed");
+        let entry = first
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == "grown.txt")
+            .expect("file should be indexed");
+        // Cache claims a stale, smaller size.
+        let previous = snapshot_claiming(
+            &root,
+            "grown.txt",
+            entry.size - 1,
+            entry.modified_at.clone(),
+        );
+
+        let second =
+            scan_local_folder_with_cache(&root, Some(&previous)).expect("scan should succeed");
+
+        let rescanned = second
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == "grown.txt")
+            .expect("file should be indexed");
+        assert_eq!(
+            rescanned.fingerprint.as_deref(),
+            Some(bytes_fingerprint(b"contents").as_str()),
+            "a size change must invalidate the cached fingerprint"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_file_whose_mtime_changed_is_rehashed() {
+        let root = temp_path("cache-mtime");
+        fs::create_dir_all(&root).expect("root should create");
+        fs::write(root.join("touched.txt"), b"contents").expect("file should write");
+
+        let first = scan_local_folder_with_cache(&root, None).expect("first scan should succeed");
+        let entry = first
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == "touched.txt")
+            .expect("file should be indexed");
+        let previous = snapshot_claiming(
+            &root,
+            "touched.txt",
+            entry.size,
+            Some("1999-01-01T00:00:00Z".to_string()),
+        );
+
+        let second =
+            scan_local_folder_with_cache(&root, Some(&previous)).expect("scan should succeed");
+
+        let rescanned = second
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == "touched.txt")
+            .expect("file should be indexed");
+        assert_eq!(
+            rescanned.fingerprint.as_deref(),
+            Some(bytes_fingerprint(b"contents").as_str()),
+            "an mtime change must invalidate the cached fingerprint"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_snapshot_of_a_different_folder_is_not_used_as_a_cache() {
+        let root = temp_path("cache-other-folder");
+        fs::create_dir_all(&root).expect("root should create");
+        fs::write(root.join("file.txt"), b"contents").expect("file should write");
+
+        let first = scan_local_folder_with_cache(&root, None).expect("first scan should succeed");
+        let entry = first.entries[0].clone();
+        // Same path and stats, but recorded against a different root.
+        let mut previous = snapshot_claiming(&root, "file.txt", entry.size, entry.modified_at);
+        previous.root_folder = "C:/some/other/folder".into();
+
+        let second =
+            scan_local_folder_with_cache(&root, Some(&previous)).expect("scan should succeed");
+
+        assert_eq!(
+            second.entries[0].fingerprint.as_deref(),
+            Some(bytes_fingerprint(b"contents").as_str()),
+            "a cache from another folder must be ignored"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
