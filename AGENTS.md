@@ -33,9 +33,14 @@
   `.goblin-tmp` sibling, then fsync + atomic rename — never write the destination path
   directly, and never index a temp file (`local_index` skips them; doing otherwise uploads
   partial content as a "local edit"). GCS objects ≥16 MiB use resumable sessions
-  (`gcs_upload.rs`); S3 is still single-shot `put_object` (5 GB ceiling, no resume). Transfer
-  timeouts scale with size (`transfer_timeout`) — don't reintroduce a flat cap. Wrap remote
-  calls in `retry::with_retry`; it only retries `SyncError::Transient`.
+  (`gcs_upload.rs`); S3 objects ≥16 MiB use multipart (`s3_upload.rs`) and **must** abort on
+  failure — orphaned parts are billed but invisible to `ListObjects`. Transfer timeouts scale
+  with size (`transfer_timeout`) — don't reintroduce a flat cap. Wrap remote calls in
+  `retry::with_retry`; it only retries `SyncError::Transient`.
+- **Poll scheduling:** a failed cycle returns `Ok(status)` with `phase: "error"` and no
+  `last_sync_at`, which makes the pair due immediately — so `sync_state::record_pair_failure`
+  gates it (`pair_backoff.rs`, 30s → 15min). Any new wake path must honour those gates or the
+  loop spins; `next_dirty_pair_deadline` is the non-obvious one. Manual sync clears the gate.
 - **Queue loops:** a failure on one *item* records and continues; a failure to write the
   *database* still aborts the batch. Keep that distinction when touching `queue_service`.
 - **Scanning:** `scan_local_folder_with_cache(root, previous)` reuses fingerprints when

@@ -42,10 +42,15 @@ Build a `transfer` module used by both adapters through the `ObjectStorage` trai
 - [x] **GCS resumable sessions** done: objects ≥ 16 MiB stream in 8 MiB chunks with
       Content-Range framing, so memory is bounded regardless of object size. Verified against
       a local HTTP server driving the real protocol.
-      **Not done: S3 multipart.** S3 uploads still use `put_object`, which streams from the
-      path (so memory is fine) but keeps the 5 GB single-object ceiling and cannot resume.
+      **S3 multipart** also done: objects ≥ 16 MiB upload as multipart, raising the 5 GB
+      single-object ceiling to 5 TB. Part size grows with the object so the plan never
+      exceeds the 10,000-part limit (a 5 TB file at a fixed 16 MiB part size would be
+      rejected *after* every byte had been sent). Any failure aborts the upload, because
+      orphaned parts are billed as storage while being invisible to `ListObjects`.
       **Not done: session URI persistence** — a resumable session survives a network blip
       within one run, but not an app restart.
+      **Not done: a startup janitor.** An upload orphaned by a *crash* is never aborted;
+      that needs a sweep over `ListMultipartUploads` at startup.
 - [x] **Streaming + atomic writes** done for both providers (current and versioned
       objects): chunks stream to a `.goblin-tmp` sibling, hashed on the way, then fsync +
       atomic rename. This also closes phase 1.4's deferred atomic-download item — an
@@ -79,10 +84,13 @@ Replace the four sequential `execute_planned_*_queue*` loops with one scheduler:
       failure and continue, while the 5 sites that indicate the *store itself* is broken
       (DB write failures) still abort — losing durable state is not something to soldier on
       through. The outcome is a summary string, verbatim for a single failure.
-- [x] **Retry with exponential backoff + jitter** done for `SyncError::Transient`, honouring
-      `Retry-After`, capped at 3 attempts. Permanent errors (auth, 4xx) still fail fast.
-      **Not done:** pausing the pair on a permanent error — it still re-attempts on the next
-      poll, so an expired credential still produces one error per cycle.
+- [x] **Retry with exponential backoff + jitter** done at two levels. Per operation:
+      `SyncError::Transient` only, honouring `Retry-After`, capped at 3 attempts. Per pair:
+      a failed *cycle* now gates the pair for 30s → 15min (see 2.4 below).
+      **Not done:** kind-aware pair backoff. An expired credential should jump straight to
+      the ceiling rather than walking up to it, but `run_sync_cycle_for_pair` signals
+      failure by returning `Ok(status)` with `phase: "error"` — that says *that* it failed,
+      not *why*. Needs the cycle to return a typed `SyncError`.
 - [ ] Rate limiting hooks: optional user-configurable up/down bandwidth caps (flagship
       feature; cheap once transfers are chunked).
 - [ ] Ordering: parents-before-children for creates, children-before-parents for deletes,
@@ -109,8 +117,15 @@ Replace the four sequential `execute_planned_*_queue*` loops with one scheduler:
 
 ### 2.4 Failure-mode hardening
 
-- [ ] Offline detection: distinguish "no network" from "provider error"; pause pairs with a
-      visible reason rather than logging failures every poll; auto-resume with backoff probes.
+- [x] **The log-spam and hot-loop half is done.** This was worse than "logging failures
+      every poll": a failing pair never records a `last_sync_at`, so it was due on *every*
+      pass and the worker spun with zero delay — continuous provider calls, not one per
+      interval. Failed cycles now gate the pair (30s → 15min, capped), gates are per pair so
+      one bad bucket cannot slow a healthy one, dirty pairs are gated too (otherwise the
+      loop still never sleeps), and a manual sync clears the gate outright.
+      **Not done:** distinguishing "no network" from "provider error", and showing the
+      user *why* a pair is waiting. The status carries `last_error`; presenting it as a
+      first-class paused-with-reason state is phase 5's job.
 - [ ] Disk-full and permission-denied handling on the local side (write probe before large
       downloads; per-item quarantine on EPERM instead of queue abort).
 - [ ] Clock-skew tolerance audit (anchors store both-side identities, so wall-clock must never
@@ -140,15 +155,18 @@ not.
 | One bad file in a queue | aborted the entire remaining queue | fails that item, queue drains, summary reported |
 | Transient network error | failed the item | bounded retry with jittered backoff |
 | Large-file timeout | flat 300s — 20 GB could never finish | budget scales with size |
+| S3 objects over 5 GB | could not be synced at all | multipart, up to 5 TB |
+| A pair that cannot sync | poll loop spun with zero delay | gated 30s → 15min, per pair |
 | Rescan of unchanged tree | re-hashed every file | 3.1x faster via fingerprint reuse |
 
 ### Genuinely still open
 
 1. **Bounded parallelism (2.2)** — blocked on the `SyncState` redesign
    deferred from phase 3.3. Transfers remain sequential.
-2. **S3 multipart upload** — S3 still uses `put_object`: memory is fine
-   (it streams from the path) but the 5 GB ceiling and no-resume remain.
-   GCS has resumable sessions; S3 does not.
+2. **Upload resume** — GCS resumable sessions and S3 multipart both survive a
+   blip *within* a run, but neither persists its session/upload id, so an app
+   restart begins again at byte 0. A crash also leaves S3 parts that nothing
+   aborts (no startup janitor over `ListMultipartUploads`).
 3. **Download resume** — an interrupted download restarts from byte 0. The
    temp file exists but no offset is persisted.
 4. **Post-transfer verification** — the writer computes the content hash but
@@ -157,9 +175,12 @@ not.
 5. **Progress events (2.1)** — byte counts are tracked, nothing is emitted.
    Best done with phase 5, which consumes them.
 6. **Conditional writes / re-plan on stale** — still deferred from phase 1.4.
-7. **All of 2.4** (offline detection, disk-full handling, chaos tests, soak
-   test) and the rest of 2.3 (incremental rescan from watcher paths, SQLite
-   index migration, remote listing pagination).
+7. **Most of 2.4** — the pair-level hot loop is fixed, but offline is still not
+   *named* as such (the user sees "error", not "waiting for network"),
+   disk-full and permission-denied get no special handling, and there are no
+   chaos or soak tests.
+8. **The rest of 2.3** — incremental rescan from watcher paths, the SQLite
+   index migration, and remote listing pagination.
 
 ### Verification note
 
@@ -175,16 +196,19 @@ box), and anything against a real bucket.
 
 1. ⚠️ Partially met, unverified against real clouds. Memory is now bounded (streaming both
    directions; GCS resumable upload), and the size-aware budget means a 20 GB transfer is no
-   longer killed by the clock. **Not met:** no resume after restart, and S3 uploads still cap
-   at 5 GB.
+   longer killed by the clock, and S3 multipart lifts the 5 GB cap to 5 TB.
+   **Not met:** no resume after an app restart, in either direction.
 2. ⚠️ Implemented (isolation + bounded retry + summary), but only unit-verified. The
    end-to-end 10,000-item scenario needs the command integration tests to run.
 3. ❌ Not met — no events emitted yet.
 4. ⚠️ Improved but not met. The fingerprint cache cuts the rescan cost ~3.1x, but the
    watcher still triggers a *full* tree rescan rather than an incremental one, so this scales
    with tree size rather than change count.
-5. ❌ Not met — 2.4 offline detection is not started. Transient errors do now back off
-   rather than retrying instantly, which reduces (but does not eliminate) the log spam.
+5. ⚠️ Half met. "Zero error-log spam" and "automatic recovery on reconnect" now hold: a
+   failing pair backs off to at most one attempt per 15 minutes and recovers on its own
+   when the network returns. **Not met:** the pair does not say *"paused — offline"*; it
+   says "error" with the underlying message, and no code distinguishes offline from a
+   provider fault.
 6. ❌ Not started.
 
 ## Risks
