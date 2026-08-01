@@ -18,10 +18,17 @@ pub(crate) fn should_poll_pair(pair: &SyncPair) -> bool {
     pair.enabled && pair.remote_polling_enabled && is_pair_configured(pair)
 }
 
+/// When this pair should next run, honouring both its poll interval and any
+/// failure backoff.
+///
+/// `backoff_gate` is the instant a repeatedly failing pair may be retried (see
+/// `pair_backoff`). It can only push the deadline *later*: a pair that failed
+/// two seconds ago must not become due just because its interval elapsed.
 pub(crate) fn next_polling_deadline_at(
     now: tokio::time::Instant,
     pair: &SyncPair,
     status: Option<&PairSyncStatus>,
+    backoff_gate: Option<std::time::Instant>,
 ) -> tokio::time::Instant {
     let interval = Duration::from_secs(pair.poll_interval_seconds.max(15) as u64);
     let anchor = status
@@ -33,7 +40,14 @@ pub(crate) fn next_polling_deadline_at(
     } else {
         interval - anchor
     };
-    now + wait
+
+    // The gate is a std Instant; convert it to a wait so the two clocks never
+    // have to be compared directly.
+    let backoff_wait = backoff_gate
+        .map(|gate| gate.saturating_duration_since(std::time::Instant::now()))
+        .unwrap_or(Duration::ZERO);
+
+    now + wait.max(backoff_wait)
 }
 
 #[cfg(test)]
@@ -41,18 +55,26 @@ pub(crate) fn next_polling_deadline(
     pair: &SyncPair,
     status: Option<&PairSyncStatus>,
 ) -> tokio::time::Instant {
-    next_polling_deadline_at(tokio::time::Instant::now(), pair, status)
+    next_polling_deadline_at(tokio::time::Instant::now(), pair, status, None)
 }
 
 pub(crate) fn due_polling_pairs(
     pairs: &[SyncPair],
     statuses: &BTreeMap<String, PairSyncStatus>,
+    backoff_gates: &BTreeMap<String, std::time::Instant>,
     now: tokio::time::Instant,
 ) -> Vec<SyncPair> {
     pairs
         .iter()
         .filter(|pair| should_poll_pair(pair))
-        .filter(|pair| next_polling_deadline_at(now, pair, statuses.get(&pair.id)) <= now)
+        .filter(|pair| {
+            next_polling_deadline_at(
+                now,
+                pair,
+                statuses.get(&pair.id),
+                backoff_gates.get(&pair.id).copied(),
+            ) <= now
+        })
         .cloned()
         .collect()
 }

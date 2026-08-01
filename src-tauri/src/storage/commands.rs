@@ -4016,11 +4016,43 @@ mod tests {
         let due = due_polling_pairs(
             &[fast.clone(), slow, disabled, polling_disabled],
             &statuses,
+            &BTreeMap::new(),
             now,
         );
 
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].id, fast.id);
+    }
+
+    #[test]
+    fn a_pair_held_off_by_failure_backoff_is_not_due_even_when_overdue() {
+        // Without this, a pair that cannot sync never records a last_sync_at,
+        // so it is due on every pass and the poll worker spins with no delay.
+        let failing = test_pair("failing", true, true, 15);
+        let now = tokio::time::Instant::now();
+
+        let mut statuses = BTreeMap::new();
+        statuses.insert(
+            "failing".into(),
+            test_pair_status("failing", "error", Some("2000-01-01T00:00:00Z")),
+        );
+
+        let mut gates = BTreeMap::new();
+        gates.insert(
+            "failing".to_string(),
+            std::time::Instant::now() + Duration::from_secs(300),
+        );
+
+        let pairs = std::slice::from_ref(&failing);
+        assert!(
+            due_polling_pairs(pairs, &statuses, &gates, now).is_empty(),
+            "a gated pair must not be scheduled"
+        );
+        assert_eq!(
+            due_polling_pairs(pairs, &statuses, &BTreeMap::new(), now).len(),
+            1,
+            "and it must become due again once the gate is gone"
+        );
     }
 
     #[test]

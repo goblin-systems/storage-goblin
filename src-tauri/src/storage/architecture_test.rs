@@ -23,6 +23,9 @@ const TAURI_FREE_CORE: &[&str] = &[
     "inventory_compare.rs",
     "sanitizer.rs",
     "remote_bin.rs",
+    "pair_backoff.rs",
+    "retry.rs",
+    "s3_upload.rs",
 ];
 
 /// Tokens that signal a dependency on the Tauri app framework.

@@ -26,6 +26,7 @@ pub mod model;
 #[cfg(test)]
 mod module_size_test;
 pub mod object_store;
+pub mod pair_backoff;
 pub mod platform;
 pub mod polling_service;
 pub mod profile_store;

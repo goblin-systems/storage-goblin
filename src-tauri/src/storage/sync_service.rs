@@ -22,6 +22,7 @@ use super::local_index::{
     read_local_index_snapshot_for_pair, scan_local_folder_with_cache,
     write_local_index_snapshot_for_pair, LocalIndexSnapshot,
 };
+use super::model::SyncPhase;
 use super::now_iso;
 use super::polling_service::{
     due_polling_pairs, next_polling_deadline_at, should_poll_pair, should_scan_local_for_trigger,
@@ -39,9 +40,10 @@ use super::sync_db::{
 };
 use super::sync_planner;
 use super::sync_state::{
-    begin_polling_worker, clear_all_pair_watchers, clear_dirty_pair, clear_polling_worker,
-    due_dirty_pairs, next_dirty_pair_deadline, pair_has_active_watcher, pair_statuses_snapshot,
-    pair_to_status, set_pair_status_from_handle, set_status_from_handle, PairSyncStatus, SyncState,
+    begin_polling_worker, clear_all_pair_watchers, clear_dirty_pair, clear_pair_backoff,
+    clear_polling_worker, due_dirty_pairs, next_dirty_pair_deadline, pair_backoff_gates,
+    pair_has_active_watcher, pair_statuses_snapshot, pair_to_status, record_pair_failure,
+    set_pair_status_from_handle, set_status_from_handle, PairSyncStatus, SyncState,
 };
 use super::transfer::cleanup_orphaned_temp_files;
 
@@ -157,6 +159,13 @@ pub(crate) async fn run_sync_cycle_for_pair(
             )),
         );
         return Ok(status);
+    }
+
+    // A manual sync is the user saying "try now" — usually right after fixing
+    // whatever broke. Honour that by dropping any failure backoff, so the next
+    // attempt starts from a clean slate instead of inheriting a 15-minute wait.
+    if trigger == PairSyncTrigger::Manual {
+        let _ = clear_pair_backoff(&app.state::<SyncState>(), &pair.id);
     }
 
     // Sweep temp files from downloads a previous run never finished, before
@@ -626,10 +635,18 @@ pub(crate) fn start_polling_worker_for_pairs(app: &AppHandle) -> Result<(), Stri
 
             let state = app_handle.state::<SyncState>();
             let runtime_statuses = pair_statuses_snapshot(&state).unwrap_or_default();
+            let backoff_gates = pair_backoff_gates(&state).unwrap_or_default();
             let now = tokio::time::Instant::now();
             let soonest_deadline = pollable_pairs
                 .iter()
-                .map(|pair| next_polling_deadline_at(now, pair, runtime_statuses.get(&pair.id)))
+                .map(|pair| {
+                    next_polling_deadline_at(
+                        now,
+                        pair,
+                        runtime_statuses.get(&pair.id),
+                        backoff_gates.get(&pair.id).copied(),
+                    )
+                })
                 .min()
                 .unwrap_or(now);
 
@@ -651,12 +668,23 @@ pub(crate) fn start_polling_worker_for_pairs(app: &AppHandle) -> Result<(), Stri
                     .unwrap_or_default()
                     .into_iter()
                     .collect();
-            let due_pairs = due_polling_pairs(&pollable_pairs, &runtime_statuses, now);
+            let backoff_gates = pair_backoff_gates(&state).unwrap_or_default();
+            let due_pairs =
+                due_polling_pairs(&pollable_pairs, &runtime_statuses, &backoff_gates, now);
+            let wall_clock_now = Instant::now();
+            let gated = |pair_id: &str| {
+                backoff_gates
+                    .get(pair_id)
+                    .is_some_and(|gate| *gate > wall_clock_now)
+            };
 
             let mut work_items: Vec<(SyncPair, PairSyncTrigger)> = Vec::new();
 
             for pair in &pollable_pairs {
-                if dirty_pair_ids.contains(&pair.id) {
+                // A local edit is a strong signal, but not strong enough to
+                // bypass the backoff: if the credentials are wrong, saving a
+                // file must not restart the hammering. A manual sync still can.
+                if dirty_pair_ids.contains(&pair.id) && !gated(&pair.id) {
                     work_items.push((pair.clone(), PairSyncTrigger::LocalDirty));
                 }
             }
@@ -690,6 +718,13 @@ pub(crate) fn start_polling_worker_for_pairs(app: &AppHandle) -> Result<(), Stri
                 )
                 .await
                 {
+                    // A failed cycle leaves last_sync_at unset, which would make
+                    // this pair due again immediately — hence the backoff gate.
+                    if status.phase == SyncPhase::Error.as_str() {
+                        let _ = record_pair_failure(&state, &pair.id, Instant::now());
+                    } else {
+                        let _ = clear_pair_backoff(&state, &pair.id);
+                    }
                     let _ = set_pair_status_from_handle(&app_handle, status);
                 }
             }

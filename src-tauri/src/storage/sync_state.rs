@@ -11,6 +11,7 @@ use super::{
     inventory_compare::{compare_snapshots, InventoryComparisonSummary},
     local_index::LocalIndexSnapshot,
     model::{aggregate_phase, SyncPhase},
+    pair_backoff::backoff_after_failure,
     profile_store::{is_pair_configured, is_profile_configured, StoredProfile, SyncPair},
     remote_index::RemoteIndexSnapshot,
     sync_db::DurablePlannerSummary,
@@ -92,6 +93,13 @@ struct DirtyPairState {
     last_marked_at: Instant,
 }
 
+/// How long a repeatedly failing pair is held off, and how many cycles in a row
+/// it has failed. See `pair_backoff` for why this exists.
+struct PairBackoffState {
+    consecutive_failures: u32,
+    retry_not_before: Instant,
+}
+
 #[derive(Default)]
 struct WatcherRuntimeState {
     active_watchers: BTreeMap<String, ActivePairWatcher>,
@@ -104,6 +112,7 @@ pub struct SyncState {
     polling_worker: Mutex<PollingWorkerState>,
     watcher_runtime: Mutex<WatcherRuntimeState>,
     dirty_pairs: Mutex<BTreeMap<String, DirtyPairState>>,
+    pair_backoffs: Mutex<BTreeMap<String, PairBackoffState>>,
 }
 
 pub(crate) fn get_status_lock<'a>(
@@ -392,18 +401,42 @@ fn due_dirty_pairs_inner(
         .collect())
 }
 
+/// When the next dirty pair becomes *actionable*.
+///
+/// A pair held off by failure backoff is deliberately excluded until its gate
+/// opens. Without that, a dirty-and-failing pair would report a deadline in the
+/// past forever, the poll loop would never sleep, and the backoff would have
+/// bought nothing but a busier spin.
 pub(crate) fn next_dirty_pair_deadline(
     state: &State<'_, SyncState>,
     debounce: Duration,
 ) -> Result<Option<Instant>, String> {
+    next_dirty_pair_deadline_inner(state, debounce)
+}
+
+fn next_dirty_pair_deadline_inner(
+    state: &SyncState,
+    debounce: Duration,
+) -> Result<Option<Instant>, String> {
+    let backoffs = state
+        .pair_backoffs
+        .lock()
+        .map_err(|_| "pair backoff lock poisoned".to_string())?;
+
     state
         .dirty_pairs
         .lock()
         .map_err(|_| "dirty pair lock poisoned".to_string())
         .map(|dirty_pairs| {
             dirty_pairs
-                .values()
-                .map(|entry| entry.last_marked_at + debounce)
+                .iter()
+                .map(|(pair_id, entry)| {
+                    let debounced = entry.last_marked_at + debounce;
+                    match backoffs.get(pair_id) {
+                        Some(backoff) => debounced.max(backoff.retry_not_before),
+                        None => debounced,
+                    }
+                })
                 .min()
         })
 }
@@ -419,6 +452,78 @@ fn clear_dirty_pair_inner(state: &SyncState, pair_id: &str) -> Result<(), String
         .map_err(|_| "dirty pair lock poisoned".to_string())?
         .remove(pair_id);
     Ok(())
+}
+
+/// Record that a pair's sync cycle failed, and return when it may run again.
+///
+/// Consecutive failures compound. See `pair_backoff` for the policy.
+pub(crate) fn record_pair_failure(
+    state: &State<'_, SyncState>,
+    pair_id: &str,
+    now: Instant,
+) -> Result<Instant, String> {
+    record_pair_failure_inner(state, pair_id, now)
+}
+
+fn record_pair_failure_inner(
+    state: &SyncState,
+    pair_id: &str,
+    now: Instant,
+) -> Result<Instant, String> {
+    let mut backoffs = state
+        .pair_backoffs
+        .lock()
+        .map_err(|_| "pair backoff lock poisoned".to_string())?;
+
+    let consecutive_failures = backoffs
+        .get(pair_id)
+        .map(|entry| entry.consecutive_failures.saturating_add(1))
+        .unwrap_or(1);
+    let retry_not_before = now + backoff_after_failure(consecutive_failures);
+
+    backoffs.insert(
+        pair_id.to_string(),
+        PairBackoffState {
+            consecutive_failures,
+            retry_not_before,
+        },
+    );
+    Ok(retry_not_before)
+}
+
+/// Forget a pair's failure history — it synced, or the user asked for a manual
+/// run, which is an explicit statement that they think it will work now.
+pub(crate) fn clear_pair_backoff(
+    state: &State<'_, SyncState>,
+    pair_id: &str,
+) -> Result<(), String> {
+    clear_pair_backoff_inner(state, pair_id)
+}
+
+fn clear_pair_backoff_inner(state: &SyncState, pair_id: &str) -> Result<(), String> {
+    state
+        .pair_backoffs
+        .lock()
+        .map_err(|_| "pair backoff lock poisoned".to_string())?
+        .remove(pair_id);
+    Ok(())
+}
+
+/// The earliest instant each gated pair may be retried, for the poll scheduler.
+pub(crate) fn pair_backoff_gates(
+    state: &State<'_, SyncState>,
+) -> Result<BTreeMap<String, Instant>, String> {
+    pair_backoff_gates_inner(state)
+}
+
+fn pair_backoff_gates_inner(state: &SyncState) -> Result<BTreeMap<String, Instant>, String> {
+    Ok(state
+        .pair_backoffs
+        .lock()
+        .map_err(|_| "pair backoff lock poisoned".to_string())?
+        .iter()
+        .map(|(pair_id, entry)| (pair_id.clone(), entry.retry_not_before))
+        .collect())
 }
 
 pub(crate) fn retain_dirty_pairs(
@@ -883,9 +988,10 @@ pub(crate) fn aggregate_pair_statuses(statuses: &[PairSyncStatus]) -> AggregateS
 mod tests {
     use super::{
         aggregate_pair_statuses, begin_polling_worker_inner, clear_dirty_pair_inner,
-        clear_polling_worker_inner, due_dirty_pairs_inner, mark_pair_dirty_at_inner,
-        pair_to_status, profile_to_status, stop_polling_worker_inner, synthesize_status_from_pairs,
-        PairSyncStatus, SyncState, SyncStatusStats,
+        clear_pair_backoff_inner, clear_polling_worker_inner, due_dirty_pairs_inner,
+        mark_pair_dirty_at_inner, next_dirty_pair_deadline_inner, pair_backoff_gates_inner,
+        pair_to_status, profile_to_status, record_pair_failure_inner, stop_polling_worker_inner,
+        synthesize_status_from_pairs, PairSyncStatus, SyncState, SyncStatusStats,
     };
     use crate::storage::{
         credentials_store::CredentialValidationStatus,
@@ -1075,6 +1181,97 @@ mod tests {
                 .expect("due pairs should read")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn consecutive_failures_push_the_retry_gate_further_out() {
+        let state = SyncState::default();
+        let now = Instant::now();
+
+        let first = record_pair_failure_inner(&state, "pair-a", now).expect("failure records");
+        let second = record_pair_failure_inner(&state, "pair-a", now).expect("failure records");
+        let third = record_pair_failure_inner(&state, "pair-a", now).expect("failure records");
+
+        assert_eq!(first, now + Duration::from_secs(30));
+        assert_eq!(second, now + Duration::from_secs(60));
+        assert_eq!(third, now + Duration::from_secs(120));
+
+        assert_eq!(
+            pair_backoff_gates_inner(&state)
+                .expect("gates should read")
+                .get("pair-a"),
+            Some(&third),
+            "the scheduler must see the newest gate, not the first"
+        );
+    }
+
+    #[test]
+    fn a_successful_cycle_resets_the_failure_history() {
+        let state = SyncState::default();
+        let now = Instant::now();
+
+        record_pair_failure_inner(&state, "pair-a", now).expect("failure records");
+        record_pair_failure_inner(&state, "pair-a", now).expect("failure records");
+        clear_pair_backoff_inner(&state, "pair-a").expect("backoff clears");
+
+        assert!(
+            pair_backoff_gates_inner(&state)
+                .expect("gates should read")
+                .is_empty(),
+            "a pair that recovered must not stay gated"
+        );
+
+        // And the next failure starts the curve over rather than resuming it.
+        assert_eq!(
+            record_pair_failure_inner(&state, "pair-a", now).expect("failure records"),
+            now + Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn a_gated_pair_does_not_make_the_dirty_deadline_immediate() {
+        // The poll loop wakes as soon as a dirty pair is due. A pair that is
+        // both dirty and failing would otherwise report a deadline in the past
+        // forever: the loop would never sleep and the backoff would buy nothing
+        // but a busier spin.
+        let state = SyncState::default();
+        let now = Instant::now();
+
+        mark_pair_dirty_at_inner(&state, "pair-a", now).expect("pair should mark dirty");
+        assert_eq!(
+            next_dirty_pair_deadline_inner(&state, Duration::ZERO).expect("deadline should read"),
+            Some(now),
+            "an ungated dirty pair is actionable immediately"
+        );
+
+        let gate = record_pair_failure_inner(&state, "pair-a", now).expect("failure records");
+        assert_eq!(
+            next_dirty_pair_deadline_inner(&state, Duration::ZERO).expect("deadline should read"),
+            Some(gate),
+            "a gated dirty pair must wait for its gate, not for its debounce"
+        );
+
+        clear_pair_backoff_inner(&state, "pair-a").expect("backoff clears");
+        assert_eq!(
+            next_dirty_pair_deadline_inner(&state, Duration::ZERO).expect("deadline should read"),
+            Some(now),
+            "and it becomes actionable again the moment the gate is dropped"
+        );
+    }
+
+    #[test]
+    fn failing_pairs_are_gated_independently() {
+        let state = SyncState::default();
+        let now = Instant::now();
+
+        record_pair_failure_inner(&state, "pair-a", now).expect("failure records");
+        record_pair_failure_inner(&state, "pair-a", now).expect("failure records");
+        record_pair_failure_inner(&state, "pair-b", now).expect("failure records");
+
+        let gates = pair_backoff_gates_inner(&state).expect("gates should read");
+        // One bad bucket must not slow down a healthy pair pointing elsewhere.
+        assert_eq!(gates.get("pair-a"), Some(&(now + Duration::from_secs(60))));
+        assert_eq!(gates.get("pair-b"), Some(&(now + Duration::from_secs(30))));
     }
 
     // --- PairSyncStatus tests ---
