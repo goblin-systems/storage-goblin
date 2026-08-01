@@ -22,6 +22,8 @@ pub mod lifecycle_service;
 pub mod local_index;
 pub mod location_service;
 pub mod model;
+#[cfg(test)]
+mod module_size_test;
 pub mod object_store;
 pub mod platform;
 pub mod polling_service;
