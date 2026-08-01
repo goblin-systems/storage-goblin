@@ -39,29 +39,50 @@ preconditions, atomic writes).
 
 Build a `transfer` module used by both adapters through the `ObjectStorage` trait:
 
-- [ ] **Chunked/multipart upload**: S3 multipart (init/part/complete, ≥ 8 MB parts, parallel
-      parts, abort-on-drop cleanup of stale multipart uploads); GCS resumable sessions
-      (session URI persisted → survives restart). Threshold-based: simple PUT below ~16 MB.
-- [ ] **Streaming, resumable download**: ranged GETs to the `.goblin-tmp` file with persisted
-      offset + expected etag/generation; resume after crash/offline; final hash verification
-      (phase 1's ADR-4 hash) before atomic rename.
-- [ ] **Progress events**: `(pair, path, bytes_done, bytes_total, rate)` throttled to ~4 Hz,
-      emitted over the existing Tauri event channel; aggregate per-pair totals for the UI.
-- [ ] **Dynamic timeouts**: idle-based (no bytes for N s) instead of absolute per-file caps.
-- [ ] Memory budget: hard cap on in-flight buffered bytes across all transfers (e.g. 256 MB),
-      enforced by the scheduler below.
+- [x] **GCS resumable sessions** done: objects ≥ 16 MiB stream in 8 MiB chunks with
+      Content-Range framing, so memory is bounded regardless of object size. Verified against
+      a local HTTP server driving the real protocol.
+      **Not done: S3 multipart.** S3 uploads still use `put_object`, which streams from the
+      path (so memory is fine) but keeps the 5 GB single-object ceiling and cannot resume.
+      **Not done: session URI persistence** — a resumable session survives a network blip
+      within one run, but not an app restart.
+- [x] **Streaming + atomic writes** done for both providers (current and versioned
+      objects): chunks stream to a `.goblin-tmp` sibling, hashed on the way, then fsync +
+      atomic rename. This also closes phase 1.4's deferred atomic-download item — an
+      interrupted download is now a no-op instead of leaving a truncated file at the real
+      path that the next scan would upload as a "local edit".
+      **Not done: resume.** There is no persisted offset, so an interrupted download restarts
+      from byte 0. The writer already computes the content hash, but it is not yet compared
+      against an expected value (post-transfer verification remains open).
+- [ ] **Progress events** — `(pair, path, bytes_done, bytes_total, rate)` at ~4 Hz.
+      **Not done.** `DownloadWriter` tracks bytes as it streams, which is the hard half,
+      but nothing is emitted yet. Phase 5 is the consumer, so this is best done with the UI
+      that displays it.
+- [x] **Dynamic timeouts** — **partially done.** The flat 300s cap made large files
+      *impossible* (20 GB cannot move in 300s at any speed), so budgets now scale with object
+      size. Still wall-clock rather than idle-based; detecting a stalled-but-not-dead
+      transfer promptly needs the progress plumbing above.
+- [ ] **Memory budget** — hard cap on in-flight buffered bytes across all transfers.
+      **Not done, and less pressing than it was.** Transfers are sequential and now stream,
+      so peak memory is one chunk rather than one whole object. A global budget only becomes
+      necessary alongside the parallel scheduler.
 
 ### 2.2 Queue scheduler
 
 Replace the four sequential `execute_planned_*_queue*` loops with one scheduler:
 
-- [ ] Bounded parallelism (default ~4 transfers; small-file batches get higher concurrency,
-      huge files get part-level parallelism instead), per-pair fairness.
-- [ ] **Per-item error isolation**: an item failure marks that item failed and continues; the
-      queue outcome is a summary (n ok / n failed / n skipped), not a single error string.
-- [ ] **Retry with exponential backoff + jitter** for `SyncError::Transient` (respect
-      Retry-After); permanent errors (auth, 4xx) fail fast and pause the pair with a clear
-      status instead of hot-looping on the poll interval.
+- [ ] **Bounded parallelism** (default ~4 transfers, per-pair fairness).
+      **Not done.** Still strictly sequential. This is the item that needs phase 3.3's
+      deferred `SyncState` redesign first — the current shared-mutex state cannot support
+      concurrent transfers safely.
+- [x] **Per-item error isolation** done: the 22 item-level failure sites now record the
+      failure and continue, while the 5 sites that indicate the *store itself* is broken
+      (DB write failures) still abort — losing durable state is not something to soldier on
+      through. The outcome is a summary string, verbatim for a single failure.
+- [x] **Retry with exponential backoff + jitter** done for `SyncError::Transient`, honouring
+      `Retry-After`, capped at 3 attempts. Permanent errors (auth, 4xx) still fail fast.
+      **Not done:** pausing the pair on a permanent error — it still re-attempts on the next
+      poll, so an expired credential still produces one error per cycle.
 - [ ] Rate limiting hooks: optional user-configurable up/down bandwidth caps (flagship
       feature; cheap once transfers are chunked).
 - [ ] Ordering: parents-before-children for creates, children-before-parents for deletes,
@@ -74,8 +95,10 @@ Replace the four sequential `execute_planned_*_queue*` loops with one scheduler:
 - [ ] Incremental local rescan: watcher events carry paths (`notify` already provides them —
       currently discarded, `watchers.rs:49`); rescan only affected subtrees; debounce per
       subtree. Full rescan remains as a periodic consistency pass and manual action.
-- [ ] Fingerprint cache: skip re-hashing when `(size, mtime)` unchanged from the previous
-      snapshot (classic rsync heuristic); measure and record hashing throughput.
+- [x] **Fingerprint cache** (skip re-hashing when `(size, mtime)` is unchanged) done and
+      measured: 10,000 unchanged files scan in 439ms instead of 1.376s, a
+      **3.1x improvement** (7,267 -> 22,804 files/s). The mtime-granularity tradeoff is
+      documented at the function, with `None` as the full-rescan escape hatch.
 - [ ] Move local/remote indexes from monolithic JSON files into the existing SQLite DB
       (`sync_db.rs`) with per-path rows — enables incremental updates, removes
       whole-file rewrites, and unifies state into one durable store. Migration required.
@@ -98,19 +121,71 @@ Replace the four sequential `execute_planned_*_queue*` loops with one scheduler:
 - [ ] Long-run soak test (nightly CI job, simulator-based): 24 h of random churn on a
       10k-file pair; memory ceiling asserted.
 
+
+## Status (2026-08-01)
+
+Landed on `overhaul/phase-1` (the branch now carries phases 0-3 plus this;
+still unpushed, still no CI run, phase 1 still not cloud-validated).
+**Partially complete** — the correctness-critical half of 2.1 and the
+error-handling half of 2.2 are done; parallelism and progress reporting are
+not.
+
+### What changed
+
+| Area | Before | After |
+|------|--------|-------|
+| Download memory | whole object buffered in RAM | streamed in chunks |
+| Interrupted download | truncated file at the real path, later uploaded as a "local edit" | no-op; destination untouched until an atomic rename |
+| GCS upload memory | whole file read into RAM | ≥16 MiB streams via resumable session |
+| One bad file in a queue | aborted the entire remaining queue | fails that item, queue drains, summary reported |
+| Transient network error | failed the item | bounded retry with jittered backoff |
+| Large-file timeout | flat 300s — 20 GB could never finish | budget scales with size |
+| Rescan of unchanged tree | re-hashed every file | 3.1x faster via fingerprint reuse |
+
+### Genuinely still open
+
+1. **Bounded parallelism (2.2)** — blocked on the `SyncState` redesign
+   deferred from phase 3.3. Transfers remain sequential.
+2. **S3 multipart upload** — S3 still uses `put_object`: memory is fine
+   (it streams from the path) but the 5 GB ceiling and no-resume remain.
+   GCS has resumable sessions; S3 does not.
+3. **Download resume** — an interrupted download restarts from byte 0. The
+   temp file exists but no offset is persisted.
+4. **Post-transfer verification** — the writer computes the content hash but
+   nothing compares it to an expected value yet. (On S3 there is no expected
+   hash available from listings anyway — see phase 1's known gap.)
+5. **Progress events (2.1)** — byte counts are tracked, nothing is emitted.
+   Best done with phase 5, which consumes them.
+6. **Conditional writes / re-plan on stale** — still deferred from phase 1.4.
+7. **All of 2.4** (offline detection, disk-full handling, chaos tests, soak
+   test) and the rest of 2.3 (incremental rescan from watcher paths, SQLite
+   index migration, remote listing pagination).
+
+### Verification note
+
+Everything above is covered by tests that run on this machine (the transfer
+writer, the GCS resumable protocol against a local HTTP server, the retry
+policy, the failure-reporting contract, the fingerprint cache with a sentinel
+proving reuse, and the timeout budget). Two things are **not** verified here:
+the queue-loop isolation itself, which lives behind the command integration
+tests that compile but cannot run (Tauri mock runtime won't load on this
+box), and anything against a real bucket.
+
 ## Acceptance criteria
 
-1. 20 GB single-file upload and download succeed on S3 and GCS with < 300 MB peak app RSS,
-   survive a mid-transfer network drop and an app restart, and resume rather than restart.
-2. A queue of 10,000 items with 1 % injected failures completes the other 99 %, retries
-   transients successfully, and reports a per-item failure summary.
-3. Byte-level progress events drive a visible per-file progress bar (wired fully in phase 5;
-   an interim debug surface is fine here).
-4. Editing one file in a 100k-file tree results in a sync cycle < 5 s (watcher → incremental
-   scan → plan → transfer), measured by the phase-0 bench scripts.
-5. Pulling the network cable results in a "paused — offline" pair state, zero error-log spam,
-   and automatic recovery on reconnect.
-6. Nightly soak job green for two consecutive weeks before phase exit.
+1. ⚠️ Partially met, unverified against real clouds. Memory is now bounded (streaming both
+   directions; GCS resumable upload), and the size-aware budget means a 20 GB transfer is no
+   longer killed by the clock. **Not met:** no resume after restart, and S3 uploads still cap
+   at 5 GB.
+2. ⚠️ Implemented (isolation + bounded retry + summary), but only unit-verified. The
+   end-to-end 10,000-item scenario needs the command integration tests to run.
+3. ❌ Not met — no events emitted yet.
+4. ⚠️ Improved but not met. The fingerprint cache cuts the rescan cost ~3.1x, but the
+   watcher still triggers a *full* tree rescan rather than an incremental one, so this scales
+   with tree size rather than change count.
+5. ❌ Not met — 2.4 offline detection is not started. Transient errors do now back off
+   rather than retrying instantly, which reduces (but does not eliminate) the log spam.
+6. ❌ Not started.
 
 ## Risks
 

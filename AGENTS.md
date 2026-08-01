@@ -2,9 +2,10 @@
 
 ## Overhaul status
 
-- **Phases 0, 1, 3 landed on `overhaul/phase-1`** (unpushed, no CI run, phase 1 not
-  cloud-validated). Read the Status sections of `backlog/phase-1-sync-correctness.md` and
-  `backlog/phase-3-backend-architecture.md` before building on this. Phase 2 is next.
+- **Phases 0, 1, 3 landed on `overhaul/phase-1`; phase 2 is partially landed** (all unpushed,
+  no CI run, phase 1 not cloud-validated). Read the Status sections of
+  `backlog/phase-1-sync-correctness.md`, `backlog/phase-2-transfer-reliability.md`, and
+  `backlog/phase-3-backend-architecture.md` before building on this.
 - **Backend layout:** the 12,404-line `commands.rs` is now ~2,180 lines (Tauri command surface +
   shared DTOs). Concerns live in sibling modules: `sync_service`, `queue_service`,
   `transfer_service`, `bin_service`, `location_service`, `file_query_service`, `conflict_service`,
@@ -28,8 +29,21 @@
   reconciles anchors. Local deletes go to the OS trash (`trash` crate), never `remove_file`.
   Mass-delete breaker: >25 deletes or >50% of a 10+ anchored tree become review items. Content
   fingerprints: GCS listings return them, S3 listings do not — first-sync merge is GCS-only.
-- **Known gap:** the per-pair path has no cycle-overlap guard (phase 2.2 owns it); SQLite
-  in_progress marking bounds the damage.
+- **Transfers (phase 2):** downloads stream through `transfer::DownloadWriter` to a
+  `.goblin-tmp` sibling, then fsync + atomic rename — never write the destination path
+  directly, and never index a temp file (`local_index` skips them; doing otherwise uploads
+  partial content as a "local edit"). GCS objects ≥16 MiB use resumable sessions
+  (`gcs_upload.rs`); S3 is still single-shot `put_object` (5 GB ceiling, no resume). Transfer
+  timeouts scale with size (`transfer_timeout`) — don't reintroduce a flat cap. Wrap remote
+  calls in `retry::with_retry`; it only retries `SyncError::Transient`.
+- **Queue loops:** a failure on one *item* records and continues; a failure to write the
+  *database* still aborts the batch. Keep that distinction when touching `queue_service`.
+- **Scanning:** `scan_local_folder_with_cache(root, previous)` reuses fingerprints when
+  `(size, mtime)` match — ~3.1x faster on unchanged trees. Passing `None` forces a full
+  rescan; that is the escape hatch for the mtime-granularity blind spot.
+- **Known gaps:** the per-pair path has no cycle-overlap guard (phase 2.2 owns it, blocked on
+  the `SyncState` redesign); SQLite in_progress marking bounds the damage. Transfers are still
+  sequential, downloads do not resume, and nothing verifies content after transfer.
 - `tauri-command-tests` compiles (`bun run test:rust:commands`) but its tests have never run —
   the Tauri mock runtime won't load on this Windows machine. CI job is non-blocking until one
   green run.

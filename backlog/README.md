@@ -4,15 +4,19 @@ This backlog turns Storage Goblin (v0.2.0, AI-generated, "sort of works") into a
 personal cloud drive. It is organized as seven phases. Each phase has its own detailed document in
 this directory with findings, workstreams, task breakdowns, acceptance criteria, and risks.
 
-| Phase | Document | Theme | Depends on |
-|-------|----------|-------|------------|
-| 0 | [phase-0-foundations.md](phase-0-foundations.md) | CI, quality gates, repo hygiene, safety nets | — |
-| 1 | [phase-1-sync-correctness.md](phase-1-sync-correctness.md) | Sync engine correctness: deletes, renames, conflicts, first sync | 0 |
-| 2 | [phase-2-transfer-reliability.md](phase-2-transfer-reliability.md) | Transfer reliability & performance: streaming, retries, parallelism | 0, 1 |
-| 3 | [phase-3-backend-architecture.md](phase-3-backend-architecture.md) | Backend decomposition: kill the 12.4k-line god module & legacy path | 0 (interleaves with 1–2) |
-| 4 | [phase-4-frontend-architecture.md](phase-4-frontend-architecture.md) | Frontend decomposition: kill the 4k-line bootstrap closure | 0, 3 |
-| 5 | [phase-5-ux-overhaul.md](phase-5-ux-overhaul.md) | UX overhaul: onboarding, status model, conflict UX, language | 4 |
-| 6 | [phase-6-flagship-distribution.md](phase-6-flagship-distribution.md) | Distribution: signing, auto-update, crash reporting, docs, Azure | 1–5 |
+| Phase | Document | Theme | Depends on | Status |
+|-------|----------|-------|------------|--------|
+| 0 | [phase-0-foundations.md](phase-0-foundations.md) | CI, quality gates, repo hygiene, safety nets | — | landed |
+| 1 | [phase-1-sync-correctness.md](phase-1-sync-correctness.md) | Sync engine correctness: deletes, renames, conflicts, first sync | 0 | landed, awaiting cloud validation |
+| 2 | [phase-2-transfer-reliability.md](phase-2-transfer-reliability.md) | Transfer reliability & performance: streaming, retries, parallelism | 0, 1 | partial — streaming/retry done, parallelism & resume open |
+| 3 | [phase-3-backend-architecture.md](phase-3-backend-architecture.md) | Backend decomposition: kill the 12.4k-line god module & legacy path | 0 (interleaves with 1–2) | landed, with deviations |
+| 4 | [phase-4-frontend-architecture.md](phase-4-frontend-architecture.md) | Frontend decomposition: kill the 4k-line bootstrap closure | 0, 3 | not started |
+| 5 | [phase-5-ux-overhaul.md](phase-5-ux-overhaul.md) | UX overhaul: onboarding, status model, conflict UX, language | 4 | not started |
+| 6 | [phase-6-flagship-distribution.md](phase-6-flagship-distribution.md) | Distribution: signing, auto-update, crash reporting, docs, Azure | 1–5 | not started |
+
+Every "landed" above means *landed on the unpushed `overhaul/phase-1` branch* — nothing has
+run in CI and nothing has been validated against a real bucket. Read each phase doc's Status
+section for the honest per-item picture; the checkboxes alone overstate completeness.
 
 ## Current-state assessment (evidence summary)
 
