@@ -9,9 +9,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use tauri::{AppHandle, Runtime};
 
+use super::commands::reconcile_remote_bin_lifecycle_target;
 use super::credentials_store::{load_credentials_by_id, StoredCredentials};
 use super::object_store;
-use super::profile_store::{is_pair_configured, is_profile_configured, StoredProfile, SyncPair};
+use super::profile_store::{
+    is_pair_configured, is_profile_configured, write_profile_to_disk, StoredProfile, SyncPair,
+};
 use super::provider::normalize_provider;
 use super::remote_bin::{
     managed_lifecycle_rule_plan, ManagedLifecycleRulePlan, DEFAULT_REMOTE_BIN_PAIR_ID,
@@ -166,26 +169,30 @@ pub(crate) fn planned_remote_bin_reconciliation(
         .collect()
 }
 
-pub(crate) fn persist_profile_with_remote_bin_reconciliation<R, Reconcile, Write>(
+/// Reconcile every bucket a profile change affects, then persist the change.
+///
+/// Async by design: reconciliation talks to the provider, so bridging it back
+/// to a blocking call (as this did via `run_async_blocking`) meant blocking a
+/// runtime worker for a network round-trip per bucket.
+pub(crate) async fn persist_profile_with_remote_bin_reconciliation<R: Runtime>(
     app: &AppHandle<R>,
     current: &StoredProfile,
     next: StoredProfile,
-    mut reconcile_bucket: Reconcile,
-    write_profile: Write,
-) -> Result<StoredProfile, String>
-where
-    R: Runtime,
-    Reconcile: FnMut(&AppHandle<R>, &RemoteBinLifecycleTarget) -> Result<(), String>,
-    Write: FnOnce(&AppHandle<R>, &StoredProfile) -> Result<(), String>,
-{
-    persist_profile_with_remote_bin_reconciliation_inner(
-        planned_remote_bin_reconciliation(current, &next),
-        next,
-        |target| reconcile_bucket(app, target),
-        |profile| write_profile(app, profile),
-    )
+) -> Result<StoredProfile, String> {
+    let targets =
+        filter_remote_bin_reconciliation_targets(planned_remote_bin_reconciliation(current, &next));
+
+    for target in &targets {
+        reconcile_remote_bin_lifecycle_target(app, target).await?;
+    }
+
+    write_profile_to_disk(app, &next)?;
+    Ok(next)
 }
 
+/// Closure-injected form used only by the tests, to drive reconciliation and
+/// persistence with fakes. Production uses the async function above.
+#[cfg(test)]
 pub(crate) fn persist_profile_with_remote_bin_reconciliation_inner<Reconcile, Write>(
     targets: Vec<RemoteBinLifecycleTarget>,
     next: StoredProfile,

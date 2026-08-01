@@ -276,6 +276,10 @@ pub(crate) fn concise_sync_issue(stage: &str) -> String {
     format!("{stage} failed.")
 }
 
+/// Drive an async operation to completion from a synchronous context.
+/// Test-only: production code awaits directly (phase 3.3 removed the last
+/// production caller). Only the command-level integration tests still need it.
+#[cfg(all(test, feature = "tauri-command-tests"))]
 fn run_async_blocking<F, T>(future: F) -> Result<T, String>
 where
     F: Future<Output = Result<T, String>>,
@@ -657,7 +661,7 @@ fn resolve_setup_credentials<R: Runtime>(
     }
 }
 
-fn store_profile_draft<R: Runtime>(
+async fn store_profile_draft<R: Runtime>(
     app: &AppHandle<R>,
     profile: ProfileDraft,
 ) -> Result<(StoredProfile, StoredCredentials), String> {
@@ -671,18 +675,14 @@ fn store_profile_draft<R: Runtime>(
         selected_credential: Some(summary),
         selected_credential_available: true,
     });
-    stored = persist_profile_with_remote_bin_reconciliation(
-        app,
-        &existing_profile,
-        stored.normalized(),
-        |app, target| run_async_blocking(reconcile_remote_bin_lifecycle_target(app, target)),
-        write_profile_to_disk,
-    )?;
+    stored =
+        persist_profile_with_remote_bin_reconciliation(app, &existing_profile, stored.normalized())
+            .await?;
 
     Ok((stored, credentials))
 }
 
-fn store_profile_settings<R: Runtime>(
+async fn store_profile_settings<R: Runtime>(
     app: &AppHandle<R>,
     profile: StoredProfile,
 ) -> Result<StoredProfile, String> {
@@ -695,13 +695,7 @@ fn store_profile_settings<R: Runtime>(
     let selected_state =
         resolve_selected_credential_state(app, stored.credential_profile_id.as_deref())?;
     stored.apply_selected_credential_state(selected_state);
-    persist_profile_with_remote_bin_reconciliation(
-        app,
-        &existing,
-        stored.normalized(),
-        |app, target| run_async_blocking(reconcile_remote_bin_lifecycle_target(app, target)),
-        write_profile_to_disk,
-    )
+    persist_profile_with_remote_bin_reconciliation(app, &existing, stored.normalized()).await
 }
 
 pub(crate) async fn reconcile_remote_bin_lifecycle_target<R: Runtime>(
@@ -1007,13 +1001,13 @@ fn get_sync_status_impl<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn save_profile(
+pub async fn save_profile(
     app: AppHandle,
     state: State<'_, SyncState>,
     debug_state: State<'_, ActivityDebugState>,
     profile: ProfileDraft,
 ) -> Result<StoredProfile, String> {
-    let (stored, _) = store_profile_draft(&app, profile)?;
+    let (stored, _) = store_profile_draft(&app, profile).await?;
 
     // Status is derived from the sync locations, never from the flat profile
     // fields (which exist only for migration of pre-locations profiles).
@@ -1041,13 +1035,13 @@ pub fn save_profile(
 }
 
 #[tauri::command]
-pub fn save_profile_settings(
+pub async fn save_profile_settings(
     app: AppHandle,
     state: State<'_, SyncState>,
     debug_state: State<'_, ActivityDebugState>,
     profile: StoredProfile,
 ) -> Result<StoredProfile, String> {
-    let stored = store_profile_settings(&app, profile)?;
+    let stored = store_profile_settings(&app, profile).await?;
 
     // Status is derived from the sync locations, never from the flat profile
     // fields (which exist only for migration of pre-locations profiles).
@@ -1084,13 +1078,13 @@ pub fn save_profile_settings(
 
 #[cfg(test)]
 #[allow(dead_code)]
-fn save_profile_settings_impl<R: Runtime>(
+async fn save_profile_settings_impl<R: Runtime>(
     app: AppHandle<R>,
     _state: State<'_, SyncState>,
     _debug_state: State<'_, ActivityDebugState>,
     profile: StoredProfile,
 ) -> Result<StoredProfile, String> {
-    store_profile_settings(&app, profile)
+    store_profile_settings(&app, profile).await
 }
 
 #[tauri::command]
@@ -1586,7 +1580,7 @@ pub fn list_sync_locations(app: AppHandle) -> Result<Vec<SyncPair>, String> {
 }
 
 #[cfg(not(test))]
-fn add_sync_pair_impl(app: AppHandle, draft: SyncPairDraft) -> Result<StoredProfile, String> {
+async fn add_sync_pair_impl(app: AppHandle, draft: SyncPairDraft) -> Result<StoredProfile, String> {
     let current = read_profile_from_disk(&app)?;
     let mut next = current.clone();
     let pair = SyncPair {
@@ -1605,21 +1599,16 @@ fn add_sync_pair_impl(app: AppHandle, draft: SyncPairDraft) -> Result<StoredProf
         remote_bin: draft.remote_bin,
     }
     .normalized();
-    run_async_blocking(reconcile_pair_object_versioning(&app, &pair))?;
+    reconcile_pair_object_versioning(&app, &pair).await?;
     next.sync_pairs.push(pair);
-    let next = persist_profile_with_remote_bin_reconciliation(
-        &app,
-        &current,
-        next.normalized(),
-        |app, target| run_async_blocking(reconcile_remote_bin_lifecycle_target(app, target)),
-        write_profile_to_disk,
-    )?;
+    let next =
+        persist_profile_with_remote_bin_reconciliation(&app, &current, next.normalized()).await?;
     let _ = start_polling_worker(&app);
     Ok(next)
 }
 
 #[cfg(test)]
-fn add_sync_pair_impl<R: Runtime>(
+async fn add_sync_pair_impl<R: Runtime>(
     app: AppHandle<R>,
     draft: SyncPairDraft,
 ) -> Result<StoredProfile, String> {
@@ -1641,24 +1630,24 @@ fn add_sync_pair_impl<R: Runtime>(
         remote_bin: draft.remote_bin,
     }
     .normalized();
-    run_async_blocking(reconcile_pair_object_versioning(&app, &pair))?;
+    reconcile_pair_object_versioning(&app, &pair).await?;
     next.sync_pairs.push(pair);
-    persist_profile_with_remote_bin_reconciliation(
-        &app,
-        &current,
-        next.normalized(),
-        |app, target| run_async_blocking(reconcile_remote_bin_lifecycle_target(app, target)),
-        write_profile_to_disk,
-    )
+    persist_profile_with_remote_bin_reconciliation(&app, &current, next.normalized()).await
 }
 
 #[tauri::command]
-pub fn add_sync_location(app: AppHandle, draft: SyncPairDraft) -> Result<StoredProfile, String> {
-    add_sync_pair_impl(app, draft)
+pub async fn add_sync_location(
+    app: AppHandle,
+    draft: SyncPairDraft,
+) -> Result<StoredProfile, String> {
+    add_sync_pair_impl(app, draft).await
 }
 
 #[cfg(not(test))]
-fn update_sync_pair_impl(app: AppHandle, draft: SyncPairDraft) -> Result<StoredProfile, String> {
+async fn update_sync_pair_impl(
+    app: AppHandle,
+    draft: SyncPairDraft,
+) -> Result<StoredProfile, String> {
     let pair_id = draft
         .id
         .as_deref()
@@ -1687,21 +1676,16 @@ fn update_sync_pair_impl(app: AppHandle, draft: SyncPairDraft) -> Result<StoredP
         remote_bin: draft.remote_bin,
     }
     .normalized();
-    run_async_blocking(reconcile_pair_object_versioning(&app, &updated))?;
+    reconcile_pair_object_versioning(&app, &updated).await?;
     next.sync_pairs[position] = updated;
-    let next = persist_profile_with_remote_bin_reconciliation(
-        &app,
-        &current,
-        next.normalized(),
-        |app, target| run_async_blocking(reconcile_remote_bin_lifecycle_target(app, target)),
-        write_profile_to_disk,
-    )?;
+    let next =
+        persist_profile_with_remote_bin_reconciliation(&app, &current, next.normalized()).await?;
     let _ = start_polling_worker(&app);
     Ok(next)
 }
 
 #[cfg(test)]
-fn update_sync_pair_impl<R: Runtime>(
+async fn update_sync_pair_impl<R: Runtime>(
     app: AppHandle<R>,
     draft: SyncPairDraft,
 ) -> Result<StoredProfile, String> {
@@ -1733,24 +1717,21 @@ fn update_sync_pair_impl<R: Runtime>(
         remote_bin: draft.remote_bin,
     }
     .normalized();
-    run_async_blocking(reconcile_pair_object_versioning(&app, &updated))?;
+    reconcile_pair_object_versioning(&app, &updated).await?;
     next.sync_pairs[position] = updated;
-    persist_profile_with_remote_bin_reconciliation(
-        &app,
-        &current,
-        next.normalized(),
-        |app, target| run_async_blocking(reconcile_remote_bin_lifecycle_target(app, target)),
-        write_profile_to_disk,
-    )
+    persist_profile_with_remote_bin_reconciliation(&app, &current, next.normalized()).await
 }
 
 #[tauri::command]
-pub fn update_sync_location(app: AppHandle, draft: SyncPairDraft) -> Result<StoredProfile, String> {
-    update_sync_pair_impl(app, draft)
+pub async fn update_sync_location(
+    app: AppHandle,
+    draft: SyncPairDraft,
+) -> Result<StoredProfile, String> {
+    update_sync_pair_impl(app, draft).await
 }
 
 #[tauri::command]
-pub fn set_sync_location_versioning(
+pub async fn set_sync_location_versioning(
     app: AppHandle,
     location_id: String,
     enabled: bool,
@@ -1765,18 +1746,14 @@ pub fn set_sync_location_versioning(
         .iter()
         .position(|p| p.id == location_id)
         .ok_or_else(|| format!("Sync location '{}' not found.", location_id))?;
-    run_async_blocking(apply_sync_location_versioning(
-        &app,
-        &profile.sync_pairs[position],
-        enabled,
-    ))?;
+    apply_sync_location_versioning(&app, &profile.sync_pairs[position], enabled).await?;
     profile.sync_pairs[position].object_versioning_enabled = enabled;
     write_profile_to_disk(&app, &profile)?;
     Ok(profile)
 }
 
 #[cfg(not(test))]
-fn remove_sync_pair_impl(app: AppHandle, pair_id: String) -> Result<StoredProfile, String> {
+async fn remove_sync_pair_impl(app: AppHandle, pair_id: String) -> Result<StoredProfile, String> {
     let pair_id = pair_id.trim();
     if pair_id.is_empty() {
         return Err("Sync pair ID is required.".into());
@@ -1791,19 +1768,14 @@ fn remove_sync_pair_impl(app: AppHandle, pair_id: String) -> Result<StoredProfil
     if next.active_location_id.as_deref() == Some(pair_id) {
         next.active_location_id = None;
     }
-    let next = persist_profile_with_remote_bin_reconciliation(
-        &app,
-        &current,
-        next.normalized(),
-        |app, target| run_async_blocking(reconcile_remote_bin_lifecycle_target(app, target)),
-        write_profile_to_disk,
-    )?;
+    let next =
+        persist_profile_with_remote_bin_reconciliation(&app, &current, next.normalized()).await?;
     let _ = start_polling_worker(&app);
     Ok(next)
 }
 
 #[cfg(test)]
-fn remove_sync_pair_impl<R: Runtime>(
+async fn remove_sync_pair_impl<R: Runtime>(
     app: AppHandle<R>,
     pair_id: String,
 ) -> Result<StoredProfile, String> {
@@ -1821,18 +1793,15 @@ fn remove_sync_pair_impl<R: Runtime>(
     if next.active_location_id.as_deref() == Some(pair_id) {
         next.active_location_id = None;
     }
-    persist_profile_with_remote_bin_reconciliation(
-        &app,
-        &current,
-        next.normalized(),
-        |app, target| run_async_blocking(reconcile_remote_bin_lifecycle_target(app, target)),
-        write_profile_to_disk,
-    )
+    persist_profile_with_remote_bin_reconciliation(&app, &current, next.normalized()).await
 }
 
 #[tauri::command]
-pub fn remove_sync_location(app: AppHandle, location_id: String) -> Result<StoredProfile, String> {
-    remove_sync_pair_impl(app, location_id)
+pub async fn remove_sync_location(
+    app: AppHandle,
+    location_id: String,
+) -> Result<StoredProfile, String> {
+    remove_sync_pair_impl(app, location_id).await
 }
 
 // ---------------------------------------------------------------------------
@@ -4799,12 +4768,12 @@ mod tauri_command_tests {
         }
 
         fn save_profile_settings(&self, profile: StoredProfile) -> StoredProfile {
-            super::save_profile_settings_impl(
+            super::run_async_blocking(super::save_profile_settings_impl(
                 self.app_handle(),
                 self.app.state::<SyncState>(),
                 self.app.state::<ActivityDebugState>(),
                 profile,
-            )
+            ))
             .expect("profile settings should save")
         }
 
@@ -5038,17 +5007,17 @@ mod tauri_command_tests {
     {
         let harness = CommandTestHarness::new("remove-active-sync-location");
 
-        let profile = super::add_sync_pair_impl(
+        let profile = super::run_async_blocking(super::add_sync_pair_impl(
             harness.app_handle(),
             sync_pair_draft("Photos", "C:/sync/photos", "bucket-a"),
-        )
+        ))
         .expect("first location should be added");
         let removed_id = profile.sync_pairs[0].id.clone();
 
-        let profile = super::add_sync_pair_impl(
+        let profile = super::run_async_blocking(super::add_sync_pair_impl(
             harness.app_handle(),
             sync_pair_draft("Docs", "C:/sync/docs", "bucket-a"),
-        )
+        ))
         .expect("second location should be added");
         let survivor_id = profile
             .sync_pairs
@@ -5063,8 +5032,11 @@ mod tauri_command_tests {
         stored.active_location_id = Some(removed_id.clone());
         write_profile_to_disk(&harness.app_handle(), &stored).expect("profile should write");
 
-        super::remove_sync_pair_impl(harness.app_handle(), removed_id.clone())
-            .expect("active location should be removed");
+        super::run_async_blocking(super::remove_sync_pair_impl(
+            harness.app_handle(),
+            removed_id.clone(),
+        ))
+        .expect("active location should be removed");
 
         let reloaded = harness.load_profile();
 
@@ -5085,24 +5057,27 @@ mod tauri_command_tests {
     fn removed_sync_location_is_not_resurrected_by_saving_unrelated_profile_settings() {
         let harness = CommandTestHarness::new("removed-location-not-resurrected");
 
-        let profile = super::add_sync_pair_impl(
+        let profile = super::run_async_blocking(super::add_sync_pair_impl(
             harness.app_handle(),
             sync_pair_draft("Photos", "C:/sync/photos", "bucket-a"),
-        )
+        ))
         .expect("first location should be added");
         let removed_id = profile.sync_pairs[0].id.clone();
 
-        super::add_sync_pair_impl(
+        super::run_async_blocking(super::add_sync_pair_impl(
             harness.app_handle(),
             sync_pair_draft("Docs", "C:/sync/docs", "bucket-b"),
-        )
+        ))
         .expect("second location should be added");
 
         let mut stale_profile = harness.load_profile();
         stale_profile.activity_debug_mode_enabled = true;
 
-        super::remove_sync_pair_impl(harness.app_handle(), removed_id.clone())
-            .expect("location should be removed");
+        super::run_async_blocking(super::remove_sync_pair_impl(
+            harness.app_handle(),
+            removed_id.clone(),
+        ))
+        .expect("location should be removed");
 
         let saved = harness.save_profile_settings(stale_profile);
         let reloaded = harness.load_profile();
@@ -5124,10 +5099,10 @@ mod tauri_command_tests {
     fn add_sync_location_persists_exactly_once_after_reload() {
         let harness = CommandTestHarness::new("add-sync-location-persists-once");
 
-        let added = super::add_sync_pair_impl(
+        let added = super::run_async_blocking(super::add_sync_pair_impl(
             harness.app_handle(),
             sync_pair_draft("Photos", "C:/sync/photos", "bucket-a"),
-        )
+        ))
         .expect("location should be added");
         let added_pair = added
             .sync_pairs
@@ -5156,14 +5131,14 @@ mod tauri_command_tests {
     fn update_sync_location_persists_updated_fields_without_creating_duplicates() {
         let harness = CommandTestHarness::new("update-sync-location-persists");
 
-        let added = super::add_sync_pair_impl(
+        let added = super::run_async_blocking(super::add_sync_pair_impl(
             harness.app_handle(),
             sync_pair_draft("Photos", "C:/sync/photos", "bucket-a"),
-        )
+        ))
         .expect("location should be added");
         let original_id = added.sync_pairs[0].id.clone();
 
-        super::update_sync_pair_impl(
+        super::run_async_blocking(super::update_sync_pair_impl(
             harness.app_handle(),
             SyncPairDraft {
                 id: Some(original_id.clone()),
@@ -5183,7 +5158,7 @@ mod tauri_command_tests {
                     retention_days: 2,
                 },
             },
-        )
+        ))
         .expect("location should update");
 
         let reloaded = harness.load_profile();
@@ -5216,14 +5191,14 @@ mod tauri_command_tests {
     fn update_sync_pair_normalizes_invalid_conflict_strategy_to_preserve_both() {
         let harness = CommandTestHarness::new("update-sync-pair-invalid-conflict-strategy");
 
-        let added = super::add_sync_pair_impl(
+        let added = super::run_async_blocking(super::add_sync_pair_impl(
             harness.app_handle(),
             sync_pair_draft("Photos", "C:/sync/photos", "bucket-a"),
-        )
+        ))
         .expect("location should be added");
         let original_id = added.sync_pairs[0].id.clone();
 
-        super::update_sync_pair_impl(
+        super::run_async_blocking(super::update_sync_pair_impl(
             harness.app_handle(),
             SyncPairDraft {
                 id: Some(original_id.clone()),
@@ -5243,7 +5218,7 @@ mod tauri_command_tests {
                     retention_days: 2,
                 },
             },
-        )
+        ))
         .expect("location should update");
 
         let reloaded = harness.load_profile();
@@ -5437,13 +5412,13 @@ mod tauri_command_tests {
     fn add_sync_pair_does_not_persist_when_remote_bin_reconciliation_cannot_load_credentials() {
         let harness = CommandTestHarness::new("add-sync-pair-reconcile-failure");
 
-        let error = super::add_sync_pair_impl(
+        let error = super::run_async_blocking(super::add_sync_pair_impl(
             harness.app_handle(),
             SyncPairDraft {
                 credential_profile_id: Some("missing-credential".into()),
                 ..sync_pair_draft("Photos", "C:/sync/photos", "bucket-a")
             },
-        )
+        ))
         .expect_err("reconciliation failure should abort persistence");
 
         assert!(error.contains("missing-credential"));
@@ -5487,8 +5462,11 @@ mod tauri_command_tests {
         .normalized();
         write_profile_to_disk(&harness.app_handle(), &initial).expect("profile should write");
 
-        let saved = super::remove_sync_pair_impl(harness.app_handle(), "pair-enabled".into())
-            .expect("removal should persist because remaining bin is disabled");
+        let saved = super::run_async_blocking(super::remove_sync_pair_impl(
+            harness.app_handle(),
+            "pair-enabled".into(),
+        ))
+        .expect("removal should persist because remaining bin is disabled");
         initial.sync_pairs.retain(|pair| pair.id == "pair-disabled");
 
         assert_eq!(saved.sync_pairs.len(), 1);
