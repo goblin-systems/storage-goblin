@@ -221,8 +221,9 @@ pub struct ConflictResolutionDetails {
     pub fallback_reason: Option<String>,
 }
 
+/// Budget for small metadata operations (creating a directory placeholder).
+/// Real file transfers use the size-aware `transfer::transfer_timeout`.
 pub(crate) const PLANNED_UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
-pub(crate) const PLANNED_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 pub(crate) const DIRTY_PAIR_DEBOUNCE: Duration = Duration::from_millis(750);
 pub(crate) const LOCAL_SNAPSHOT_STALE_TTL: Duration = Duration::from_secs(300);
 pub(crate) fn emit_status<R: Runtime>(app: &AppHandle<R>, status: &SyncStatus) {

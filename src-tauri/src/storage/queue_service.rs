@@ -8,7 +8,7 @@ use tauri::{AppHandle, Runtime};
 use super::activity::ActivityDebugState;
 use super::commands::{
     emit_error_activity, emit_info_activity, emit_success_activity, run_with_timeout,
-    PLANNED_DOWNLOAD_TIMEOUT, PLANNED_UPLOAD_TIMEOUT,
+    PLANNED_UPLOAD_TIMEOUT,
 };
 use super::credentials_store::StoredCredentials;
 use super::now_iso;
@@ -24,6 +24,7 @@ use super::sync_db::{
     mark_upload_queue_item_failed_for_pair, mark_upload_queue_item_in_progress_for_pair,
     recover_interrupted_queue_items_for_pair,
 };
+use super::transfer::transfer_timeout;
 use super::transfer_service::{
     build_pair_transfer_executor, download_stale_plan_error, perform_planned_download_for_pair,
     perform_planned_upload_for_pair, perform_structural_download_operation_for_pair,
@@ -384,6 +385,9 @@ pub(crate) async fn execute_planned_upload_queue_for_pair<R: Runtime>(
             )),
         );
 
+        // Budget scales with the object: a flat cap made large files
+        // impossible rather than merely slow (backlog phase 2.1).
+        let upload_budget = transfer_timeout(metadata.len());
         match run_with_timeout(
             perform_planned_upload_for_pair(
                 &executor,
@@ -394,12 +398,12 @@ pub(crate) async fn execute_planned_upload_queue_for_pair<R: Runtime>(
                 &local_path,
                 &current_fingerprint,
             ),
-            PLANNED_UPLOAD_TIMEOUT,
+            upload_budget,
             || {
                 format!(
                     "Upload timed out for '{}' after {}s",
                     item.path,
-                    PLANNED_UPLOAD_TIMEOUT.as_secs()
+                    upload_budget.as_secs()
                 )
             },
         )
@@ -676,14 +680,15 @@ pub(crate) async fn execute_planned_download_queue_for_pair<R: Runtime>(
             }
         }
 
+        let download_budget = transfer_timeout(item.remote_size.unwrap_or_default());
         match run_with_timeout(
             perform_planned_download_for_pair(&executor, pair, &key, &item.path, &local_path),
-            PLANNED_DOWNLOAD_TIMEOUT,
+            download_budget,
             || {
                 format!(
                     "Download timed out for '{}' after {}s",
                     item.path,
-                    PLANNED_DOWNLOAD_TIMEOUT.as_secs()
+                    download_budget.as_secs()
                 )
             },
         )

@@ -18,6 +18,7 @@
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
@@ -207,6 +208,34 @@ pub(crate) fn cleanup_orphaned_temp_files(root: &Path) -> u64 {
     removed
 }
 
+/// Wall-clock budget for transferring `size_bytes`.
+///
+/// A single fixed cap (300s for every file, regardless of size) meant a large
+/// object on a slow link could never finish: it was killed mid-transfer and
+/// retried forever, making multi-GB files permanently unsyncable rather than
+/// merely slow. The budget now scales with size, assuming a pessimistic floor
+/// throughput plus a fixed allowance for connection setup and provider
+/// latency.
+///
+/// This is still wall-clock, not the idle-based timeout phase 2.1 ultimately
+/// wants ("no bytes received for N seconds"). It removes the impossible-for-
+/// large-files failure; promptly detecting a stalled-but-not-dead transfer
+/// still needs byte-level progress plumbed through from the writer.
+pub(crate) fn transfer_timeout(size_bytes: u64) -> Duration {
+    /// Deliberately pessimistic: this is a backstop for a wedged transfer,
+    /// not a performance target. Too tight and slow links break; too loose
+    /// and a dead connection hangs the queue.
+    const FLOOR_BYTES_PER_SEC: u64 = 128 * 1024;
+    /// Covers connection setup, auth, and provider-side latency.
+    const BASE: Duration = Duration::from_secs(60);
+    /// Nothing should hold a queue slot longer than this.
+    const MAX: Duration = Duration::from_secs(6 * 60 * 60);
+
+    let transfer_seconds = size_bytes / FLOOR_BYTES_PER_SEC;
+    BASE.saturating_add(Duration::from_secs(transfer_seconds))
+        .min(MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -354,6 +383,31 @@ mod tests {
         assert_eq!(
             cleanup_orphaned_temp_files(Path::new("C:/definitely/not/a/real/sync/root")),
             0
+        );
+    }
+
+    #[test]
+    fn the_transfer_budget_scales_with_size() {
+        use super::transfer_timeout;
+
+        // A small file gets roughly the fixed allowance.
+        assert_eq!(transfer_timeout(0).as_secs(), 60);
+        assert_eq!(transfer_timeout(1024).as_secs(), 60);
+
+        // A 1 GiB object gets far more than the old flat 300s, which it could
+        // never have met on a slow link.
+        let one_gib = transfer_timeout(1024 * 1024 * 1024).as_secs();
+        assert!(one_gib > 300, "1 GiB budget was only {one_gib}s");
+        assert!(one_gib >= 60 + 8192, "1 GiB budget was {one_gib}s");
+
+        // Budgets never shrink as files grow.
+        assert!(transfer_timeout(10_000_000) >= transfer_timeout(1_000_000));
+
+        // …and are capped so a wedged transfer cannot hold a slot forever.
+        assert_eq!(
+            transfer_timeout(u64::MAX).as_secs(),
+            6 * 60 * 60,
+            "the budget must stay bounded"
         );
     }
 }
