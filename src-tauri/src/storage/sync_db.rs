@@ -758,7 +758,50 @@ fn open_connection(path: &Path) -> Result<Connection, String> {
     Ok(connection)
 }
 
+/// The schema version this build expects. Bump it and add a match arm in
+/// [`apply_migration`] for every schema or data change.
+const SCHEMA_VERSION: i64 = 1;
+
+/// Bring the database up to [`SCHEMA_VERSION`], recording progress in SQLite's
+/// `user_version` so each migration runs exactly once and in order.
+///
+/// Migration 1 is intentionally idempotent (CREATE IF NOT EXISTS + column-add
+/// guards): databases created before this framework existed carry
+/// `user_version = 0` yet may already have some of these tables and columns,
+/// so v1 must converge any of those older shapes and only then stamp the
+/// version. Migrations from v2 on can assume a known starting shape and need
+/// not be idempotent.
 fn initialize_schema(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|error| format!("failed to enable foreign keys: {error}"))?;
+
+    let mut version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|error| format!("failed to read schema version: {error}"))?;
+
+    while version < SCHEMA_VERSION {
+        let next = version + 1;
+        apply_migration(connection, next)?;
+        connection
+            .execute_batch(&format!("PRAGMA user_version = {next};"))
+            .map_err(|error| format!("failed to record schema version {next}: {error}"))?;
+        version = next;
+    }
+
+    Ok(())
+}
+
+fn apply_migration(connection: &Connection, version: i64) -> Result<(), String> {
+    match version {
+        1 => migration_1_base_schema(connection),
+        other => Err(format!(
+            "no migration defined for schema version {other} (SCHEMA_VERSION = {SCHEMA_VERSION})"
+        )),
+    }
+}
+
+fn migration_1_base_schema(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
             "PRAGMA foreign_keys = ON;
@@ -1156,7 +1199,7 @@ mod tests {
         mark_upload_queue_item_failed_at_path, mark_upload_queue_item_in_progress_at_path,
         open_connection, persist_sync_plan_to_path, profile_key,
         recover_interrupted_queue_items_at_path, sync_pair_key, upsert_sync_anchor_at_path,
-        SyncAnchor,
+        SyncAnchor, SCHEMA_VERSION,
     };
     use crate::storage::profile_store::{StoredProfile, SyncPair};
     use crate::storage::sync_planner::{
@@ -2302,5 +2345,70 @@ mod tests {
             super::runnable_queue_status_sql(),
             "'planned', 'interrupted'"
         );
+    }
+
+    fn user_version(connection: &Connection) -> i64 {
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user_version should read")
+    }
+
+    #[test]
+    fn opening_a_fresh_database_stamps_the_current_schema_version() {
+        let db_path = temp_path("schema-fresh");
+        let connection = open_connection(&db_path).expect("database should open");
+        assert_eq!(user_version(&connection), SCHEMA_VERSION);
+
+        // The migration is idempotent: reopening does not re-run or regress it.
+        drop(connection);
+        let reopened = open_connection(&db_path).expect("database should reopen");
+        assert_eq!(user_version(&reopened), SCHEMA_VERSION);
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn a_pre_migration_database_converges_and_is_stamped() {
+        // Simulate a database created before the migration framework: the
+        // base tables exist, user_version is still 0, and the columns that the
+        // old ensure_*_column step used to add are missing.
+        let db_path = temp_path("schema-legacy");
+        {
+            let connection = Connection::open(&db_path).expect("database should open");
+            connection
+                .execute_batch(
+                    "CREATE TABLE sync_queue (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        plan_run_id INTEGER NOT NULL,
+                        profile_key TEXT NOT NULL,
+                        path TEXT NOT NULL,
+                        operation TEXT NOT NULL,
+                        queue_status TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );",
+                )
+                .expect("legacy table should create");
+            assert_eq!(user_version(&connection), 0);
+        }
+
+        let connection = open_connection(&db_path).expect("database should open and migrate");
+        assert_eq!(user_version(&connection), SCHEMA_VERSION);
+
+        // The columns migration 1 converges onto the old table are present.
+        let columns: Vec<String> = connection
+            .prepare("PRAGMA table_info(sync_queue)")
+            .expect("pragma should prepare")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("pragma should run")
+            .collect::<Result<_, _>>()
+            .expect("columns should parse");
+        for expected in ["target_path", "expected_local_fingerprint", "last_error"] {
+            assert!(
+                columns.iter().any(|c| c == expected),
+                "migration should have added sync_queue.{expected}, got {columns:?}"
+            );
+        }
+
+        let _ = fs::remove_file(&db_path);
     }
 }
