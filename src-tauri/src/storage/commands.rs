@@ -32,6 +32,10 @@ use super::{
         CredentialValidationStatus, StoredCredentials,
     },
     default_provider,
+    file_query_service::{
+        build_file_entry_responses, refresh_pair_state_after_local_change,
+        refresh_pair_state_after_remote_change,
+    },
     lifecycle_service::{
         load_credentials_for_remote_bin_target, persist_profile_with_remote_bin_reconciliation,
         provider_supports_remote_bin_lifecycle_reconciliation,
@@ -39,11 +43,9 @@ use super::{
         RemoteBinLifecycleTarget,
     },
     local_index::{
-        read_local_index_snapshot, read_local_index_snapshot_for_pair, scan_local_folder,
-        write_local_index_snapshot_for_pair, LocalIndexSnapshot,
+        read_local_index_snapshot, read_local_index_snapshot_for_pair, LocalIndexSnapshot,
     },
     location_service::sync_pair_for_location,
-    model::FileEntryStatus,
     now_iso, object_store,
     platform::{
         cleanup_empty_ancestors, normalize_directory_delete_path, open_path_with_default_app,
@@ -65,18 +67,13 @@ use super::{
     remote_index::{
         directory_relative_paths_from_key, directory_relative_paths_from_relative_path,
         read_remote_index_snapshot, read_remote_index_snapshot_for_pair, relative_path_from_key,
-        should_exclude_remote_key, write_remote_index_snapshot_for_pair, RemoteIndexSnapshot,
-        RemoteIndexSummary, RemoteObjectEntry,
+        should_exclude_remote_key, RemoteIndexSnapshot, RemoteIndexSummary, RemoteObjectEntry,
     },
     s3_adapter,
     sanitizer::sanitize_sensitive_text,
-    sync_db::{
-        load_planner_summary, load_planner_summary_for_pair, load_sync_anchors_for_pair, SyncAnchor,
-    },
-    sync_planner::{self},
+    sync_db::{load_planner_summary, load_planner_summary_for_pair, load_sync_anchors_for_pair},
     sync_service::{
-        rebuild_durable_plan_for_pair, remote_snapshot_for_pair, run_sync_cycle_for_pair,
-        snapshot_for_pair, start_polling_worker,
+        remote_snapshot_for_pair, run_sync_cycle_for_pair, snapshot_for_pair, start_polling_worker,
     },
     sync_state::{
         active_watcher_pair_paths, get_status_lock, install_pair_watcher, mark_pair_dirty,
@@ -85,7 +82,6 @@ use super::{
         set_pair_status_from_handle, set_status_from_handle, stop_polling_worker,
         synthesize_status_from_pairs, PairSyncStatus, SyncState, SyncStatus,
     },
-    transfer_service::{local_fingerprint_for_path, remote_etag_for_path},
     watchers::{plan_watch_reconciliation, start_pair_watcher, WatchTarget, WatcherCallbackEvent},
 };
 
@@ -1547,179 +1543,6 @@ pub fn list_sync_locations(app: AppHandle) -> Result<Vec<SyncPair>, String> {
 // File-entry listing command
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-struct IndexedFileEntry {
-    kind: String,
-    size: u64,
-    storage_class: Option<String>,
-    modified_at: Option<String>,
-    etag: Option<String>,
-}
-
-async fn refresh_pair_state_after_remote_change<R: Runtime>(
-    app: &AppHandle<R>,
-    pair: &SyncPair,
-    credentials: &StoredCredentials,
-) -> Result<(), String> {
-    let remote_snapshot = list_remote_inventory_for_pair(pair, credentials).await?;
-    write_remote_index_snapshot_for_pair(app, &pair.id, &remote_snapshot)
-        .map_err(|error| format!("Failed to save refreshed remote inventory: {error}"))?;
-
-    let local_snapshot = match scan_local_folder(Path::new(&pair.local_folder)) {
-        Ok(snapshot) => {
-            let _ = write_local_index_snapshot_for_pair(app, &pair.id, &snapshot);
-            Some(snapshot)
-        }
-        Err(_) => snapshot_for_pair(app, pair).0,
-    };
-
-    if let Some(local_snapshot) = local_snapshot.as_ref() {
-        let _ = rebuild_durable_plan_for_pair(app, pair, local_snapshot, &remote_snapshot, true);
-    }
-
-    Ok(())
-}
-
-pub(crate) fn refresh_pair_state_after_local_change<R: Runtime>(
-    app: &AppHandle<R>,
-    pair: &SyncPair,
-) -> Result<(), String> {
-    let local_snapshot = scan_local_folder(Path::new(&pair.local_folder)).map_err(|error| {
-        format!(
-            "Failed to scan local folder '{}' for sync pair '{}': {error}",
-            pair.local_folder, pair.label
-        )
-    })?;
-
-    write_local_index_snapshot_for_pair(app, &pair.id, &local_snapshot)
-        .map_err(|error| format!("Failed to save refreshed local inventory: {error}"))?;
-
-    let remote_snapshot = read_remote_index_snapshot_for_pair(app, &pair.id)
-        .map_err(|error| format!("Failed to load remote inventory snapshot: {error}"))?
-        .unwrap_or_else(|| RemoteIndexSnapshot {
-            version: 1,
-            bucket: pair.bucket.clone(),
-            excluded_prefixes: Vec::new(),
-            summary: RemoteIndexSummary {
-                indexed_at: now_iso(),
-                object_count: 0,
-                total_bytes: 0,
-            },
-            entries: Vec::new(),
-        });
-
-    let _ = rebuild_durable_plan_for_pair(app, pair, &local_snapshot, &remote_snapshot, true);
-
-    Ok(())
-}
-
-pub(crate) fn build_file_entry_responses(
-    local_snapshot: Option<&LocalIndexSnapshot>,
-    remote_snapshot: Option<&RemoteIndexSnapshot>,
-    anchors: Option<&BTreeMap<String, SyncAnchor>>,
-) -> Vec<FileEntryResponse> {
-    let mut local_entries: BTreeMap<String, IndexedFileEntry> = BTreeMap::new();
-    if let Some(snapshot) = local_snapshot {
-        for entry in &snapshot.entries {
-            local_entries.insert(
-                entry.relative_path.clone(),
-                IndexedFileEntry {
-                    kind: entry.kind.clone(),
-                    size: entry.size,
-                    storage_class: None,
-                    modified_at: entry.modified_at.clone(),
-                    etag: None,
-                },
-            );
-        }
-    }
-
-    let mut remote_entries: BTreeMap<String, IndexedFileEntry> = BTreeMap::new();
-    if let Some(snapshot) = remote_snapshot {
-        for entry in &snapshot.entries {
-            remote_entries.insert(
-                entry.relative_path.clone(),
-                IndexedFileEntry {
-                    kind: entry.kind.clone(),
-                    size: entry.size,
-                    storage_class: entry.storage_class.clone(),
-                    modified_at: entry.last_modified_at.clone(),
-                    etag: entry.etag.clone(),
-                },
-            );
-        }
-    }
-
-    let all_paths: BTreeSet<&String> = local_entries.keys().chain(remote_entries.keys()).collect();
-
-    all_paths
-        .into_iter()
-        .map(|path| {
-            let in_local = local_entries.get(path);
-            let in_remote = remote_entries.get(path);
-            let anchor = anchors.and_then(|anchors| anchors.get(path.as_str()));
-            let remote_is_glacier = in_remote.is_some_and(|remote| {
-                super::remote_index::is_cold_storage_class(remote.storage_class.as_deref())
-            });
-
-            let status = match (in_local, in_remote) {
-                (Some(local), Some(remote)) if local.kind != remote.kind => {
-                    FileEntryStatus::Conflict
-                }
-                (Some(local), Some(_remote)) if local.kind == "directory" => {
-                    if remote_is_glacier {
-                        FileEntryStatus::Glacier
-                    } else {
-                        FileEntryStatus::Synced
-                    }
-                }
-                (Some(_local), Some(_remote)) => {
-                    if remote_is_glacier {
-                        FileEntryStatus::Glacier
-                    } else {
-                        let current_local_fingerprint = local_snapshot
-                            .and_then(|snapshot| local_fingerprint_for_path(snapshot, path));
-                        let current_remote_etag = remote_snapshot
-                            .and_then(|snapshot| remote_etag_for_path(snapshot, path));
-                        sync_planner::file_entry_status(
-                            anchor,
-                            current_local_fingerprint.as_deref(),
-                            current_remote_etag.as_deref(),
-                        )
-                    }
-                }
-                (Some(_), None) => FileEntryStatus::LocalOnly,
-                (None, Some(_remote)) if remote_is_glacier => FileEntryStatus::Glacier,
-                (None, Some(_)) => FileEntryStatus::RemoteOnly,
-                (None, None) => unreachable!(),
-            };
-
-            FileEntryResponse {
-                path: path.clone(),
-                kind: in_local
-                    .map(|entry| entry.kind.clone())
-                    .or_else(|| in_remote.map(|entry| entry.kind.clone()))
-                    .expect("listed entries must exist in either snapshot"),
-                status: status.as_str().into(),
-                has_local_copy: in_local.is_some(),
-                storage_class: in_remote.and_then(|entry| entry.storage_class.clone()),
-                bin_key: None,
-                local_kind: in_local.map(|entry| entry.kind.clone()),
-                remote_kind: in_remote.map(|entry| entry.kind.clone()),
-                local_size: in_local.map(|entry| entry.size),
-                remote_size: in_remote.map(|entry| entry.size),
-                local_modified_at: in_local.and_then(|entry| entry.modified_at.clone()),
-                remote_modified_at: in_remote.and_then(|entry| entry.modified_at.clone()),
-                remote_etag: in_remote.and_then(|entry| entry.etag.clone()),
-                deleted_at: None,
-                deleted_from: None,
-                retention_days: None,
-                expires_at: None,
-            }
-        })
-        .collect()
-}
-
 #[tauri::command]
 pub fn list_file_entries(
     app: AppHandle,
@@ -2373,6 +2196,7 @@ mod tests {
         versioned_bin_key,
     };
     use crate::storage::location_service::sync_pair_for_location;
+    use crate::storage::transfer_service::local_fingerprint_for_path;
 
     use crate::storage::bin_service::{
         collect_remote_bin_keys_for_request, collect_versioned_bin_entries_for_request,
@@ -2387,9 +2211,8 @@ mod tests {
     use super::{
         append_error_context, build_bin_entry_responses, build_file_entry_responses,
         build_versioned_bin_entry_responses, directory_relative_paths_from_key,
-        directory_relative_paths_from_relative_path, local_fingerprint_for_path,
-        next_polling_deadline, parse_versioned_bin_key,
-        provider_supports_remote_bin_lifecycle_reconciliation,
+        directory_relative_paths_from_relative_path, next_polling_deadline,
+        parse_versioned_bin_key, provider_supports_remote_bin_lifecycle_reconciliation,
         provider_supports_runtime_object_versioning, relative_path_from_key,
         remove_local_directory_subtree, resolve_local_download_path, s3_config_for_pair,
         should_defer_create_time_credential_test, should_poll_pair, watcher_eligible_pairs,
@@ -5338,8 +5161,8 @@ mod tauri_command_tests {
             ..SyncPair::default()
         };
 
-        let local_snapshot =
-            super::scan_local_folder(&local_root).expect("local scan should succeed");
+        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
+            .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 
@@ -5464,8 +5287,8 @@ mod tauri_command_tests {
             ..SyncPair::default()
         };
 
-        let local_before =
-            super::scan_local_folder(&local_root).expect("local scan should succeed");
+        let local_before = crate::storage::local_index::scan_local_folder(&local_root)
+            .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_before)
             .expect("local snapshot should persist");
 
@@ -5525,8 +5348,8 @@ mod tauri_command_tests {
         assert!(outcome.downloads_ran);
         assert_eq!(outcome.execution_error, None);
 
-        let local_after =
-            super::scan_local_folder(&local_root).expect("post-download scan should succeed");
+        let local_after = crate::storage::local_index::scan_local_folder(&local_root)
+            .expect("post-download scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_after)
             .expect("post-download local snapshot should persist");
 
@@ -5623,8 +5446,8 @@ mod tauri_command_tests {
             ..SyncPair::default()
         };
 
-        let local_snapshot =
-            super::scan_local_folder(&local_root).expect("local scan should succeed");
+        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
+            .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 
@@ -5718,7 +5541,8 @@ mod tauri_command_tests {
             ..SyncPair::default()
         };
 
-        let local_after = super::scan_local_folder(&local_root).expect("local scan should succeed");
+        let local_after = crate::storage::local_index::scan_local_folder(&local_root)
+            .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_after)
             .expect("local snapshot should persist");
 
@@ -5822,8 +5646,8 @@ mod tauri_command_tests {
         )
         .expect("profile should persist");
 
-        let local_snapshot =
-            super::scan_local_folder(&local_root).expect("local scan should succeed");
+        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
+            .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 
@@ -5894,8 +5718,8 @@ mod tauri_command_tests {
         )
         .expect("profile should persist");
 
-        let local_snapshot =
-            super::scan_local_folder(&local_root).expect("local scan should succeed");
+        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
+            .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 
@@ -6002,8 +5826,8 @@ mod tauri_command_tests {
         )
         .expect("profile should persist");
 
-        let local_before =
-            super::scan_local_folder(&local_root).expect("local scan should succeed");
+        let local_before = crate::storage::local_index::scan_local_folder(&local_root)
+            .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_before)
             .expect("local snapshot should persist");
 
@@ -6131,8 +5955,8 @@ mod tauri_command_tests {
         fs::create_dir_all(&local_root).expect("local root should exist");
         let pair = phase_one_pair("pair-delete-remote", &local_root);
 
-        let local_snapshot =
-            super::scan_local_folder(&local_root).expect("local scan should succeed");
+        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
+            .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 
@@ -6191,8 +6015,8 @@ mod tauri_command_tests {
         fs::write(local_root.join("docs/orphan.txt"), b"alpha").expect("local file should exist");
 
         let pair = phase_one_pair("pair-delete-local", &local_root);
-        let local_snapshot =
-            super::scan_local_folder(&local_root).expect("local scan should succeed");
+        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
+            .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 
@@ -6250,8 +6074,8 @@ mod tauri_command_tests {
         fs::write(local_root.join("old-name.txt"), b"contents").expect("local file should exist");
 
         let pair = phase_one_pair("pair-move-local", &local_root);
-        let local_snapshot =
-            super::scan_local_folder(&local_root).expect("local scan should succeed");
+        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
+            .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 
@@ -6312,8 +6136,8 @@ mod tauri_command_tests {
         fs::write(local_root.join("same.txt"), b"identical").expect("local file should exist");
 
         let pair = phase_one_pair("pair-anchor-only", &local_root);
-        let local_snapshot =
-            super::scan_local_folder(&local_root).expect("local scan should succeed");
+        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
+            .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 
@@ -6381,8 +6205,8 @@ mod tauri_command_tests {
         fs::create_dir_all(&local_root).expect("local root should exist");
         let pair = phase_one_pair("pair-mass-delete", &local_root);
 
-        let local_snapshot =
-            super::scan_local_folder(&local_root).expect("local scan should succeed");
+        let local_snapshot = crate::storage::local_index::scan_local_folder(&local_root)
+            .expect("local scan should succeed");
         write_local_index_snapshot_for_pair(&handle, &pair.id, &local_snapshot)
             .expect("local snapshot should persist");
 

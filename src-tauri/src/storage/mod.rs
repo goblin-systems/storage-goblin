@@ -15,6 +15,7 @@ pub mod conflict_service;
 pub mod credential_service;
 pub mod credentials_store;
 pub mod error;
+pub mod file_query_service;
 pub mod gcs_adapter;
 pub mod inventory_compare;
 pub mod lifecycle_service;

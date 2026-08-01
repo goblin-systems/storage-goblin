@@ -10,15 +10,16 @@ use std::path::Path;
 
 use tauri::{AppHandle, Runtime};
 
-use super::commands::{
-    build_file_entry_responses, refresh_pair_state_after_local_change, resolve_credentials_for_pair,
-};
+use super::commands::resolve_credentials_for_pair;
 use super::commands::{
     list_remote_inventory_for_pair, storage_config_for_pair, ConflictResolutionDetails,
     FileEntryResponse,
 };
 use super::compare_service::{finalize_conflict_compare_details, temp_compare_file_path};
 use super::credentials_store::StoredCredentials;
+use super::file_query_service::{
+    build_file_entry_responses, refresh_pair_state_after_local_change,
+};
 use super::local_index::{read_local_index_snapshot_for_pair, LocalIndexSnapshot};
 use super::location_service::sync_pair_for_location;
 use super::object_store;
