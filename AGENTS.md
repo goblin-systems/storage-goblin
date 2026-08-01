@@ -2,35 +2,38 @@
 
 ## Overhaul status
 
-- **Phase 0 complete. Phases 1 and 3 landed on `overhaul/phase-1`** (not merged, never pushed,
-  no CI run, no real-cloud validation). Read the "Status" sections of
-  `backlog/phase-1-sync-correctness.md` and `backlog/phase-3-backend-architecture.md` before
-  building on this.
-- **Backend layout:** `commands.rs` is now the Tauri command surface + shared response types +
-  profile/location CRUD (2,666 prod lines, down from 12,404). Concerns live in sibling modules:
-  `sync_service`, `queue_service`, `transfer_service`, `bin_service`, `conflict_service`,
-  `compare_service`, `credential_service`, `lifecycle_service`, `polling_service`, `platform`.
-  These are flat siblings, NOT the `engine/`+`services/`+`ipc/` layout the phase-3 doc targets —
-  services still take `AppHandle`, so there is no Tauri-free core yet.
-- **The legacy single-profile execution path is gone.** Only per-pair paths remain (the
-  `_for_pair` suffixes are still there). The flat-profile *read* path stays because it performs
-  the migration to sync locations.
-- Sync engine propagates deletes and renames, keeps both sides of a conflict, reconciles anchors.
-  Operations live in `sync_planner::Operation`; `decide_file_sync` has no catch-all arm — keep it
-  that way. Local deletes go to the OS trash (`trash` crate), never `remove_file`.
-- Mass-delete breaker: >25 deletes, or >50% of a 10+ anchored tree, become review items
-  (`MAX_AUTO_DELETE_COUNT` / `MAX_AUTO_DELETE_RATIO`).
-- Content fingerprints: uploads attach `LOCAL_FINGERPRINT_METADATA_KEY`; **GCS listings return
-  it, S3 listings do not** — first-sync merge works on GCS only. Never assume
-  `RemoteObjectEntry.fingerprint` is populated on S3.
-- **No cycle-overlap guard exists on the per-pair path.** Queue items move to `in_progress` in
-  SQLite before execution, which bounds the damage, but phase 2.2 owns the real fix.
-- `tauri-command-tests` compiles (`bun run test:rust:commands`) but its tests have never
-  executed — the Tauri mock runtime fails to load on this Windows machine. CI job is
-  non-blocking until one green run.
+- **Phases 0, 1, 3 landed on `overhaul/phase-1`** (unpushed, no CI run, phase 1 not
+  cloud-validated). Read the Status sections of `backlog/phase-1-sync-correctness.md` and
+  `backlog/phase-3-backend-architecture.md` before building on this. Phase 2 is next.
+- **Backend layout:** the 12,404-line `commands.rs` is now ~2,180 lines (Tauri command surface +
+  shared DTOs). Concerns live in sibling modules: `sync_service`, `queue_service`,
+  `transfer_service`, `bin_service`, `location_service`, `file_query_service`, `conflict_service`,
+  `compare_service`, `credential_service`, `lifecycle_service`, `polling_service`, `platform`,
+  and the Tauri-free `model`. These are flat siblings, NOT the `engine/services/ipc` directory
+  the doc once targeted — that layout is descoped in favour of an enforced invariant (below).
+- **Enforced invariants (tests, so they run in CI):** `architecture_test.rs` — the Tauri-free
+  core (model, sync_planner, error, inventory_compare, sanitizer, remote_bin) must not import the
+  app framework; `module_size_test.rs` — no module over 1,300 prod lines (commands 2,200,
+  credentials_store 1,850); `ts_bindings` drift test — `src/app/generated/domain.ts` matches the
+  Rust enums byte-for-byte. Don't break these; regenerate types with `bun run generate:types`.
+- **Typed domain:** `storage/model.rs` (EntryKind, SyncPhase, ConflictStrategy, FileEntryStatus,
+  QueueStatus) serde-renamed to the existing wire strings. `decide_file_sync` and the
+  aggregate-phase logic are exhaustive matches — keep them so.
+- **Async:** profile mutations are async end to end; `run_async_blocking` is test-only. Provider
+  adapters + object_store return `storage::error::SyncError`; `commands.rs` still uses
+  `Result<_, String>` via `From` escape hatches.
+- **DB migrations:** `sync_db` uses SQLite `user_version`; add a migration + bump `SCHEMA_VERSION`
+  for any schema/data change. All SQL lives in `sync_db` — keep it there.
+- **Sync engine (phase 1):** propagates deletes/renames, keeps both sides of a conflict,
+  reconciles anchors. Local deletes go to the OS trash (`trash` crate), never `remove_file`.
+  Mass-delete breaker: >25 deletes or >50% of a 10+ anchored tree become review items. Content
+  fingerprints: GCS listings return them, S3 listings do not — first-sync merge is GCS-only.
+- **Known gap:** the per-pair path has no cycle-overlap guard (phase 2.2 owns it); SQLite
+  in_progress marking bounds the damage.
+- `tauri-command-tests` compiles (`bun run test:rust:commands`) but its tests have never run —
+  the Tauri mock runtime won't load on this Windows machine. CI job is non-blocking until one
+  green run.
 - Sync-engine changes require simulator coverage (`src-tauri/src/storage/sim/`).
-- Errors: provider adapters + object_store return `storage::error::SyncError` (classified);
-  `commands.rs` still uses `Result<_, String>` via `From` escape hatches.
 - Package manager is bun only (`bun.lock`); never generate `package-lock.json`.
 
 ## Auto
