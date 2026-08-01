@@ -11,8 +11,7 @@ use std::path::Path;
 use tauri::{AppHandle, Runtime};
 
 use super::commands::{
-    build_file_entry_responses, refresh_pair_state_after_local_change,
-    resolve_credentials_for_pair, sync_pair_for_location,
+    build_file_entry_responses, refresh_pair_state_after_local_change, resolve_credentials_for_pair,
 };
 use super::commands::{
     list_remote_inventory_for_pair, storage_config_for_pair, ConflictResolutionDetails,
@@ -21,6 +20,7 @@ use super::commands::{
 use super::compare_service::{finalize_conflict_compare_details, temp_compare_file_path};
 use super::credentials_store::StoredCredentials;
 use super::local_index::{read_local_index_snapshot_for_pair, LocalIndexSnapshot};
+use super::location_service::sync_pair_for_location;
 use super::object_store;
 use super::platform::resolve_local_download_path;
 use super::profile_store::{read_profile_from_disk, SyncPair};
