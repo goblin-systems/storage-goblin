@@ -4,7 +4,7 @@
 //! anchor reconciliation change state without transferring. Everything here
 //! acts on one queue item at a time and records the resulting anchor.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use tauri::{AppHandle, Runtime};
@@ -26,6 +26,7 @@ use super::remote_index::{
     read_remote_index_snapshot_for_pair, write_remote_index_snapshot_for_pair, RemoteIndexSnapshot,
     RemoteObjectEntry,
 };
+use super::retry::with_retry;
 use super::s3_adapter;
 use super::sync_db::{
     delete_sync_anchor_for_pair, upsert_sync_anchor_for_pair, PlannedDownloadQueueItem,
@@ -133,19 +134,26 @@ pub(crate) async fn perform_planned_upload_for_pair(
 ) -> Result<RemoteIndexSnapshot, String> {
     match executor {
         PairTransferExecutor::Real(client) => {
-            object_store::upload_file(
-                client,
-                &pair.bucket,
-                key,
-                local_path,
-                Some(
-                    BTreeMap::from([(
-                        s3_adapter::LOCAL_FINGERPRINT_METADATA_KEY.to_string(),
-                        current_fingerprint.to_string(),
-                    )])
-                    .into_iter()
-                    .collect(),
-                ),
+            let metadata: HashMap<String, String> = BTreeMap::from([(
+                s3_adapter::LOCAL_FINGERPRINT_METADATA_KEY.to_string(),
+                current_fingerprint.to_string(),
+            )])
+            .into_iter()
+            .collect();
+
+            // A dropped connection mid-upload is worth another try; an auth
+            // failure is not. with_retry decides from the error's class.
+            with_retry(
+                || format!("upload '{key}'"),
+                || {
+                    object_store::upload_file(
+                        client,
+                        &pair.bucket,
+                        key,
+                        local_path,
+                        Some(metadata.clone()),
+                    )
+                },
             )
             .await?;
             list_remote_inventory_for_pair(pair, credentials).await
@@ -163,11 +171,12 @@ pub(crate) async fn perform_planned_download_for_pair(
     local_path: &Path,
 ) -> Result<(), String> {
     match executor {
-        PairTransferExecutor::Real(client) => {
-            object_store::download_file(client, &pair.bucket, key, local_path)
-                .await
-                .map_err(String::from)
-        }
+        PairTransferExecutor::Real(client) => with_retry(
+            || format!("download '{key}'"),
+            || object_store::download_file(client, &pair.bucket, key, local_path),
+        )
+        .await
+        .map_err(String::from),
         #[cfg(test)]
         PairTransferExecutor::Mock => mock_download_file(_path, local_path),
     }

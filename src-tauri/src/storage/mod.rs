@@ -33,6 +33,7 @@ pub mod provider;
 pub mod queue_service;
 pub mod remote_bin;
 pub mod remote_index;
+pub mod retry;
 pub mod s3_adapter;
 pub mod sanitizer;
 #[cfg(test)]

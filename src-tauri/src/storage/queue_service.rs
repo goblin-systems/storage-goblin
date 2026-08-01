@@ -32,6 +32,22 @@ use super::transfer_service::{
     PairTransferExecutor,
 };
 
+/// Collapse per-item failures into one reportable message.
+///
+/// The queue no longer stops at the first bad file, so the outcome has to say
+/// how many failed rather than surfacing one error as if it were the whole
+/// story. Each item's own error is already recorded on its queue row.
+fn summarize_item_failures(failures: &[String]) -> Option<String> {
+    match failures.len() {
+        0 => None,
+        1 => Some(failures[0].clone()),
+        count => Some(format!(
+            "{count} items failed; first: {}",
+            failures.first().map(String::as_str).unwrap_or_default()
+        )),
+    }
+}
+
 pub(crate) struct UploadExecutionOutcome {
     pub(crate) execution_error: Option<String>,
     pub(crate) uploads_ran: bool,
@@ -84,6 +100,9 @@ pub(crate) async fn execute_planned_upload_queue_for_pair<R: Runtime>(
     let executor = build_pair_transfer_executor(pair, credentials).await?;
     let uploads_ran = !queue_items.is_empty();
     let mut execution_error: Option<String> = None;
+    // Per-item failures no longer stop the queue (backlog phase 2.2): each is
+    // recorded against its own row and the remaining items still run.
+    let mut item_failures: Vec<String> = Vec::new();
 
     for (index, item) in queue_items.into_iter().enumerate() {
         let started_at = now_iso();
@@ -142,8 +161,8 @@ pub(crate) async fn execute_planned_upload_queue_for_pair<R: Runtime>(
                             pair.label, item.id, item.operation, item.path, finished_at, failure_message
                         )),
                     );
-                    execution_error = Some(failure_message);
-                    break;
+                    item_failures.push(failure_message);
+                    continue;
                 }
             }
             continue;
@@ -221,8 +240,8 @@ pub(crate) async fn execute_planned_upload_queue_for_pair<R: Runtime>(
                             pair.label, item.id, item.path, key, finished_at, failure_message
                         )),
                     );
-                    execution_error = Some(failure_message);
-                    break;
+                    item_failures.push(failure_message);
+                    continue;
                 }
             }
 
@@ -240,8 +259,8 @@ pub(crate) async fn execute_planned_upload_queue_for_pair<R: Runtime>(
                     &finished_at,
                     &error,
                 );
-                execution_error = Some(error);
-                break;
+                item_failures.push(error);
+                continue;
             }
         };
 
@@ -260,8 +279,8 @@ pub(crate) async fn execute_planned_upload_queue_for_pair<R: Runtime>(
                     &finished_at,
                     &error,
                 );
-                execution_error = Some(error);
-                break;
+                item_failures.push(error);
+                continue;
             }
             Err(error) => {
                 let error = format!(
@@ -276,8 +295,8 @@ pub(crate) async fn execute_planned_upload_queue_for_pair<R: Runtime>(
                     &finished_at,
                     &error,
                 );
-                execution_error = Some(error);
-                break;
+                item_failures.push(error);
+                continue;
             }
         };
 
@@ -296,8 +315,8 @@ pub(crate) async fn execute_planned_upload_queue_for_pair<R: Runtime>(
                     &finished_at,
                     &error,
                 );
-                execution_error = Some(error);
-                break;
+                item_failures.push(error);
+                continue;
             }
         }
 
@@ -312,8 +331,8 @@ pub(crate) async fn execute_planned_upload_queue_for_pair<R: Runtime>(
                     &finished_at,
                     &error,
                 );
-                execution_error = Some(error);
-                break;
+                item_failures.push(error);
+                continue;
             }
         };
 
@@ -329,8 +348,8 @@ pub(crate) async fn execute_planned_upload_queue_for_pair<R: Runtime>(
                     &finished_at,
                     &error,
                 );
-                execution_error = Some(error);
-                break;
+                item_failures.push(error);
+                continue;
             }
         };
         let current_remote_etag = remote_etag_for_path(&remote_snapshot, &item.path);
@@ -344,8 +363,8 @@ pub(crate) async fn execute_planned_upload_queue_for_pair<R: Runtime>(
             let finished_at = now_iso();
             let _ =
                 mark_upload_queue_item_failed_for_pair(app, pair, item.id, &finished_at, &error);
-            execution_error = Some(error);
-            break;
+            item_failures.push(error);
+            continue;
         }
 
         let key = s3_adapter::object_key(&item.path);
@@ -402,16 +421,16 @@ pub(crate) async fn execute_planned_upload_queue_for_pair<R: Runtime>(
                         &finished_at,
                         &error,
                     );
-                    execution_error = Some(error);
-                    break;
+                    item_failures.push(error);
+                    continue;
                 }
 
                 let finished_at = now_iso();
                 if let Err(error) =
                     mark_upload_queue_item_completed_for_pair(app, pair, item.id, &finished_at)
                 {
-                    execution_error = Some(error);
-                    break;
+                    item_failures.push(error);
+                    continue;
                 }
                 emit_success_activity(
                     app,
@@ -442,14 +461,15 @@ pub(crate) async fn execute_planned_upload_queue_for_pair<R: Runtime>(
                         pair.label, item.id, item.path, key, finished_at, failure_message
                     )),
                 );
-                execution_error = Some(failure_message);
-                break;
+                item_failures.push(failure_message);
+                continue;
             }
         }
     }
 
     Ok(UploadExecutionOutcome {
-        execution_error,
+        // An infrastructure abort wins; otherwise report the item failures.
+        execution_error: execution_error.or_else(|| summarize_item_failures(&item_failures)),
         uploads_ran,
     })
 }
@@ -472,6 +492,7 @@ pub(crate) async fn execute_planned_download_queue_for_pair<R: Runtime>(
     let executor = build_pair_transfer_executor(pair, credentials).await?;
     let downloads_ran = !queue_items.is_empty();
     let mut execution_error: Option<String> = None;
+    let mut item_failures: Vec<String> = Vec::new();
 
     for (index, item) in queue_items.into_iter().enumerate() {
         let started_at = now_iso();
@@ -531,8 +552,8 @@ pub(crate) async fn execute_planned_download_queue_for_pair<R: Runtime>(
                             pair.label, item.id, item.operation, item.path, finished_at, failure_message
                         )),
                     );
-                    execution_error = Some(failure_message);
-                    break;
+                    item_failures.push(failure_message);
+                    continue;
                 }
             }
             continue;
@@ -549,8 +570,8 @@ pub(crate) async fn execute_planned_download_queue_for_pair<R: Runtime>(
                     &finished_at,
                     &error,
                 );
-                execution_error = Some(error);
-                break;
+                item_failures.push(error);
+                continue;
             }
         };
 
@@ -566,8 +587,8 @@ pub(crate) async fn execute_planned_download_queue_for_pair<R: Runtime>(
                     &finished_at,
                     &error,
                 );
-                execution_error = Some(error);
-                break;
+                item_failures.push(error);
+                continue;
             }
         };
         let current_remote_etag = remote_etag_for_path(&remote_snapshot, &item.path);
@@ -579,8 +600,8 @@ pub(crate) async fn execute_planned_download_queue_for_pair<R: Runtime>(
             let finished_at = now_iso();
             let _ =
                 mark_download_queue_item_failed_for_pair(app, pair, item.id, &finished_at, &error);
-            execution_error = Some(error);
-            break;
+            item_failures.push(error);
+            continue;
         }
 
         let current_local_fingerprint = if local_path.exists() {
@@ -595,8 +616,8 @@ pub(crate) async fn execute_planned_download_queue_for_pair<R: Runtime>(
                         &finished_at,
                         &error,
                     );
-                    execution_error = Some(error);
-                    break;
+                    item_failures.push(error);
+                    continue;
                 }
             }
         } else {
@@ -613,8 +634,8 @@ pub(crate) async fn execute_planned_download_queue_for_pair<R: Runtime>(
             let finished_at = now_iso();
             let _ =
                 mark_download_queue_item_failed_for_pair(app, pair, item.id, &finished_at, &error);
-            execution_error = Some(error);
-            break;
+            item_failures.push(error);
+            continue;
         }
 
         let key = s3_adapter::object_key(&item.path);
@@ -650,8 +671,8 @@ pub(crate) async fn execute_planned_download_queue_for_pair<R: Runtime>(
                     &finished_at,
                     &error_msg,
                 );
-                execution_error = Some(error_msg);
-                break;
+                item_failures.push(error_msg);
+                continue;
             }
         }
 
@@ -684,16 +705,16 @@ pub(crate) async fn execute_planned_download_queue_for_pair<R: Runtime>(
                         &finished_at,
                         &error,
                     );
-                    execution_error = Some(error);
-                    break;
+                    item_failures.push(error);
+                    continue;
                 }
 
                 let finished_at = now_iso();
                 if let Err(error) =
                     mark_download_queue_item_completed_for_pair(app, pair, item.id, &finished_at)
                 {
-                    execution_error = Some(error);
-                    break;
+                    item_failures.push(error);
+                    continue;
                 }
                 emit_success_activity(
                     app,
@@ -724,14 +745,50 @@ pub(crate) async fn execute_planned_download_queue_for_pair<R: Runtime>(
                         pair.label, item.id, item.path, key, finished_at, failure_message
                     )),
                 );
-                execution_error = Some(failure_message);
-                break;
+                item_failures.push(failure_message);
+                continue;
             }
         }
     }
 
     Ok(DownloadExecutionOutcome {
-        execution_error,
+        execution_error: execution_error.or_else(|| summarize_item_failures(&item_failures)),
         downloads_ran,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summarize_item_failures;
+
+    #[test]
+    fn a_clean_queue_reports_no_error() {
+        assert_eq!(summarize_item_failures(&[]), None);
+    }
+
+    #[test]
+    fn a_single_failure_is_reported_verbatim() {
+        assert_eq!(
+            summarize_item_failures(&["upload failed for 'a.txt': denied".to_string()]),
+            Some("upload failed for 'a.txt': denied".to_string())
+        );
+    }
+
+    #[test]
+    fn many_failures_report_a_count_rather_than_pretending_one_is_the_story() {
+        // The queue now drains past failures, so the outcome must convey how
+        // many there were — reporting only the first would understate it.
+        let summary = summarize_item_failures(&[
+            "upload failed for 'a.txt': denied".to_string(),
+            "upload failed for 'b.txt': denied".to_string(),
+            "upload failed for 'c.txt': denied".to_string(),
+        ])
+        .expect("failures should summarize");
+
+        assert!(summary.starts_with("3 items failed"), "got: {summary}");
+        assert!(
+            summary.contains("a.txt"),
+            "should name the first: {summary}"
+        );
+    }
 }
