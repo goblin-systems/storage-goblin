@@ -35,6 +35,7 @@ pub mod remote_bin;
 pub mod remote_index;
 pub mod retry;
 pub mod s3_adapter;
+pub mod s3_upload;
 pub mod sanitizer;
 #[cfg(test)]
 pub(crate) mod sim;

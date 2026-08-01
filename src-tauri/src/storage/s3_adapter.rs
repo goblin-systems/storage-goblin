@@ -21,7 +21,10 @@ pub const LOCAL_FINGERPRINT_METADATA_KEY: &str = "storage-goblin-local-fingerpri
 
 /// Classify an AWS SDK error into the sync error taxonomy while keeping the
 /// human-readable message unchanged.
-fn classify_sdk_error<E, R>(error: &aws_sdk_s3::error::SdkError<E, R>, message: String) -> SyncError
+pub(crate) fn classify_sdk_error<E, R>(
+    error: &aws_sdk_s3::error::SdkError<E, R>,
+    message: String,
+) -> SyncError
 where
     E: ProvideErrorMetadata,
 {
@@ -320,6 +323,22 @@ pub async fn upload_file(
     path: &Path,
     metadata: Option<HashMap<String, String>>,
 ) -> Result<(), SyncError> {
+    let size = std::fs::metadata(path)
+        .map_err(|error| {
+            SyncError::storage(format!(
+                "failed to inspect upload source '{}': {error}",
+                path.display()
+            ))
+        })?
+        .len();
+
+    // Above the threshold, multipart is not an optimization but the only way:
+    // `put_object` refuses anything over 5 GB outright.
+    if size >= super::s3_upload::MULTIPART_THRESHOLD_BYTES {
+        return super::s3_upload::upload_file_multipart(client, bucket, key, path, size, metadata)
+            .await;
+    }
+
     let body = ByteStream::from_path(path).await.map_err(|error| {
         SyncError::storage(format!(
             "failed to read upload source '{}': {error}",
