@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -92,7 +93,19 @@ struct PollingWorkerState {
 
 struct DirtyPairState {
     last_marked_at: Instant,
+    /// Paths the watcher reported since the last cycle, so the scan can be
+    /// proportional to the change rather than to the tree (phase 2.3).
+    ///
+    /// Bounded: past the point where an incremental scan beats a full one,
+    /// remembering more paths is just memory spent to reach the same answer.
+    changed_paths: BTreeSet<PathBuf>,
+    /// Set when the change set outgrew the bound, forcing a full rescan.
+    changed_paths_overflowed: bool,
 }
+
+/// Cap on remembered changed paths per pair. Comfortably above the point where
+/// `local_index` gives up on an incremental scan anyway.
+const MAX_TRACKED_CHANGED_PATHS: usize = 512;
 
 /// How long a repeatedly failing pair is held off, and how many cycles in a row
 /// it has failed. See `pair_backoff` for why this exists.
@@ -375,22 +388,70 @@ pub(crate) fn pair_has_active_watcher(
         .map(|runtime| runtime.active_watchers.contains_key(pair_id))
 }
 
-pub(crate) fn mark_pair_dirty(state: &State<'_, SyncState>, pair_id: &str) -> Result<(), String> {
-    mark_pair_dirty_at_inner(state, pair_id, Instant::now())
+pub(crate) fn mark_pair_dirty(
+    state: &State<'_, SyncState>,
+    pair_id: &str,
+    changed_paths: &[PathBuf],
+) -> Result<(), String> {
+    mark_pair_dirty_at_inner(state, pair_id, changed_paths, Instant::now())
 }
 
-fn mark_pair_dirty_at_inner(state: &SyncState, pair_id: &str, now: Instant) -> Result<(), String> {
-    state
+fn mark_pair_dirty_at_inner(
+    state: &SyncState,
+    pair_id: &str,
+    changed_paths: &[PathBuf],
+    now: Instant,
+) -> Result<(), String> {
+    let mut dirty = state
         .dirty_pairs
         .lock()
-        .map_err(|_| "dirty pair lock poisoned".to_string())?
-        .insert(
-            pair_id.to_string(),
-            DirtyPairState {
-                last_marked_at: now,
-            },
-        );
+        .map_err(|_| "dirty pair lock poisoned".to_string())?;
+
+    let entry = dirty.entry(pair_id.to_string()).or_insert(DirtyPairState {
+        last_marked_at: now,
+        changed_paths: BTreeSet::new(),
+        changed_paths_overflowed: false,
+    });
+
+    entry.last_marked_at = now;
+    for path in changed_paths {
+        if entry.changed_paths.len() >= MAX_TRACKED_CHANGED_PATHS {
+            // Remember that we stopped recording, so the cycle knows its view
+            // is incomplete and rescans everything rather than missing files.
+            entry.changed_paths_overflowed = true;
+            break;
+        }
+        entry.changed_paths.insert(path.clone());
+    }
+
     Ok(())
+}
+
+/// The paths a pair's watcher reported since its last cycle.
+///
+/// `None` means "no usable path list — rescan everything": either the watcher
+/// never reported paths (a poll-triggered cycle) or so many arrived that the
+/// list was truncated.
+pub(crate) fn take_changed_paths(
+    state: &State<'_, SyncState>,
+    pair_id: &str,
+) -> Option<Vec<PathBuf>> {
+    take_changed_paths_inner(state, pair_id)
+}
+
+fn take_changed_paths_inner(state: &SyncState, pair_id: &str) -> Option<Vec<PathBuf>> {
+    let mut dirty = state.dirty_pairs.lock().ok()?;
+    let entry = dirty.get_mut(pair_id)?;
+
+    if entry.changed_paths_overflowed || entry.changed_paths.is_empty() {
+        return None;
+    }
+
+    Some(
+        std::mem::take(&mut entry.changed_paths)
+            .into_iter()
+            .collect(),
+    )
 }
 
 pub(crate) fn due_dirty_pairs(
@@ -1172,7 +1233,7 @@ mod tests {
         let state = SyncState::default();
         let marked_at = Instant::now();
 
-        mark_pair_dirty_at_inner(&state, "pair-a", marked_at).expect("pair should mark dirty");
+        mark_pair_dirty_at_inner(&state, "pair-a", &[], marked_at).expect("pair should mark dirty");
 
         assert!(due_dirty_pairs_inner(
             &state,
@@ -1191,7 +1252,7 @@ mod tests {
             vec!["pair-a".to_string()]
         );
 
-        mark_pair_dirty_at_inner(&state, "pair-a", marked_at).expect("pair should mark dirty");
+        mark_pair_dirty_at_inner(&state, "pair-a", &[], marked_at).expect("pair should mark dirty");
         clear_dirty_pair_inner(&state, "pair-a").expect("dirty pair should clear");
         assert!(
             due_dirty_pairs_inner(&state, marked_at + Duration::from_secs(1), Duration::ZERO)
@@ -1254,7 +1315,7 @@ mod tests {
         let state = SyncState::default();
         let now = Instant::now();
 
-        mark_pair_dirty_at_inner(&state, "pair-a", now).expect("pair should mark dirty");
+        mark_pair_dirty_at_inner(&state, "pair-a", &[], now).expect("pair should mark dirty");
         assert_eq!(
             next_dirty_pair_deadline_inner(&state, Duration::ZERO).expect("deadline should read"),
             Some(now),

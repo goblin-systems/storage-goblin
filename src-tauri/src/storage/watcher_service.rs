@@ -106,8 +106,8 @@ pub(crate) fn reconcile_pair_watchers(
             let state = app_handle.state::<SyncState>();
             let debug_state = app_handle.state::<ActivityDebugState>();
             match event {
-                WatcherCallbackEvent::LocalChange => {
-                    let _ = mark_pair_dirty(&state, &pair_id);
+                WatcherCallbackEvent::LocalChange(paths) => {
+                    let _ = mark_pair_dirty(&state, &pair_id, &paths);
                 }
                 WatcherCallbackEvent::Degraded(error) => {
                     let _ = remove_pair_watcher(&state, &pair_id);

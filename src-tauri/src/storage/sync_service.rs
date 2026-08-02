@@ -20,7 +20,7 @@ use super::commands::{
 };
 use super::coordinator::PairLease;
 use super::local_index::{
-    read_local_index_snapshot_for_pair, scan_local_folder_with_cache,
+    read_local_index_snapshot_for_pair, rescan_changed_paths, scan_local_folder_with_cache,
     write_local_index_snapshot_for_pair, LocalIndexSnapshot,
 };
 use super::model::SyncPhase;
@@ -44,8 +44,8 @@ use super::sync_state::{
     begin_polling_worker, clear_all_pair_watchers, clear_dirty_pair, clear_pair_backoff,
     clear_polling_worker, coordinator, due_dirty_pairs, next_dirty_pair_deadline,
     pair_backoff_gates, pair_has_active_watcher, pair_statuses_snapshot, pair_to_status,
-    record_pair_failure, set_pair_status_from_handle, set_status_from_handle, PairSyncStatus,
-    SyncState,
+    record_pair_failure, set_pair_status_from_handle, set_status_from_handle, take_changed_paths,
+    PairSyncStatus, SyncState,
 };
 use super::transfer::cleanup_orphaned_temp_files;
 use super::watcher_service::reconcile_pair_watchers;
@@ -136,6 +136,37 @@ pub(crate) fn rebuild_durable_plan_for_pair<R: Runtime>(
     }
 
     persist_sync_plan_for_pair(app, pair, &plan)
+}
+
+/// Scan the local tree for this cycle, incrementally when possible.
+///
+/// A watcher-triggered cycle knows which paths moved, so it can re-walk only
+/// those subtrees instead of the whole tree — that is the difference between a
+/// sync cycle costing what you changed and costing what you own.
+///
+/// Everything else falls back to a full scan: a poll-triggered cycle has no
+/// path list, and `rescan_changed_paths` declines whenever it cannot be certain
+/// the incremental view is complete. Falling back is always safe; guessing
+/// wrong would silently strand a file.
+fn scan_local_for_cycle(
+    pair: &SyncPair,
+    state: &State<'_, SyncState>,
+    trigger: PairSyncTrigger,
+    existing_local: Option<&LocalIndexSnapshot>,
+) -> Result<LocalIndexSnapshot, String> {
+    let root = Path::new(&pair.local_folder);
+
+    if trigger == PairSyncTrigger::LocalDirty {
+        if let (Some(previous), Some(changed)) =
+            (existing_local, take_changed_paths(state, &pair.id))
+        {
+            if let Some(result) = rescan_changed_paths(root, previous, &changed) {
+                return result;
+            }
+        }
+    }
+
+    scan_local_folder_with_cache(root, existing_local)
 }
 
 /// Run one sync cycle for `pair`.
@@ -265,7 +296,7 @@ pub(crate) async fn run_sync_cycle_for_pair(
         watcher_active,
         LOCAL_SNAPSHOT_STALE_TTL,
     ) {
-        match scan_local_folder_with_cache(Path::new(&pair.local_folder), existing_local.as_ref()) {
+        match scan_local_for_cycle(pair, &state, trigger, existing_local.as_ref()) {
             Ok(snapshot) => {
                 let _ = write_local_index_snapshot_for_pair(app, &pair.id, &snapshot);
                 snapshot

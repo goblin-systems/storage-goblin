@@ -30,7 +30,9 @@ impl ActivePairWatcher {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WatcherCallbackEvent {
-    LocalChange,
+    /// Paths that changed. `notify` already knows them; discarding them was
+    /// what forced every change to cost a full tree walk (backlog phase 2.3).
+    LocalChange(Vec<PathBuf>),
     Degraded(String),
 }
 
@@ -47,7 +49,7 @@ where
     let mut watcher =
         notify::recommended_watcher(move |result: notify::Result<Event>| match result {
             Ok(event) if event_should_mark_dirty(&event) => {
-                callback(WatcherCallbackEvent::LocalChange);
+                callback(WatcherCallbackEvent::LocalChange(event.paths.clone()));
             }
             Ok(_) => {}
             Err(error) => callback(WatcherCallbackEvent::Degraded(format!(
