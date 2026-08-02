@@ -11,13 +11,16 @@
 //!   the real S3/GCS adapters (async at that point). For now it is sync and
 //!   test-only, consumed by the simulator.
 //! - The simulator's executor applies planned operations with per-item error
-//!   isolation. That is deliberately *better* than the current production
-//!   executor (which aborts the queue on first failure — phase 2.2); the
-//!   simulator documents planner semantics, not executor quirks.
+//!   isolation, which production now does too (phase 2.2). It remains
+//!   sequential where production stages and parallelizes transfers, because
+//!   the simulator documents planner semantics rather than scheduling.
+//! - `chaos.rs` covers the opposite of the happy path: 5xx storms, throttling,
+//!   permanently failing objects, and randomized churn (phase 2.4).
 //! - Any change to sync behavior must come with coverage here (CONTRIBUTING).
 
 pub(crate) mod memory_store;
 pub(crate) mod object_storage;
 pub(crate) mod simulator;
 
+mod chaos;
 mod scenarios;
