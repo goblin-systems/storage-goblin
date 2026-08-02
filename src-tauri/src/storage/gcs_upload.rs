@@ -111,7 +111,7 @@ impl GcsClient {
                 .send()
                 .await
                 .map_err(|error| {
-                    SyncError::transient(format!(
+                    SyncError::from_reqwest(&error, format!(
                         "failed to upload '{key}' chunk at offset {offset} to GCS bucket '{bucket}': {error}"
                     ))
                 })?;
@@ -172,9 +172,12 @@ impl GcsClient {
             .send()
             .await
             .map_err(|error| {
-                SyncError::transient(format!(
+                SyncError::from_reqwest(
+                    &error,
+                    format!(
                     "failed to start resumable upload of '{key}' to GCS bucket '{bucket}': {error}"
-                ))
+                ),
+                )
             })?;
 
         if !response.status().is_success() {
@@ -234,9 +237,10 @@ impl GcsClient {
             .send()
             .await
             .map_err(|error| {
-                SyncError::transient(format!(
-                    "failed to upload '{key}' to GCS bucket '{bucket}': {error}"
-                ))
+                SyncError::from_reqwest(
+                    &error,
+                    format!("failed to upload '{key}' to GCS bucket '{bucket}': {error}"),
+                )
             })?;
 
         if response.status().is_success() {

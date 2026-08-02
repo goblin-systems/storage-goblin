@@ -28,6 +28,93 @@ use super::error::SyncError;
 /// synced file: the scanner skips this extension, and the sweeper removes it.
 pub(crate) const TEMP_DOWNLOAD_EXTENSION: &str = "goblin-tmp";
 
+/// Turn a local write failure into something the user can act on
+/// (backlog phase 2.4).
+///
+/// "failed to write: os error 112" tells a user nothing. Disk-full and
+/// permission-denied are the two local failures that actually happen, they have
+/// completely different remedies, and both are recoverable once named — so name
+/// them. The raw error is kept for the log.
+pub(crate) fn local_write_failure_message(
+    path: &Path,
+    error: &std::io::Error,
+    bytes_written: u64,
+) -> String {
+    use std::io::ErrorKind;
+
+    let explanation = match error.kind() {
+        ErrorKind::StorageFull => Some("the disk is full"),
+        ErrorKind::PermissionDenied => Some("permission was denied"),
+        ErrorKind::ReadOnlyFilesystem => Some("the filesystem is read-only"),
+        // Windows reports "not enough space" as a raw OS error rather than a
+        // mapped ErrorKind, so match the code the platform actually returns.
+        _ if is_disk_full_os_error(error) => Some("the disk is full"),
+        _ => None,
+    };
+
+    match explanation {
+        Some(reason) => format!(
+            "Could not save '{}' because {reason} (after {bytes_written} bytes). \
+             The partially downloaded file was discarded, so nothing was overwritten. \
+             Underlying error: {error}",
+            path.display()
+        ),
+        None => format!(
+            "failed to write downloaded data to '{}': {error}",
+            path.display()
+        ),
+    }
+}
+
+/// Windows: ERROR_DISK_FULL (112) and ERROR_HANDLE_DISK_FULL (39).
+fn is_disk_full_os_error(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(112) | Some(39))
+}
+
+/// Refuse a download that obviously cannot fit (backlog phase 2.4).
+///
+/// Cheap insurance: finding out at byte zero costs one syscall, while finding
+/// out at the last byte costs the whole transfer and leaves the user with a
+/// cryptic write error. This is advisory only — a `None` answer (unsupported
+/// platform, unreadable filesystem) never blocks the transfer, and a race
+/// against another process filling the disk is still caught by `write_chunk`.
+pub(crate) fn insufficient_space(
+    available_bytes: Option<u64>,
+    required_bytes: u64,
+) -> Option<String> {
+    // Leave headroom: filling a disk to the last byte breaks other software on
+    // the machine, and journalled filesystems need slack to stay consistent.
+    const HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
+
+    let available = available_bytes?;
+    let needed = required_bytes.saturating_add(HEADROOM_BYTES);
+    if available >= needed {
+        return None;
+    }
+
+    Some(format!(
+        "Not enough free disk space: {} needed (plus {} headroom), {} available.",
+        format_bytes(required_bytes),
+        format_bytes(HEADROOM_BYTES),
+        format_bytes(available)
+    ))
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 /// What a completed download turned out to contain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DownloadOutcome {
@@ -86,9 +173,10 @@ impl DownloadWriter {
             .ok_or_else(|| SyncError::internal("download writer already finished"))?;
 
         file.write_all(chunk).map_err(|error| {
-            SyncError::storage(format!(
-                "failed to write downloaded data to '{}': {error}",
-                self.temp_path.display()
+            SyncError::storage(local_write_failure_message(
+                &self.temp_path,
+                &error,
+                self.bytes_written,
             ))
         })?;
 
@@ -238,6 +326,88 @@ pub(crate) fn transfer_timeout(size_bytes: u64) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    use super::{insufficient_space, local_write_failure_message};
+
+    #[test]
+    fn a_disk_full_write_says_so_and_says_nothing_was_overwritten() {
+        let error = std::io::Error::from(std::io::ErrorKind::StorageFull);
+        let message = local_write_failure_message(
+            std::path::Path::new("C:/x/y.bin.goblin-tmp"),
+            &error,
+            4096,
+        );
+
+        assert!(message.contains("the disk is full"), "got: {message}");
+        // The reassurance matters: the user's existing file is intact, and
+        // saying so is the difference between a scare and an inconvenience.
+        assert!(
+            message.contains("nothing was overwritten"),
+            "got: {message}"
+        );
+        assert!(message.contains("4096 bytes"), "got: {message}");
+    }
+
+    #[test]
+    fn a_permission_error_names_the_cause_rather_than_the_errno() {
+        let error = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let message = local_write_failure_message(std::path::Path::new("/x/y"), &error, 0);
+        assert!(message.contains("permission was denied"), "got: {message}");
+    }
+
+    #[test]
+    fn windows_reports_disk_full_as_a_raw_os_error() {
+        // ERROR_DISK_FULL does not map to ErrorKind::StorageFull on Windows,
+        // so without the raw-code check the user would see "os error 112".
+        let error = std::io::Error::from_raw_os_error(112);
+        let message = local_write_failure_message(std::path::Path::new("/x/y"), &error, 10);
+        assert!(message.contains("the disk is full"), "got: {message}");
+    }
+
+    #[test]
+    fn an_unrecognized_write_error_still_reports_the_underlying_cause() {
+        let error = std::io::Error::from(std::io::ErrorKind::InvalidInput);
+        let message = local_write_failure_message(std::path::Path::new("/x/y"), &error, 0);
+        assert!(
+            message.contains("failed to write downloaded data"),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_download_that_cannot_fit_is_refused_before_it_starts() {
+        let refusal = insufficient_space(Some(100 * 1024 * 1024), 200 * 1024 * 1024)
+            .expect("200 MiB cannot fit in 100 MiB");
+        assert!(
+            refusal.contains("Not enough free disk space"),
+            "got: {refusal}"
+        );
+        assert!(refusal.contains("200.0 MiB"), "got: {refusal}");
+    }
+
+    #[test]
+    fn a_download_that_fits_with_headroom_is_allowed() {
+        assert!(insufficient_space(Some(10 * 1024 * 1024 * 1024), 1024 * 1024 * 1024).is_none());
+    }
+
+    #[test]
+    fn a_download_that_would_fill_the_last_byte_is_refused() {
+        // Filling a disk completely breaks other software on the machine and
+        // leaves journalled filesystems no slack, so the headroom is required
+        // rather than advisory.
+        let exactly_enough = 500 * 1024 * 1024;
+        assert!(
+            insufficient_space(Some(exactly_enough), exactly_enough).is_some(),
+            "a transfer that consumes every free byte must be refused"
+        );
+    }
+
+    #[test]
+    fn unknown_free_space_never_blocks_a_transfer() {
+        // A preflight that cannot read the filesystem must not be the reason a
+        // download is refused; write_chunk still reports a real disk-full.
+        assert!(insufficient_space(None, u64::MAX).is_none());
+    }
+
     use super::{
         cleanup_orphaned_temp_files, is_temp_download_path, DownloadWriter, TEMP_DOWNLOAD_EXTENSION,
     };

@@ -3,6 +3,8 @@
 //! Each item is marked in-progress in SQLite before execution so a second
 //! cycle cannot pick it up, then completed or failed with its error recorded.
 
+use std::path::Path;
+
 use futures_util::stream::{self, StreamExt};
 use tauri::{AppHandle, Manager, Runtime};
 
@@ -15,7 +17,9 @@ use super::coordinator::SyncCoordinator;
 use super::credentials_store::StoredCredentials;
 use super::now_iso;
 use super::object_store;
-use super::platform::{resolve_local_download_path, resolve_local_upload_path};
+use super::platform::{
+    available_disk_space, resolve_local_download_path, resolve_local_upload_path,
+};
 use super::profile_store::SyncPair;
 use super::queue_schedule::{plan_stages, Schedulable, StageMode};
 use super::remote_index::read_remote_index_snapshot_for_pair;
@@ -28,7 +32,7 @@ use super::sync_db::{
     recover_interrupted_queue_items_for_pair, PlannedDownloadQueueItem, PlannedUploadQueueItem,
 };
 use super::sync_state::{coordinator, SyncState};
-use super::transfer::transfer_timeout;
+use super::transfer::{insufficient_space, transfer_timeout};
 use super::transfer_service::{
     build_pair_transfer_executor, download_stale_plan_error, perform_planned_download_for_pair,
     perform_planned_upload_for_pair, perform_structural_download_operation_for_pair,
@@ -772,6 +776,27 @@ async fn run_download_item<R: Runtime>(
             );
             return Err(ItemError::Item(error_msg));
         }
+    }
+
+    // Refuse a download that obviously cannot fit, before moving a byte.
+    // Discovering this at the last byte costs the whole transfer and reports a
+    // cryptic OS error; discovering it now costs one syscall (phase 2.4).
+    if let Some(error) = insufficient_space(
+        available_disk_space(Path::new(&pair.local_folder)),
+        item.remote_size.unwrap_or_default(),
+    ) {
+        let finished_at = now_iso();
+        let _ = mark_download_queue_item_failed_for_pair(app, pair, item.id, &finished_at, &error);
+        emit_error_activity(
+            app,
+            debug_state,
+            "Not enough disk space for a planned download.",
+            Some(format!(
+                "pair='{}' queue_item_id={} path='{}' {error}",
+                pair.label, item.id, item.path
+            )),
+        );
+        return Err(ItemError::Item(error));
     }
 
     let download_budget = transfer_timeout(item.remote_size.unwrap_or_default());

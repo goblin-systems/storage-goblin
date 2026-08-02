@@ -102,7 +102,9 @@ pub(crate) async fn upload_local_file_for_pair_and_refresh_remote(
         ),
     )
     .await?;
-    list_remote_inventory_for_pair(pair, credentials).await
+    list_remote_inventory_for_pair(pair, credentials)
+        .await
+        .map_err(String::from)
 }
 
 pub(crate) async fn remote_snapshot_for_manual_resolution<R: Runtime>(
@@ -120,7 +122,9 @@ pub(crate) async fn remote_snapshot_for_manual_resolution<R: Runtime>(
         });
     }
 
-    list_remote_inventory_for_pair(pair, credentials).await
+    list_remote_inventory_for_pair(pair, credentials)
+        .await
+        .map_err(String::from)
 }
 
 pub(crate) async fn prepare_conflict_comparison_impl<R: Runtime>(

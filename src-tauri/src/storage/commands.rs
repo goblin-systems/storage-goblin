@@ -7,6 +7,7 @@ use std::{
 
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
+use super::error::SyncError;
 use super::{
     activity::{emit_activity, ActivityDebugState, ActivityLevel},
     bin_service::{
@@ -1319,10 +1320,16 @@ pub(crate) fn refresh_aggregate_status<R: Runtime>(
     set_aggregate_status_from_pairs(app, pair_statuses)
 }
 
+/// List the remote side for a pair.
+///
+/// Returns the typed [`SyncError`] rather than a bare string so the caller can
+/// tell "we could not reach the network" from "the provider refused us" —
+/// which is what lets an offline pair say so instead of showing a transport
+/// error the user cannot act on.
 pub(crate) async fn list_remote_inventory_for_pair(
     pair: &SyncPair,
     credentials: &StoredCredentials,
-) -> Result<RemoteIndexSnapshot, String> {
+) -> Result<RemoteIndexSnapshot, SyncError> {
     let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
     let mut entries = BTreeMap::new();
     let mut object_count = 0_u64;
@@ -1332,10 +1339,12 @@ pub(crate) async fn list_remote_inventory_for_pair(
     let objects = object_store::list_objects(&client, &pair.bucket, None)
         .await
         .map_err(|error| {
-            format!(
+            // Keep the classification; only the wording is ours.
+            let message = format!(
                 "failed to list remote inventory for pair '{}': {error}",
                 pair.label
-            )
+            );
+            SyncError::new(error.kind, message)
         })?;
 
     for object in objects {
@@ -2460,6 +2469,7 @@ mod tests {
             phase: phase.into(),
             last_sync_at: last_sync_at.map(str::to_string),
             enabled: true,
+            failure_kind: None,
             remote_polling_enabled: true,
             poll_interval_seconds: 60,
             ..PairSyncStatus::default()
@@ -4405,6 +4415,7 @@ mod tauri_command_tests {
             credential_profile_id: None,
             object_versioning_enabled: false,
             enabled: false,
+            failure_kind: None,
             remote_polling_enabled: false,
             poll_interval_seconds: 60,
             conflict_strategy: "preserve-both".into(),
@@ -4430,6 +4441,7 @@ mod tauri_command_tests {
             bucket: bucket.into(),
             credential_profile_id: Some(credential_id.into()),
             enabled: true,
+            failure_kind: None,
             remote_polling_enabled: false,
             poll_interval_seconds: 60,
             conflict_strategy: "preserve-both".into(),
@@ -4647,6 +4659,7 @@ mod tauri_command_tests {
                 credential_profile_id: None,
                 object_versioning_enabled: false,
                 enabled: false,
+                failure_kind: None,
                 remote_polling_enabled: true,
                 poll_interval_seconds: 120,
                 conflict_strategy: "prefer-local".into(),
@@ -4708,6 +4721,7 @@ mod tauri_command_tests {
                 credential_profile_id: None,
                 object_versioning_enabled: false,
                 enabled: false,
+                failure_kind: None,
                 remote_polling_enabled: true,
                 poll_interval_seconds: 120,
                 conflict_strategy: "ignored-by-normalization".into(),
@@ -4989,6 +5003,7 @@ mod tauri_command_tests {
                     local_folder: "C:/docs".into(),
                     bucket: "bucket-docs".into(),
                     enabled: true,
+                    failure_kind: None,
                     remote_polling_enabled: true,
                     poll_interval_seconds: 30,
                     ..SyncPair::default()
@@ -4999,6 +5014,7 @@ mod tauri_command_tests {
                     local_folder: "C:/photos".into(),
                     bucket: "bucket-photos".into(),
                     enabled: true,
+                    failure_kind: None,
                     remote_polling_enabled: false,
                     poll_interval_seconds: 120,
                     ..SyncPair::default()

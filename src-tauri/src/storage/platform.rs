@@ -274,3 +274,55 @@ pub(crate) fn normalize_directory_delete_path(path: &str) -> Result<String, Stri
     resolve_local_download_path(".", &normalized)?;
     Ok(normalized)
 }
+
+/// Bytes available to this user on the filesystem holding `path`.
+///
+/// `None` means "unknown", which callers must treat as "do not block" — a
+/// preflight check that cannot read the filesystem must never be the reason a
+/// download is refused.
+pub(crate) fn available_disk_space(path: &Path) -> Option<u64> {
+    available_disk_space_impl(path)
+}
+
+#[cfg(windows)]
+fn available_disk_space_impl(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    // GetDiskFreeSpaceExW needs a directory that exists; walk up until one does
+    // (the destination's parents may not have been created yet).
+    let mut probe = path;
+    loop {
+        if probe.is_dir() {
+            break;
+        }
+        probe = probe.parent()?;
+    }
+
+    let wide: Vec<u16> = probe
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut available: u64 = 0;
+    // The first out-param is the space available *to the calling user*, which
+    // is the number that matters under a disk quota.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+
+    (ok != 0).then_some(available)
+}
+
+#[cfg(not(windows))]
+fn available_disk_space_impl(_path: &Path) -> Option<u64> {
+    // statvfs is not wired up yet; unknown is the safe answer and simply skips
+    // the preflight. `write_chunk` still reports a full disk clearly.
+    None
+}

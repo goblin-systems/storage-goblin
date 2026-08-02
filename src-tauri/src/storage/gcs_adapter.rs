@@ -469,7 +469,10 @@ impl GcsClient {
             .send()
             .await
             .map_err(|error| {
-                SyncError::transient(format!("failed to create GCS bucket '{bucket}': {error}"))
+                SyncError::from_reqwest(
+                    &error,
+                    format!("failed to create GCS bucket '{bucket}': {error}"),
+                )
             })?;
 
         if response.status().is_success() {
@@ -574,9 +577,10 @@ impl GcsClient {
 
         loop {
             let chunk = response.chunk().await.map_err(|error| {
-                SyncError::transient(format!(
-                    "failed to read GCS download body for '{key}': {error}"
-                ))
+                SyncError::from_reqwest(
+                    &error,
+                    format!("failed to read GCS download body for '{key}': {error}"),
+                )
             })?;
             match chunk {
                 Some(bytes) => writer.write_chunk(&bytes)?,
@@ -600,9 +604,10 @@ impl GcsClient {
             .send()
             .await
             .map_err(|error| {
-                SyncError::transient(format!(
-                    "failed to delete '{key}' from GCS bucket '{bucket}': {error}"
-                ))
+                SyncError::from_reqwest(
+                    &error,
+                    format!("failed to delete '{key}' from GCS bucket '{bucket}': {error}"),
+                )
             })?;
 
         if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
@@ -661,7 +666,7 @@ impl GcsClient {
                     .send()
                     .await
                     .map_err(|error| {
-                        SyncError::transient(format!("failed to {action}: {error}"))
+                        SyncError::from_reqwest(&error, format!("failed to {action}: {error}"))
                     })?;
 
                 parse_json_response(response, &action).await
@@ -678,7 +683,9 @@ impl GcsClient {
             .bearer_auth(&self.token)
             .send()
             .await
-            .map_err(|error| SyncError::transient(format!("failed GCS request '{url}': {error}")))
+            .map_err(|error| {
+                SyncError::from_reqwest(&error, format!("failed GCS request '{url}': {error}"))
+            })
     }
 
     pub async fn bucket_versioning_enabled(&self, bucket: &str) -> Result<bool, SyncError> {
@@ -709,9 +716,10 @@ impl GcsClient {
             .send()
             .await
             .map_err(|error| {
-                SyncError::transient(format!(
-                    "failed to set versioning on GCS bucket '{bucket}': {error}"
-                ))
+                SyncError::from_reqwest(
+                    &error,
+                    format!("failed to set versioning on GCS bucket '{bucket}': {error}"),
+                )
             })?;
 
         if response.status().is_success() {
@@ -778,9 +786,12 @@ impl GcsClient {
             .send()
             .await
             .map_err(|error| {
-                SyncError::transient(format!(
+                SyncError::from_reqwest(
+                    &error,
+                    format!(
                     "failed to update lifecycle configuration for GCS bucket '{bucket}': {error}"
-                ))
+                ),
+                )
             })?;
 
         if response.status().is_success() {
@@ -885,7 +896,7 @@ impl GcsClient {
             .send()
             .await
             .map_err(|error| {
-                SyncError::transient(format!("failed to restore '{key}' generation {generation} in GCS bucket '{bucket}': {error}"))
+                SyncError::from_reqwest(&error, format!("failed to restore '{key}' generation {generation} in GCS bucket '{bucket}': {error}"))
             })?;
 
         if response.status().is_success() {
@@ -927,7 +938,7 @@ impl GcsClient {
                     .send()
                     .await
                     .map_err(|error| {
-                        SyncError::transient(format!("failed to {action}: {error}"))
+                        SyncError::from_reqwest(&error, format!("failed to {action}: {error}"))
                     })?;
 
                 parse_json_response(response, &action).await
@@ -954,7 +965,7 @@ impl GcsClient {
             .send()
             .await
             .map_err(|error| {
-                SyncError::transient(format!("failed to delete '{key}' generation {generation} from GCS bucket '{bucket}': {error}"))
+                SyncError::from_reqwest(&error, format!("failed to delete '{key}' generation {generation} from GCS bucket '{bucket}': {error}"))
             })?;
 
         if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
@@ -1136,7 +1147,10 @@ async fn fetch_access_token(
         .send()
         .await
         .map_err(|error| {
-            SyncError::transient(format!("failed to request GCS access token: {error}"))
+            SyncError::from_reqwest(
+                &error,
+                format!("failed to request GCS access token: {error}"),
+            )
         })?;
 
     let token: GcsTokenResponse = parse_json_response(response, "request GCS access token").await?;

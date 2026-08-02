@@ -10,6 +10,7 @@ use tauri::{Manager, State};
 
 use super::{
     coordinator::SyncCoordinator,
+    error::SyncErrorKind,
     inventory_compare::{compare_snapshots, InventoryComparisonSummary},
     local_index::LocalIndexSnapshot,
     model::{aggregate_phase, SyncPhase},
@@ -718,6 +719,14 @@ pub struct PairSyncStatus {
     pub current_bucket: Option<String>,
     pub current_prefix: Option<String>,
     pub enabled: bool,
+    /// Why the last cycle failed, when it did.
+    ///
+    /// `last_error` carries the message; this carries the *class*, so callers
+    /// can distinguish "we cannot reach the network" from "the provider
+    /// refused us" without parsing prose. Skipped on the wire: the frontend
+    /// contract is unchanged until phase 5 presents it.
+    #[serde(skip)]
+    pub failure_kind: Option<SyncErrorKind>,
     pub remote_polling_enabled: bool,
     pub poll_interval_seconds: u32,
     pub pending_operations: u64,
@@ -745,6 +754,7 @@ impl Default for PairSyncStatus {
             current_bucket: None,
             current_prefix: None,
             enabled: true,
+            failure_kind: None,
             remote_polling_enabled: true,
             poll_interval_seconds: 60,
             pending_operations: 0,
@@ -808,6 +818,7 @@ pub(crate) fn pair_to_status(
         current_bucket: optional_text(&pair.bucket),
         current_prefix: None,
         enabled: pair.enabled,
+        failure_kind: None,
         remote_polling_enabled: pair.remote_polling_enabled,
         poll_interval_seconds: pair.poll_interval_seconds,
         pending_operations: plan_summary.pending_operation_count,
@@ -1654,6 +1665,7 @@ mod tests {
             current_bucket: Some("my-bucket".into()),
             current_prefix: None,
             enabled: true,
+            failure_kind: None,
             remote_polling_enabled: true,
             poll_interval_seconds: 30,
             pending_operations: 5,

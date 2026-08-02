@@ -367,20 +367,40 @@ pub(crate) async fn run_sync_cycle_for_pair(
                 existing_remote.as_ref(),
                 plan_summary,
             );
-            status.phase = "error".into();
-            status.last_error = Some(concise_sync_issue("Remote inventory refresh"));
-            emit_error_activity(
-                app,
-                debug_state,
-                "Pair sync cycle finished with an issue.",
-                Some(pair_sync_cycle_issue_details(
-                    pair,
-                    "remote-refresh",
-                    &error,
-                    Some(&cycle_started_at),
-                    None,
-                )),
-            );
+            status.failure_kind = Some(error.kind);
+
+            if error.is_offline() {
+                // Being unable to reach the network is not a fault of this
+                // pair's configuration, and reporting it as an error trains
+                // the user to ignore errors. It is a wait, and it resolves
+                // itself — the backoff will keep probing.
+                status.phase = SyncPhase::Paused.as_str().into();
+                status.last_error = Some("Waiting for a network connection.".into());
+                emit_info_activity(
+                    app,
+                    debug_state,
+                    "Waiting for a network connection.",
+                    Some(format!(
+                        "pair='{}' reason='offline' detail='{}'",
+                        pair.label, error
+                    )),
+                );
+            } else {
+                status.phase = "error".into();
+                status.last_error = Some(concise_sync_issue("Remote inventory refresh"));
+                emit_error_activity(
+                    app,
+                    debug_state,
+                    "Pair sync cycle finished with an issue.",
+                    Some(pair_sync_cycle_issue_details(
+                        pair,
+                        "remote-refresh",
+                        &error.message,
+                        Some(&cycle_started_at),
+                        None,
+                    )),
+                );
+            }
             return Ok(status);
         }
     };
@@ -782,7 +802,11 @@ pub(crate) fn start_polling_worker_for_pairs(app: &AppHandle) -> Result<(), Stri
                 {
                     // A failed cycle leaves last_sync_at unset, which would make
                     // this pair due again immediately — hence the backoff gate.
-                    if status.phase == SyncPhase::Error.as_str() {
+                    //
+                    // Keyed on failure_kind as well as the phase: an offline
+                    // pair reports "paused" rather than "error", but it must
+                    // still back off or it hammers a dead network.
+                    if status.phase == SyncPhase::Error.as_str() || status.failure_kind.is_some() {
                         let _ = record_pair_failure(&state, &pair.id, Instant::now());
                     } else {
                         let _ = clear_pair_backoff(&state, &pair.id);

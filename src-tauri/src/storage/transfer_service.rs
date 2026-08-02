@@ -156,7 +156,9 @@ pub(crate) async fn perform_planned_upload_for_pair(
                 },
             )
             .await?;
-            list_remote_inventory_for_pair(pair, credentials).await
+            list_remote_inventory_for_pair(pair, credentials)
+                .await
+                .map_err(String::from)
         }
         #[cfg(test)]
         PairTransferExecutor::Mock => mock_upload_refresh_snapshot(_path),
@@ -396,7 +398,9 @@ pub(crate) async fn refresh_remote_snapshot_for_pair(
     _path: &str,
 ) -> Result<RemoteIndexSnapshot, String> {
     match executor {
-        PairTransferExecutor::Real(_) => list_remote_inventory_for_pair(pair, credentials).await,
+        PairTransferExecutor::Real(_) => list_remote_inventory_for_pair(pair, credentials)
+            .await
+            .map_err(String::from),
         #[cfg(test)]
         PairTransferExecutor::Mock => mock_upload_refresh_snapshot(_path),
     }

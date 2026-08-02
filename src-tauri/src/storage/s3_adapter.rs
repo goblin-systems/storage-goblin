@@ -31,9 +31,13 @@ where
     use aws_sdk_s3::error::SdkError;
 
     match error {
-        SdkError::TimeoutError(_) | SdkError::DispatchFailure(_) | SdkError::ResponseError(_) => {
-            return SyncError::transient(message);
-        }
+        // DispatchFailure means the request never left this machine, or never
+        // found a host: no DNS, no route, refused connection. That is offline,
+        // not "the provider had a problem", and the difference is what lets a
+        // pair say it is waiting for a network instead of showing an error.
+        SdkError::DispatchFailure(_) => return SyncError::offline(message),
+        SdkError::TimeoutError(_) => return SyncError::offline(message),
+        SdkError::ResponseError(_) => return SyncError::transient(message),
         _ => {}
     }
 
