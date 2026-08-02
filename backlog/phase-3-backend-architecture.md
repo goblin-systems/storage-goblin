@@ -102,12 +102,22 @@ for `tauri::` outside `ipc`/`platform`).
       unchanged): `platform`, `compare_service`, `bin_service`, `credential_service`,
       `lifecycle_service`, `transfer_service`, `polling_service`, `sync_service`,
       `queue_service`, `conflict_service`.
-- [ ] **Deferred to phase 2.2, deliberately.** `SyncState` is still the shared-mutex model.
-      A concurrency redesign (actor / `tokio::sync`) with no consumer yet — phase 2.2's parallel
-      scheduler is the consumer, and it hasn't started — and no way to validate it on this
-      machine (the Tauri mock runtime won't load) is high-risk, low-reward work. It belongs with
-      the scheduler that needs it. The related cycle-overlap gap (the per-pair path never had the
-      lock the legacy path did) is documented in the phase-2 notes.
+- [x] **Done.** `SyncState` no longer relies on a bag of independently-locked fields to
+      uphold an invariant none of them expressed. `coordinator.rs` (Tauri-free, 11 tests) owns
+      the runtime rules:
+      - A `PairLease` **is** the right to run a cycle for one pair. `run_sync_cycle_for_pair`
+        takes one instead of a loose stop flag, so the "one cycle per pair" invariant is
+        enforced by the type system rather than by convention. It releases on drop, including
+        on panic — asserted by a test, because a leaked lease would wedge a pair until restart.
+      - This closes the cycle-overlap gap: `start_sync` calls `stop_polling_worker`, which only
+        *signals*; the worker could be mid-cycle on the same pair. A manual sync now waits for
+        the lease; scheduled work takes it non-blockingly and skips a busy pair rather than
+        queueing an unbounded backlog of cycles whose plans are stale before they run.
+      - Cancellation moved onto the lease, so pause and shutdown interrupt the cycle running
+        *now* instead of waiting it out.
+      - A global transfer semaphore, which is what phase 2.2's scheduler consumes.
+      Validated on this machine despite the Tauri mock runtime not loading, which is exactly
+      why the coordinator is Tauri-free.
 - [x] **The layering invariant is enforced without the directory move.** The Tauri-free
       core (model, sync_planner, error, inventory_compare, sanitizer, remote_bin) is guarded by
       `architecture_test.rs`, which fails if any of those modules imports the app framework, plus
@@ -120,9 +130,12 @@ for `tauri::` outside `ipc`/`platform`).
       (`persist_profile_with_remote_bin_reconciliation` and its callers up through the
       `save_profile` / `*_sync_location` commands) is async end to end, awaiting reconciliation
       directly instead of blocking a runtime worker. `run_async_blocking` is now test-only.
-      **Residual:** blocking file IO (scans, snapshot reads/writes) still runs on the async
-      executor rather than `spawn_blocking` — deferred to phase 2, which reworks the IO paths for
-      streaming anyway.
+      **Residual, and now more significant than it was:** blocking file IO (scans, snapshot
+      reads/writes, `DownloadWriter` chunk writes and `fsync`) still runs on the async executor
+      rather than `spawn_blocking`. This mattered little while transfers were sequential; with
+      the phase-2.2 scheduler running several through `buffer_unordered` on one task, a blocking
+      write stalls its siblings. Not attempted here — a partial async-IO rework is worse than a
+      documented gap, and it wants its own change with its own measurements.
 - [x] `module_size_test.rs` caps ordinary modules at 1,300 production lines, with documented
       higher ceilings for two inherently-large cohesive modules (`commands.rs` at 2,200, the
       Tauri command surface; `credentials_store.rs` at 1,850, secure-store + DPAPI crypto), each
@@ -169,6 +182,33 @@ for `tauri::` outside `ipc`/`platform`).
 4. 3.4–3.5 — trailing, before phase 4 starts consuming generated types.
 
 
+## Status (2026-08-02, superseding 2026-08-01)
+
+**3.1, 3.2, 3.3 and 3.4 are complete.** The SyncState redesign — the last open
+3.3 item — landed together with its phase-2.2 consumer; see the 3.3 entry above.
+3.5 remains partial and acceptance criterion 5 (Azure) is untouched.
+
+Modules added since: `coordinator` (runtime leases, cancellation, transfer
+budget), `queue_schedule` (staged ordering), `progress` (throttled byte
+counts), `pair_backoff`, `watcher_service`, `s3_upload`. The Tauri-free core
+gate now covers ten modules rather than six.
+
+412 Rust tests and 219 frontend tests green locally; clippy clean at
+`-D warnings` in both feature configurations; rustfmt and prettier clean.
+
+### Still open after this pass
+
+1. **`spawn_blocking` for file IO** — see the 3.3 residual above. Newly
+   material now that transfers share a task.
+2. **Full test relocation (3.5)** — the large `commands.rs` test modules still
+   test code that lives in the services.
+3. **Coverage measurement (3.5)** — this machine is disk-bound; left to CI.
+4. **Azure spike (acceptance 5)** — not attempted; belongs with phase 6.
+5. **`engine/`/`services/`/`ipc/` directory move** — still descoped in favour
+   of the enforced layering test, which is the invariant that mattered.
+
+---
+
 ## Status (2026-08-01)
 
 Landed on `overhaul/phase-1` (still unpushed, still not cloud-validated — the
@@ -212,9 +252,7 @@ both feature configurations; rustfmt clean.
 
 ### Genuinely still open
 
-1. **SyncState redesign** — deferred to phase 2.2, which is its only consumer.
-   Doing a concurrency rewrite with no consumer and no local validation path
-   is the wrong risk on an unpushed branch.
+1. ~~**SyncState redesign**~~ — done on 2026-08-02, see the newer status above.
 2. **`engine/`/`services/`/`ipc/` directory layout** — descoped. The value
    (an enforced Tauri-free core) is delivered by `architecture_test.rs`; the
    physical directory move is cosmetic churn that would rewrite every `use`.
@@ -246,7 +284,7 @@ phases and has never been pushed or CI-verified. Getting one green CI run
    they are the app layer; the *core* is what must stay Tauri-free, and it is.
 3. ✅ Met. Five domain enums replace the string comparisons that mattered; `types.ts`
    imports generated unions from `domain.ts`, with a drift test.
-4. ⚠️ 309 Rust + 219 frontend tests green locally on Windows; CI is configured for 3 OSes
+4. ⚠️ 412 Rust + 219 frontend tests green locally on Windows; CI is configured for 3 OSes
    but this branch has never been pushed, so "green in CI" is unverified. Engine coverage is
    unmeasured (disk-bound machine; left to the CI job).
 5. ❌ Not attempted.
