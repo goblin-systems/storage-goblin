@@ -24,6 +24,8 @@ const TAURI_FREE_CORE: &[&str] = &[
     "sanitizer.rs",
     "remote_bin.rs",
     "pair_backoff.rs",
+    "coordinator.rs",
+    "queue_schedule.rs",
     "retry.rs",
     "s3_upload.rs",
 ];

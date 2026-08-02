@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 base64 = "0.22"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 aws-config = "1"
 aws-credential-types = "1"
 aws-sdk-s3 = "1"
@@ -34,7 +35,7 @@ sha2 = "0.10"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2.7"
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "sync", "rt", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 trash = "5.2.6"

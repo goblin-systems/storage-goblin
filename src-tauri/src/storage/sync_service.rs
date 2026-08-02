@@ -15,9 +15,10 @@ use super::activity::ActivityDebugState;
 use super::commands::{
     append_error_context, concise_sync_issue, emit_error_activity, emit_info_activity, emit_status,
     emit_success_activity, list_remote_inventory_for_pair, pair_sync_cycle_issue_details,
-    reconcile_pair_watchers, refresh_aggregate_status, resolve_credentials_for_pair,
-    DIRTY_PAIR_DEBOUNCE, LOCAL_SNAPSHOT_STALE_TTL,
+    refresh_aggregate_status, resolve_credentials_for_pair, DIRTY_PAIR_DEBOUNCE,
+    LOCAL_SNAPSHOT_STALE_TTL,
 };
+use super::coordinator::PairLease;
 use super::local_index::{
     read_local_index_snapshot_for_pair, scan_local_folder_with_cache,
     write_local_index_snapshot_for_pair, LocalIndexSnapshot,
@@ -41,11 +42,13 @@ use super::sync_db::{
 use super::sync_planner;
 use super::sync_state::{
     begin_polling_worker, clear_all_pair_watchers, clear_dirty_pair, clear_pair_backoff,
-    clear_polling_worker, due_dirty_pairs, next_dirty_pair_deadline, pair_backoff_gates,
-    pair_has_active_watcher, pair_statuses_snapshot, pair_to_status, record_pair_failure,
-    set_pair_status_from_handle, set_status_from_handle, PairSyncStatus, SyncState,
+    clear_polling_worker, coordinator, due_dirty_pairs, next_dirty_pair_deadline,
+    pair_backoff_gates, pair_has_active_watcher, pair_statuses_snapshot, pair_to_status,
+    record_pair_failure, set_pair_status_from_handle, set_status_from_handle, PairSyncStatus,
+    SyncState,
 };
 use super::transfer::cleanup_orphaned_temp_files;
+use super::watcher_service::reconcile_pair_watchers;
 
 pub(crate) fn snapshot_for_pair<R: Runtime>(
     app: &AppHandle<R>,
@@ -135,13 +138,27 @@ pub(crate) fn rebuild_durable_plan_for_pair<R: Runtime>(
     persist_sync_plan_for_pair(app, pair, &plan)
 }
 
+/// Run one sync cycle for `pair`.
+///
+/// Takes the pair's [`PairLease`] rather than a loose stop flag, so the
+/// "one cycle per pair at a time" invariant is enforced by the type system:
+/// there is no way to call this without first having taken the pair from the
+/// coordinator. Cancellation rides along on the same lease.
 pub(crate) async fn run_sync_cycle_for_pair(
     app: &AppHandle,
     debug_state: &ActivityDebugState,
     pair: &SyncPair,
     trigger: PairSyncTrigger,
-    stop_signal: Option<&AtomicBool>,
+    lease: &PairLease,
 ) -> Result<PairSyncStatus, String> {
+    debug_assert_eq!(
+        lease.pair_id(),
+        pair.id,
+        "a cycle must hold the lease for the pair it is syncing"
+    );
+    let cancel = lease.cancel_flag();
+    let stop_signal = Some(cancel.as_ref());
+
     if !is_pair_configured(pair) {
         let mut status = pair_to_status(pair, None, None, Default::default());
         status.phase = "unconfigured".into();
@@ -166,6 +183,14 @@ pub(crate) async fn run_sync_cycle_for_pair(
     // attempt starts from a clean slate instead of inheriting a 15-minute wait.
     if trigger == PairSyncTrigger::Manual {
         let _ = clear_pair_backoff(&app.state::<SyncState>(), &pair.id);
+    }
+
+    // The lease may already carry a cancellation aimed at this cycle (pause
+    // arriving between lease and first stage).
+    if stop_requested(stop_signal) {
+        let mut status = pair_to_status(pair, None, None, Default::default());
+        status.phase = SyncPhase::Paused.as_str().into();
+        return Ok(status);
     }
 
     // Sweep temp files from downloads a previous run never finished, before
@@ -443,7 +468,11 @@ pub(crate) async fn run_sync_cycle_for_pair(
     }
 
     // 5. Execute downloads
-    if planner_summary.download_count > 0 && !stop_requested(stop_signal) {
+    //
+    // Re-check the lease rather than only the captured flag: a pause that
+    // arrived while uploads were draining must not be followed by a full
+    // download queue.
+    if planner_summary.download_count > 0 && !lease.is_cancelled() && !stop_requested(stop_signal) {
         match execute_planned_download_queue_for_pair(app, debug_state, pair, &credentials).await {
             Ok(outcome) => {
                 last_error = match (last_error, outcome.execution_error) {
@@ -704,19 +733,21 @@ pub(crate) fn start_polling_worker_for_pairs(app: &AppHandle) -> Result<(), Stri
                     break;
                 }
 
+                // Scheduled work never queues behind a running cycle: if this
+                // pair is already syncing (a manual run, or a previous tick
+                // still draining), skip it. Queueing would build an unbounded
+                // backlog of cycles whose plans are stale before they start.
+                let Some(lease) = coordinator(&state).try_lease_pair(&pair.id) else {
+                    continue;
+                };
+
                 if trigger == PairSyncTrigger::LocalDirty {
                     let _ = clear_dirty_pair(&state, &pair.id);
                 }
 
                 // On Err the error was already emitted by run_sync_cycle_for_pair.
-                if let Ok(status) = run_sync_cycle_for_pair(
-                    &app_handle,
-                    &debug_state,
-                    &pair,
-                    trigger,
-                    Some(stop_signal.as_ref()),
-                )
-                .await
+                if let Ok(status) =
+                    run_sync_cycle_for_pair(&app_handle, &debug_state, &pair, trigger, &lease).await
                 {
                     // A failed cycle leaves last_sync_at unset, which would make
                     // this pair due again immediately — hence the backoff gate.

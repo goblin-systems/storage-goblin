@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     future::Future,
     path::{Path, PathBuf},
     time::Duration,
@@ -51,10 +51,7 @@ use super::{
         cleanup_empty_ancestors, normalize_directory_delete_path, open_path_with_default_app,
         remove_local_directory_subtree, resolve_local_download_path, reveal_in_file_manager,
     },
-    polling_service::{
-        active_pair_for_manual_actions, pair_watch_target, should_poll_pair,
-        watcher_eligible_pairs, PairSyncTrigger,
-    },
+    polling_service::{active_pair_for_manual_actions, should_poll_pair, PairSyncTrigger},
     profile_store::{
         is_pair_configured, is_profile_configured, read_profile_from_disk, write_profile_to_disk,
         ConnectionValidationInput, ConnectionValidationResult, ProfileDraft,
@@ -76,13 +73,11 @@ use super::{
         remote_snapshot_for_pair, run_sync_cycle_for_pair, snapshot_for_pair, start_polling_worker,
     },
     sync_state::{
-        active_watcher_pair_paths, get_status_lock, install_pair_watcher, mark_pair_dirty,
-        pair_statuses_snapshot, pair_to_status, polling_worker_active, profile_to_status,
-        remove_pair_watcher, replace_pair_statuses_from_handle, retain_dirty_pairs,
+        coordinator, get_status_lock, pair_statuses_snapshot, pair_to_status,
+        polling_worker_active, profile_to_status, replace_pair_statuses_from_handle,
         set_pair_status_from_handle, set_status_from_handle, stop_polling_worker,
         synthesize_status_from_pairs, PairSyncStatus, SyncState, SyncStatus,
     },
-    watchers::{plan_watch_reconciliation, start_pair_watcher, WatchTarget, WatcherCallbackEvent},
 };
 
 #[cfg(test)]
@@ -1069,9 +1064,15 @@ pub async fn start_sync(
         };
 
         let _ = stop_polling_worker(&state)?;
+
+        // stop_polling_worker only *signals* the worker; it may still be inside
+        // a cycle for this very pair. Taking the lease waits that out instead
+        // of running a second cycle over the same tree, plan, and queue.
+        let lease = coordinator(&state).lease_pair(&pair.id).await;
         let pair_status =
-            run_sync_cycle_for_pair(&app, &debug_state, &pair, PairSyncTrigger::Manual, None)
+            run_sync_cycle_for_pair(&app, &debug_state, &pair, PairSyncTrigger::Manual, &lease)
                 .await?;
+        drop(lease);
         set_pair_status_from_handle(&app, pair_status)?;
         let mut status = refresh_aggregate_status(&app, &profile)?;
 
@@ -1235,100 +1236,6 @@ pub(crate) fn resolve_credentials_for_pair<R: Runtime>(
             credential_id, pair.label
         )
     })
-}
-
-fn emit_watcher_degraded_activity<R: Runtime>(
-    app: &AppHandle<R>,
-    debug_state: &ActivityDebugState,
-    pair: &SyncPair,
-    details: impl Into<String>,
-) {
-    emit_info_activity(
-        app,
-        debug_state,
-        "Filesystem watcher unavailable; falling back to polling.",
-        Some(format!(
-            "pair='{}' locationId='{}' {}",
-            pair.label,
-            pair.id,
-            details.into()
-        )),
-    );
-}
-
-pub(crate) fn reconcile_pair_watchers(
-    app: &AppHandle,
-    profile: &StoredProfile,
-) -> Result<(), String> {
-    let state = app.state::<SyncState>();
-    let current = active_watcher_pair_paths(&state)?;
-    let eligible_pairs = watcher_eligible_pairs(profile);
-    let desired_targets: Vec<WatchTarget> = eligible_pairs
-        .iter()
-        .filter_map(pair_watch_target)
-        .collect();
-    let desired_ids: BTreeSet<String> = desired_targets
-        .iter()
-        .map(|target| target.pair_id.clone())
-        .collect();
-    let plan = plan_watch_reconciliation(&current, &desired_targets);
-
-    for pair_id in plan.stop {
-        remove_pair_watcher(&state, &pair_id)?;
-    }
-
-    retain_dirty_pairs(&state, &desired_ids)?;
-
-    let debug_state = app.state::<ActivityDebugState>();
-    for target in plan.start {
-        let Some(pair) = profile
-            .sync_pairs
-            .iter()
-            .find(|pair| pair.id == target.pair_id)
-        else {
-            continue;
-        };
-
-        let root_path = target.root_path.clone();
-        if !root_path.exists() {
-            emit_watcher_degraded_activity(
-                app,
-                &debug_state,
-                pair,
-                format!(
-                    "local_folder='{}' reason='missing-folder'",
-                    root_path.display()
-                ),
-            );
-            continue;
-        }
-
-        let app_handle = app.clone();
-        let pair_id = pair.id.clone();
-        let pair_clone = pair.clone();
-        match start_pair_watcher(&root_path, move |event| {
-            let state = app_handle.state::<SyncState>();
-            let debug_state = app_handle.state::<ActivityDebugState>();
-            match event {
-                WatcherCallbackEvent::LocalChange => {
-                    let _ = mark_pair_dirty(&state, &pair_id);
-                }
-                WatcherCallbackEvent::Degraded(error) => {
-                    let _ = remove_pair_watcher(&state, &pair_id);
-                    emit_watcher_degraded_activity(&app_handle, &debug_state, &pair_clone, error);
-                }
-            }
-        }) {
-            Ok(watcher) => {
-                install_pair_watcher(&state, target.pair_id, watcher)?;
-            }
-            Err(error) => {
-                emit_watcher_degraded_activity(app, &debug_state, pair, error);
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn current_pair_statuses<R: Runtime>(
@@ -2216,13 +2123,14 @@ mod tests {
         parse_versioned_bin_key, provider_supports_remote_bin_lifecycle_reconciliation,
         provider_supports_runtime_object_versioning, relative_path_from_key,
         remove_local_directory_subtree, resolve_local_download_path, s3_config_for_pair,
-        should_defer_create_time_credential_test, should_poll_pair, watcher_eligible_pairs,
-        BinEntryRequest, CredentialTestContext, PairSyncTrigger, LOCAL_SNAPSHOT_STALE_TTL,
+        should_defer_create_time_credential_test, should_poll_pair, BinEntryRequest,
+        CredentialTestContext, PairSyncTrigger, LOCAL_SNAPSHOT_STALE_TTL,
     };
     use crate::storage::credentials_store::{
         CredentialSummary, CredentialValidationStatus, StoredCredentials,
     };
     use crate::storage::local_index::{LocalIndexEntry, LocalIndexSnapshot, LocalIndexSummary};
+    use crate::storage::polling_service::watcher_eligible_pairs;
     use crate::storage::profile_store::{RemoteBinConfig, StoredProfile, SyncPair};
     use crate::storage::provider::GCS_PROVIDER;
     use crate::storage::remote_bin::{managed_lifecycle_rule_plan, DEFAULT_REMOTE_BIN_PAIR_ID};

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use tauri::{Manager, State};
 
 use super::{
+    coordinator::SyncCoordinator,
     inventory_compare::{compare_snapshots, InventoryComparisonSummary},
     local_index::LocalIndexSnapshot,
     model::{aggregate_phase, SyncPhase},
@@ -113,6 +114,18 @@ pub struct SyncState {
     watcher_runtime: Mutex<WatcherRuntimeState>,
     dirty_pairs: Mutex<BTreeMap<String, DirtyPairState>>,
     pair_backoffs: Mutex<BTreeMap<String, PairBackoffState>>,
+    /// Runtime coordination: who may run a cycle, and how many transfers may
+    /// be in flight. See `coordinator` for why this is not more loose fields.
+    coordinator: SyncCoordinator,
+}
+
+/// The runtime coordinator behind this state.
+///
+/// Every sync cycle must hold a [`PairLease`] from here; see `coordinator`.
+///
+/// [`PairLease`]: super::coordinator::PairLease
+pub(crate) fn coordinator<'r>(state: &State<'r, SyncState>) -> &'r SyncCoordinator {
+    &state.inner().coordinator
 }
 
 pub(crate) fn get_status_lock<'a>(
@@ -224,6 +237,10 @@ fn stop_polling_worker_inner(state: &SyncState) -> Result<bool, String> {
 
     stop_signal.store(true, Ordering::SeqCst);
     worker.active_worker_id = None;
+    // The worker signal only stops it between cycles. Cancelling through the
+    // coordinator reaches the cycle that is running *right now*, so a pause or
+    // a shutdown does not have to wait out a multi-gigabyte transfer.
+    state.coordinator.cancel_all();
     state
         .watcher_runtime
         .lock()

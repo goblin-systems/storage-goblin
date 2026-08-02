@@ -12,6 +12,7 @@ pub mod bin_service;
 pub mod commands;
 pub mod compare_service;
 pub mod conflict_service;
+pub mod coordinator;
 pub mod credential_service;
 pub mod credentials_store;
 pub mod error;
@@ -31,6 +32,7 @@ pub mod platform;
 pub mod polling_service;
 pub mod profile_store;
 pub mod provider;
+pub mod queue_schedule;
 pub mod queue_service;
 pub mod remote_bin;
 pub mod remote_index;
@@ -48,6 +50,7 @@ pub mod transfer;
 pub mod transfer_service;
 #[cfg(test)]
 mod ts_bindings;
+pub mod watcher_service;
 pub mod watchers;
 
 pub use sync_state::SyncState;

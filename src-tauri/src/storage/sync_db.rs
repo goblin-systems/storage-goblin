@@ -754,8 +754,56 @@ fn open_connection(path: &Path) -> Result<Connection, String> {
 
     let connection = Connection::open(path)
         .map_err(|error| format!("failed to open sync database '{}': {error}", path.display()))?;
+    configure_connection(&connection)?;
     initialize_schema(&connection)?;
     Ok(connection)
+}
+
+/// How long a blocked writer waits for the lock before giving up.
+///
+/// Generous on purpose: the alternative to waiting is a spurious "database is
+/// locked" surfaced to the user as a sync failure, and every writer here holds
+/// the lock for a single short statement.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Make the database safe for more than one connection at a time.
+///
+/// Every call site opens its own connection, and several run concurrently: an
+/// IPC command reading status while the polling worker writes queue rows, and —
+/// once transfers run in parallel — several transfers completing at once. With
+/// SQLite's defaults (rollback journal, no busy timeout) those collide
+/// *immediately* with SQLITE_BUSY rather than waiting, which surfaces as a
+/// random sync failure that retrying usually fixes: the signature of a race,
+/// and one that would get much worse with a parallel scheduler.
+///
+/// WAL lets readers proceed while a writer works; the busy timeout makes the
+/// remaining writer-writer collisions wait instead of fail.
+fn configure_connection(connection: &Connection) -> Result<(), String> {
+    connection
+        .busy_timeout(BUSY_TIMEOUT)
+        .map_err(|error| format!("failed to set sync database busy timeout: {error}"))?;
+
+    // query_row, not execute_batch: journal_mode returns the resulting mode.
+    let mode: String = connection
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .map_err(|error| format!("failed to enable WAL on the sync database: {error}"))?;
+
+    if !mode.eq_ignore_ascii_case("wal") {
+        // Some filesystems (notably network shares) cannot do WAL. Falling back
+        // is correct — the busy timeout above still prevents the hard failures,
+        // it just serializes readers against writers as well.
+        return Ok(());
+    }
+
+    // Checkpoint on a normal cadence rather than fsyncing every commit. Safe
+    // under WAL: a crash can lose the most recent transactions but cannot
+    // corrupt the database, and every durable record here is rebuilt by the
+    // next scan anyway.
+    connection
+        .execute_batch("PRAGMA synchronous = NORMAL;")
+        .map_err(|error| format!("failed to set sync database synchronous mode: {error}"))?;
+
+    Ok(())
 }
 
 /// The schema version this build expects. Bump it and add a match arm in
