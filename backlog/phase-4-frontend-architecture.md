@@ -87,9 +87,9 @@ clean up. `index.html` shrinks to the shell skeleton + view mount points.
       replaces the hand-rolled `fileTreeRequestSequence` counter.
 - [ ] Swap hand-written `types.ts` for generated types; delete the drift (its 116-line test
       file too, where redundant).
-- [x] **Module done, partially adopted.** `src/ipc/events.ts` declares every channel and
-      payload in one table, including phase 2.1's `storage://transfer-progress`. `client.ts`
-      still has its own `listen*` methods; migrating them is pending.
+- [x] **Done and adopted.** `src/ipc/events.ts` declares every channel and payload in one
+      table. Both of `client.ts`'s `listen*` methods now route through it, and
+      `listenTransferProgress` was added so phase 5's progress UI has a client method to call.
       *(Original text: typed event subscription module: sync status, per-file progress,*
       activity — single subscription point dispatching into the store.
 
@@ -101,7 +101,10 @@ Order chosen so the riskiest, most-entangled surfaces go last:
       `createView(deps) => { destroy() }`, narrow structural dependencies, store subscriptions
       released on teardown. Surfaced and fixed a real bug: a failed save was an unhandled
       rejection, so a save that did not happen looked exactly like one that did.
-- [ ] credentials screen
+- [x] **Done** — `src/views/credentials/credentials-view.ts`, 16 tests. First view with
+      per-row actions, so the real risk was leaking a listener per row on every re-render; the
+      list rebuilds into a detached fragment and a test re-renders five times to prove one
+      click produces one call. Twelve pure label helpers moved to `app/credential-labels.ts`.
 - [ ] locations screen (form state machine: create vs edit, provider-dependent fields —
       currently scattered through dozens of helpers like `renderCredentialFormState`,
       `setLocationOptions`)
@@ -143,8 +146,8 @@ Order chosen so the riskiest, most-entangled surfaces go last:
 
 ## Status (2026-08-02) — in progress
 
-**4.1 is essentially complete; 4.2 has started.** Landed on
-`overhaul/phase-1` (pushed). 281 frontend tests, tsc and eslint clean.
+**4.1 is complete; 4.2 has three of seven views done.** Landed on
+`overhaul/phase-1` (pushed). 297 frontend tests, tsc and eslint clean.
 
 ### What exists now
 
@@ -157,17 +160,18 @@ src/
   ipc/events.ts         typed channels, incl. transfer-progress
   views/settings/       first extracted view
   views/activity/       second extracted view
+  views/credentials/    third — first with per-row actions
+  app/credential-labels.ts, app/browser-status.ts   lifted out of the monoliths
   architecture.test.ts  size + layering gates
 ```
 
-`bootstrap.ts`: **4,324 → 4,140 lines.** The number is unimpressive on
-purpose — the first two views are the *small* ones, chosen to establish
-the contract cheaply. The state migration underneath them is what makes
-the rest possible, and it is done.
+`bootstrap.ts`: **4,324 → 3,793 lines** (under 4,000 for the first
+time). `client.ts`: 592 → 530. Both caps ratcheted down to match; that
+ratchet is the mechanism, not the numbers.
 
-### Two bugs found by extracting
+### Bugs found by extracting
 
-Neither was known before the views got tests:
+None were known before the views got tests:
 
 1. **A failed settings save was silently swallowed.** The
    `() => void handleSaveSettings(...)` wiring turned a rejection into an
@@ -176,19 +180,27 @@ Neither was known before the views got tests:
    from one that did.
 2. **The activity render leaked a timer past teardown**, and rebuilt the
    list by appending 36 items into the live DOM.
+3. **A regression I introduced and caught**: extracting the credential
+   row description, I dropped `getProviderLabel` and mislabelled the
+   variable that replaced it. Found by reading the original against the
+   new code — which is the argument for doing these one screen at a
+   time rather than in a sweep.
 
 ### Next, in order
 
-1. **Credentials view** — bigger than the first two (~290 lines across
-   render + create/test/delete handlers) and the first with per-row
-   actions that call back into refresh logic.
-2. **Locations view** — the genuinely hard one. Its form is a state
-   machine (create vs edit, provider-dependent fields) and it owns the
-   versioning and remote-bin toggles.
-3. **Home, modals, shell**, then `dom.ts`'s global registry can go.
-4. **Migrate `client.ts`'s `listen*` methods onto `ipc/events.ts`** and
-   split the client by domain.
-5. **Split `bootstrap.test.ts`** (4,520 lines) alongside each view
+1. **Locations view — the genuinely hard one, and deliberately not
+   started.** It is ~550 lines across 15 interdependent functions:
+   the form is a create-vs-edit state machine with provider-dependent
+   fields, and it owns the versioning toggle, the remote-bin state, the
+   location dropdown, and the merge between listed locations and the
+   stored profile. That is larger than everything extracted so far
+   combined, so it wants a session of its own rather than the tail of
+   one — a half-extracted screen is worse than an un-extracted one.
+2. **Home / status view**, then modals and shell, after which
+   `dom.ts`'s global registry can go.
+3. **Split `client.ts` by domain** — it is under its cap now but is
+   still one file for every command.
+4. **Split `bootstrap.test.ts`** (4,520 lines) alongside each view
    rather than in one final pass — that is how test migrations get
    abandoned.
 
@@ -198,9 +210,9 @@ Neither was known before the views got tests:
   system is markup-driven, and regenerating markup phase 5 is about to
   redesign would be work done twice. The `views/` contract does not
   depend on which of the two it is.
-- `ipc/events.ts` is written and tested but only half adopted: nothing
-  consumes `onTransferProgress` yet, because its consumer is phase 5's
-  progress UI.
+- `client.listenTransferProgress` exists but has no *consumer* yet: the
+  UI that draws progress is phase 5's. The plumbing is complete to the
+  client boundary and stops there deliberately.
 - The transitional `state` mirror in `bootstrap.ts` is exactly that. It
   should be gone by the time the last view is extracted; if it is not,
   something was extracted badly.
