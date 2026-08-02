@@ -11,8 +11,10 @@ import {
 } from "@goblin-systems/goblin-design-system";
 import { createNativeActivity, createUiActivity } from "./activity";
 import { createStorageGoblinClient } from "./client";
+import { debounce } from "../lib/debounce";
 import { setButtonBusy } from "../lib/dom";
 import { createAppStore, type DialogId } from "../state/app-state";
+import { appendActivity, createActivityView } from "../views/activity/activity-view";
 import { createSettingsView } from "../views/settings/settings-view";
 import { createAppDom, type AppDom } from "./dom";
 import {
@@ -1148,10 +1150,6 @@ function buildCredentialCreateMessage(credential: CredentialSummary): string {
 
 type BootstrapCleanup = () => void;
 
-type DebouncedFn<T extends (...args: unknown[]) => void> = T & {
-  cancel: () => void;
-};
-
 export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   setupWindowControls();
   applyIcons();
@@ -1209,28 +1207,9 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     }, 500);
   }
 
-  function debounce<T extends (...args: unknown[]) => void>(fn: T, ms: number): DebouncedFn<T> {
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const debounced = ((...args: unknown[]) => {
-      if (timer !== null) clearTimeout(timer);
-      timer = setTimeout(() => {
-        timer = null;
-        fn(...args);
-      }, ms);
-    }) as DebouncedFn<T>;
-
-    debounced.cancel = () => {
-      if (timer !== null) {
-        clearTimeout(timer);
-        timer = null;
-      }
-    };
-
-    return debounced;
-  }
-
-  const debouncedRefreshFileTree = debounce(() => void refreshFileTree(), 300);
-  const debouncedRenderActivity = debounce(renderActivity, 150);
+  const debouncedRefreshFileTree = debounce(() => {
+    void refreshFileTree();
+  }, 300);
 
   function formatCount(value: number): string {
     return new Intl.NumberFormat().format(value);
@@ -1681,51 +1660,11 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   }
 
   function addActivityItem(item: ActivityItem) {
-    store.setState({ activity: [item, ...state.activity].slice(0, 36) });
-    debouncedRenderActivity();
+    appendActivity(store, item);
   }
 
   function addActivity(level: ActivityItem["level"], message: string, details?: string | null) {
-    addActivityItem(createUiActivity(level, message, details));
-  }
-
-  function renderActivity() {
-    dom.activityList.innerHTML = "";
-    const hasItems = state.activity.length > 0;
-    dom.activityEmptyState.hidden = hasItems;
-    dom.activityList.hidden = !hasItems;
-
-    for (const item of state.activity) {
-      const li = document.createElement("li");
-      li.className = "activity-item";
-
-      const message = document.createElement("span");
-      message.className = "activity-message";
-      message.textContent = item.message;
-
-      const meta = document.createElement("span");
-      meta.className = "activity-meta";
-      meta.textContent = `${item.level.toUpperCase()} · ${formatTimestamp(item.timestamp)}`;
-
-      li.append(message, meta);
-
-      if (item.details) {
-        const details = document.createElement("details");
-        details.className = "activity-details";
-
-        const summary = document.createElement("summary");
-        summary.textContent = "Debug details";
-
-        const pre = document.createElement("pre");
-        pre.className = "activity-detail-text";
-        pre.textContent = item.details;
-
-        details.append(summary, pre);
-        li.append(details);
-      }
-
-      dom.activityList.append(li);
-    }
+    appendActivity(store, createUiActivity(level, message, details));
   }
 
   function renderCredentialsList() {
@@ -4116,6 +4055,12 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   const storedProfile = await persistence.load();
   store.setState({ profile: applyStoredProfile(storedProfile) });
   store.setState({ activeLocationId: storedProfile.activeLocationId ?? null });
+  const activityView = createActivityView({
+    dom,
+    store,
+    formatTimestamp,
+  });
+
   const settingsView = createSettingsView({
     dom,
     store,
@@ -4170,7 +4115,6 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
   return () => {
     debouncedRefreshFileTree.cancel();
-    debouncedRenderActivity.cancel();
 
     if (fileTreeChangeTimer !== null) {
       clearTimeout(fileTreeChangeTimer);
@@ -4181,6 +4125,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
     destroyFileTree();
     settingsView.destroy();
+    activityView.destroy();
     asyncConfirm.destroy();
     conflictResolutionModal.destroy();
 
