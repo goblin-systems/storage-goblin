@@ -10,12 +10,14 @@ import {
   showToast,
 } from "@goblin-systems/goblin-design-system";
 import { createNativeActivity, createUiActivity } from "./activity";
+import { getEffectiveProfileProvider } from "./credential-labels";
 import { createStorageGoblinClient } from "./client";
 import { debounce } from "../lib/debounce";
 import { createLatest, isSuperseded } from "../lib/latest";
 import { setButtonBusy } from "../lib/dom";
 import { createAppStore, type DialogId } from "../state/app-state";
 import { appendActivity, createActivityView } from "../views/activity/activity-view";
+import { createCredentialsView } from "../views/credentials/credentials-view";
 import { createSettingsView } from "../views/settings/settings-view";
 import { createAppDom, type AppDom } from "./dom";
 import {
@@ -52,17 +54,12 @@ import type {
   BinEntryRequest,
   BinEntrySource,
   ConflictResolutionDetails,
-  CredentialDraft,
-  CredentialSummary,
-  CredentialTestContext,
   FileVersionEntry,
   LocationSyncStatus,
-  PermissionProbeSummary,
   Provider,
   ProviderDefinition,
   ProviderCapabilities,
   ProviderCapabilityStatus,
-  StorageProfileDraft,
   SyncLocation,
   SyncLocationDraft,
   SyncStatus,
@@ -880,22 +877,6 @@ function createAsyncConfirmController(): AsyncConfirmController {
   };
 }
 
-function describeCredentialSummary(credential: CredentialSummary): string | null {
-  if (credential.provider === "aws") {
-    return credential.summary?.accessKeyIdPreview ?? null;
-  }
-
-  return credential.summary?.clientEmail ?? credential.summary?.projectId ?? null;
-}
-
-function getSelectedCredentialContextLabel(profile: StorageProfileDraft): string {
-  return profile.bucket ? `Selected for bucket "${profile.bucket}"` : "Selected for current setup";
-}
-
-function getEffectiveProfileProvider(profile: StorageProfileDraft): Provider {
-  return profile.selectedCredential?.provider ?? profile.provider;
-}
-
 function getLocationCapabilities(
   location: Pick<SyncLocationDraft, "provider" | "providerDefinition" | "capabilities">,
 ): ProviderCapabilities {
@@ -1065,88 +1046,6 @@ function getProviderLocationOptions(
     { value: "ca-central-1", label: "Canada (Central) — ca-central-1" },
     { value: "sa-east-1", label: "South America (São Paulo) — sa-east-1" },
   ];
-}
-
-function getCredentialValidationLabel(credential: CredentialSummary): string {
-  switch (credential.validationStatus) {
-    case "passed":
-      return "test passed";
-    case "failed":
-      return "test failed";
-    case "untested":
-      return "untested";
-  }
-}
-
-function getCredentialTestActionLabel(credential: CredentialSummary): string {
-  return credential.validationStatus === "untested" ? "Test" : "Re-test";
-}
-
-function getCredentialStorageLabel(credential: CredentialSummary): string {
-  return credential.ready ? "stored securely" : "stored secret missing";
-}
-
-function getCredentialStorageBadgeLabel(credential: CredentialSummary): string {
-  return credential.ready ? "stored" : "needs repair";
-}
-
-function getCredentialStorageBadgeTone(credential: CredentialSummary): "success" | "danger" {
-  return credential.ready ? "success" : "danger";
-}
-
-function getCredentialValidationBadgeTone(
-  credential: CredentialSummary,
-): "success" | "danger" | "default" {
-  return credential.validationStatus === "passed"
-    ? "success"
-    : credential.validationStatus === "failed"
-      ? "danger"
-      : "default";
-}
-
-function formatPermissionSummary(permissions: PermissionProbeSummary | null): string {
-  if (!permissions) return "";
-
-  const probeLabels: Record<string, string> = {
-    put_object: "write",
-    get_object: "read",
-    delete_object: "delete",
-  };
-
-  const headBucket = permissions.probes.find((p) => p.name === "head_bucket");
-  if (headBucket && !headBucket.allowed) {
-    return `Bucket "${permissions.bucket}" is not accessible.`;
-  }
-
-  const labels = permissions.probes
-    .filter((p) => p.name !== "head_bucket")
-    .map((p) => `${probeLabels[p.name] ?? p.name} ${p.allowed ? "✓" : "✗"}`);
-
-  return labels.length > 0 ? `Permissions: ${labels.join(" · ")}` : "";
-}
-
-function buildCredentialTestContext(profile: StorageProfileDraft): CredentialTestContext {
-  return {
-    provider: getEffectiveProfileProvider(profile),
-    region: profile.region,
-    bucket: profile.bucket,
-  };
-}
-
-function buildCredentialCreateMessage(credential: CredentialSummary): string {
-  const savedState = credential.ready
-    ? `Saved credential "${credential.name}" securely.`
-    : `Saved credential "${credential.name}", but its stored secret needs attention.`;
-
-  if (credential.validationStatus === "untested") {
-    return `${savedState} It was not tested yet.`;
-  }
-
-  if (credential.validationStatus === "passed") {
-    return `${savedState} It was tested and is valid.`;
-  }
-
-  return `${savedState} It was tested and failed.`;
 }
 
 type BootstrapCleanup = () => void;
@@ -1675,211 +1574,6 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     appendActivity(store, createUiActivity(level, message, details));
   }
 
-  function renderCredentialsList() {
-    dom.credentialsList.innerHTML = "";
-
-    const count = state.credentials.length;
-    const selectedCredentialProvider = normalizeProvider(dom.credentialProviderSelect.value);
-    dom.credentialsCountBadge.textContent = `${count} saved`;
-    dom.credentialsSupportBadge.textContent = client.supportsNativeProfilePersistence
-      ? "Desktop app"
-      : "Preview only";
-    dom.credentialsSupportBadge.className = `badge ${client.supportsNativeProfilePersistence ? "success" : "default"}`;
-    dom.credentialsSupportText.textContent = client.supportsNativeProfilePersistence
-      ? "Create provider-specific named credentials once, then reuse them across sync locations without re-entering secrets."
-      : "Browser preview shows the credential workflow but does not create or store real credentials.";
-    dom.createCredentialBtn.disabled = !client.supportsNativeProfilePersistence;
-    renderCredentialFormState(dom, selectedCredentialProvider);
-
-    dom.credentialsListStatus.textContent =
-      count > 0
-        ? "Saved credentials show secure storage state and test state separately."
-        : client.supportsNativeProfilePersistence
-          ? "Create your first named credential, then assign it to a sync location."
-          : "Open the desktop app to create and manage credentials.";
-
-    dom.credentialsEmptyState.hidden = count > 0;
-    dom.credentialsList.hidden = count === 0;
-
-    for (const credential of state.credentials) {
-      const li = document.createElement("li");
-      li.className = "credential-item";
-
-      const meta = document.createElement("div");
-      meta.className = "credential-item-meta";
-
-      const name = document.createElement("strong");
-      name.textContent = credential.name;
-
-      const hint = document.createElement("span");
-      hint.className = "hint";
-      const providerLabel = getProviderLabel(credential.provider);
-      const summaryText = describeCredentialSummary(credential);
-      hint.textContent =
-        credential.id === state.profile.credentialProfileId
-          ? `${getSelectedCredentialContextLabel(state.profile)} · ${providerLabel} · ${getCredentialStorageLabel(credential)} · ${getCredentialValidationLabel(credential)}${summaryText ? ` · ${summaryText}` : ""}`
-          : `${providerLabel} · ${getCredentialStorageLabel(credential)} · ${getCredentialValidationLabel(credential)}${summaryText ? ` · ${summaryText}` : ""}`;
-
-      meta.append(name, hint);
-
-      const actions = document.createElement("div");
-      actions.className = "credential-item-actions";
-
-      const availabilityBadge = document.createElement("span");
-      availabilityBadge.className = `badge ${getCredentialStorageBadgeTone(credential)}`;
-      availabilityBadge.textContent = getCredentialStorageBadgeLabel(credential);
-      actions.append(availabilityBadge);
-
-      const validationBadge = document.createElement("span");
-      validationBadge.className = `badge ${getCredentialValidationBadgeTone(credential)}`;
-      validationBadge.textContent = getCredentialValidationLabel(credential);
-      actions.append(validationBadge);
-
-      if (credential.id === state.profile.credentialProfileId) {
-        const selectedBadge = document.createElement("span");
-        selectedBadge.className = "badge default";
-        selectedBadge.textContent = "selected";
-        actions.append(selectedBadge);
-      }
-
-      const testButton = document.createElement("button");
-      testButton.className = "secondary-btn slim-btn";
-      testButton.type = "button";
-      testButton.textContent = getCredentialTestActionLabel(credential);
-      testButton.disabled = !client.supportsNativeProfilePersistence;
-      testButton.title = !client.supportsNativeProfilePersistence
-        ? "Credential testing is only available in the desktop app."
-        : "";
-      testButton.addEventListener(
-        "click",
-        () =>
-          void (async () => {
-            setButtonBusy(testButton, true);
-
-            try {
-              const result = await client.testCredential({
-                credentialId: credential.id,
-                context: buildCredentialTestContext(state.profile),
-              });
-
-              store.setState({
-                credentials: state.credentials.map((item) =>
-                  item.id === result.credential.id ? result.credential : item,
-                ),
-              });
-              if (!state.credentials.some((item) => item.id === result.credential.id)) {
-                store.setState({ credentials: [...state.credentials, result.credential] });
-              }
-
-              store.setState({
-                profile: syncProfileCredentialState(
-                  normalizeProfileDraft({
-                    ...state.profile,
-                    selectedCredential:
-                      state.profile.credentialProfileId === result.credential.id
-                        ? result.credential
-                        : state.profile.selectedCredential,
-                  }),
-                  state.credentials,
-                ),
-              });
-              renderProfileSummary();
-
-              const baseMessage = result.ok
-                ? `Credential "${result.credential.name}" test passed. Can access ${result.bucketCount} bucket(s).`
-                : `Credential "${result.credential.name}" test failed.`;
-
-              const permissionLine = formatPermissionSummary(result.permissions);
-              const displayMessage = permissionLine
-                ? `${baseMessage} ${permissionLine}`
-                : baseMessage;
-
-              dom.credentialsResult.textContent = displayMessage;
-              toast(displayMessage, result.ok ? "success" : "error");
-              addActivity(result.ok ? "success" : "error", displayMessage);
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              const surfacedMessage = `Credential test failed: ${message}`;
-              dom.credentialsResult.textContent = surfacedMessage;
-              toast(surfacedMessage, "error");
-              addActivity("error", surfacedMessage);
-            } finally {
-              setButtonBusy(testButton, false);
-            }
-          })(),
-      );
-      actions.append(testButton);
-
-      const deleteButton = document.createElement("button");
-      deleteButton.className = "secondary-btn slim-btn";
-      deleteButton.type = "button";
-      deleteButton.textContent = "Delete";
-      deleteButton.disabled = !client.supportsNativeProfilePersistence;
-      deleteButton.addEventListener("click", () => {
-        const wasSelected = credential.id === state.profile.credentialProfileId;
-        void asyncConfirm.open({
-          title: "Delete credential?",
-          message: wasSelected
-            ? `"${credential.name}" will be deleted. This bucket will need a different credential before it can sync again.`
-            : `"${credential.name}" will be permanently deleted.`,
-          acceptLabel: "Delete",
-          rejectLabel: "Cancel",
-          variant: "danger",
-          onAccept: async () => {
-            try {
-              const result = await client.deleteCredential(credential.id);
-              if (!result.deleted) {
-                const message = client.supportsNativeProfilePersistence
-                  ? `Could not delete credential "${credential.name}".`
-                  : "Credential deletion is only available in the desktop app.";
-                dom.credentialsResult.textContent = message;
-                toast(message, "info");
-                throw createHandledAsyncConfirmError(message);
-              }
-
-              if (wasSelected) {
-                store.setState({
-                  profile: syncProfileCredentialState(
-                    normalizeProfileDraft({
-                      ...state.profile,
-                      credentialProfileId: result.profile.credentialProfileId,
-                      selectedCredential: result.profile.selectedCredential,
-                      selectedCredentialAvailable: result.profile.selectedCredentialAvailable,
-                      credentialsStoredSecurely: result.profile.credentialsStoredSecurely,
-                    }),
-                    state.credentials.filter((item) => item.id !== credential.id),
-                  ),
-                });
-              }
-
-              const message = `Deleted credential "${credential.name}".`;
-              dom.credentialsResult.textContent = message;
-              addActivity("info", message);
-              toast(message, "success");
-              await refreshCredentials();
-              renderProfileSummary();
-            } catch (error) {
-              if (error instanceof HandledAsyncConfirmError) {
-                throw error;
-              }
-
-              const message = error instanceof Error ? error.message : String(error);
-              const surfacedMessage = `Delete credential failed: ${message}`;
-              dom.credentialsResult.textContent = surfacedMessage;
-              addActivity("error", surfacedMessage);
-              toast(surfacedMessage, "error");
-              throw createHandledAsyncConfirmError(surfacedMessage);
-            }
-          },
-        });
-      });
-      actions.append(deleteButton);
-
-      li.append(meta, actions);
-      dom.credentialsList.append(li);
-    }
-  }
-
   function renderStatus() {
     const activeLocationStatus = getActiveLocationStatus();
     const activeLocation = getActiveLocation();
@@ -2042,7 +1736,6 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   }
 
   function renderProfileSummary() {
-    renderCredentialsList();
     renderStatus();
     renderLocationCredentialOptions();
     renderLocationProviderState();
@@ -2284,86 +1977,6 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       : state.activeLocationId
         ? encodeLocationSelectValue(state.activeLocationId, "live")
         : "";
-  }
-
-  async function handleCreateCredential() {
-    const provider = normalizeProvider(dom.credentialProviderSelect.value);
-    const name = dom.credentialNameInput.value.trim();
-    const draft: CredentialDraft =
-      provider === "aws"
-        ? {
-            name,
-            provider: "aws",
-            accessKeyId: dom.credentialAccessKeyInput.value.trim(),
-            secretAccessKey: dom.credentialSecretKeyInput.value.trim(),
-          }
-        : {
-            name,
-            provider: "gcs",
-            credential: {
-              kind: "gcsServiceAccount",
-              serviceAccountJson: dom.credentialServiceAccountInput.value.trim(),
-            },
-          };
-
-    if (!client.supportsNativeProfilePersistence) {
-      const message = "Credential management is only available in the desktop app.";
-      dom.credentialsResult.textContent = message;
-      toast(message, "info");
-      return;
-    }
-
-    const invalidAwsDraft =
-      draft.provider === "aws" && (!draft.name || !draft.accessKeyId || !draft.secretAccessKey);
-    const invalidGcsDraft =
-      draft.provider === "gcs" && (!draft.name || !draft.credential.serviceAccountJson);
-    if (invalidAwsDraft || invalidGcsDraft) {
-      const message =
-        draft.provider === "aws"
-          ? "Enter a name, access key ID, and secret access key to create an AWS credential."
-          : "Enter a name and paste the full service account JSON to create a GCS credential.";
-      dom.credentialsResult.textContent = message;
-      toast(message, "error");
-      return;
-    }
-
-    setButtonBusy(dom.createCredentialBtn, true);
-
-    try {
-      const created = await client.createCredential(draft);
-      dom.credentialNameInput.value = "";
-      dom.credentialAccessKeyInput.value = "";
-      dom.credentialSecretKeyInput.value = "";
-      dom.credentialServiceAccountInput.value = "";
-      await refreshCredentials();
-      store.setState({
-        profile: syncProfileCredentialState(
-          normalizeProfileDraft({
-            ...state.profile,
-            provider: created.provider,
-            credentialProfileId: created.id,
-            selectedCredential: created,
-          }),
-          state.credentials,
-        ),
-      });
-      syncCreateLocationFormProviderFromProfile();
-      renderProfileSummary();
-      renderLocationRemoteBinState();
-
-      const message = buildCredentialCreateMessage(created);
-      dom.credentialsResult.textContent = `${message} It is now selected for this setup.`;
-      toast(`Created credential "${created.name}".`, "success");
-      addActivity("success", `Created credential "${created.name}".`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const surfacedMessage = `Create credential failed: ${message}`;
-      dom.credentialsResult.textContent = surfacedMessage;
-      toast(surfacedMessage, "error");
-      addActivity("error", surfacedMessage);
-    } finally {
-      setButtonBusy(dom.createCredentialBtn, false);
-    }
   }
 
   function renderLocationCredentialOptions(
@@ -3948,10 +3561,6 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     void refreshFileTree();
   });
 
-  dom.createCredentialBtn.addEventListener("click", () => void handleCreateCredential());
-  dom.credentialProviderSelect.addEventListener("change", () => {
-    renderCredentialFormState(dom, normalizeProvider(dom.credentialProviderSelect.value));
-  });
   dom.restoreSelectedBtn.addEventListener("click", () => void handleBulkBinRestore());
   dom.purgeSelectedBtn.addEventListener("click", () => void handleBulkBinPurge());
   dom.locationProviderSelect.addEventListener("change", () => {
@@ -4071,6 +3680,28 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     formatTimestamp,
   });
 
+  const credentialsView = createCredentialsView({
+    dom,
+    store,
+    supportsNativePersistence: client.supportsNativeProfilePersistence,
+    createCredential: (draft) => client.createCredential(draft),
+    testCredential: (request) => client.testCredential(request),
+    deleteCredential: (credentialId) => client.deleteCredential(credentialId),
+    refreshCredentials,
+    confirm: (request) => asyncConfirm.open(request),
+    handledError: createHandledAsyncConfirmError,
+    isHandledError: (error) => error instanceof HandledAsyncConfirmError,
+    onCredentialsChanged: renderProfileSummary,
+    normalizeProvider,
+    normalizeProfileDraft,
+    syncProfileCredentialState,
+    renderFormState: (provider) => {
+      renderCredentialFormState(dom, provider);
+    },
+    toast,
+    addActivity,
+  });
+
   const settingsView = createSettingsView({
     dom,
     store,
@@ -4136,6 +3767,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     destroyFileTree();
     settingsView.destroy();
     activityView.destroy();
+    credentialsView.destroy();
     asyncConfirm.destroy();
     conflictResolutionModal.destroy();
 

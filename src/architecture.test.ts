@@ -31,7 +31,7 @@ const MAX_LINES = 500;
  */
 const LEGACY_CAPS: Record<string, number> = {
   // The monolith phase 4 exists to dismantle, plus its mirror-image test file.
-  "app/bootstrap.ts": 4150,
+  "app/bootstrap.ts": 3800,
   "app/bootstrap.test.ts": 4530,
   // Components with real internal complexity; phase 4.2 moves them under
   // components/ and splits rendering from state.
