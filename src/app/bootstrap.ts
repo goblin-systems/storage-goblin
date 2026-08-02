@@ -11,6 +11,7 @@ import {
 } from "@goblin-systems/goblin-design-system";
 import { createNativeActivity, createUiActivity } from "./activity";
 import { createStorageGoblinClient } from "./client";
+import { createAppStore, type DialogId } from "../state/app-state";
 import { createAppDom, type AppDom } from "./dom";
 import {
   renderFileTree,
@@ -39,7 +40,6 @@ import {
   normalizeProvider,
 } from "./types";
 import type {
-  ActivityDebugLogState,
   ActivityItem,
   BinEntryMutationResult,
   BinEntryMutationSummary,
@@ -63,13 +63,6 @@ import type {
   VersionComparisonDetails,
   VersionCountEntry,
 } from "./types";
-
-type DialogId =
-  "credentials" | "locations" | "activity" | "polling" | "debug" | "conflict" | "about";
-
-type SyncStatusWithLocations = SyncStatus & {
-  locations?: LocationSyncStatus[];
-};
 
 interface LocationViewSelection {
   locationId: string | null;
@@ -1228,19 +1221,10 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   const client = createStorageGoblinClient();
   const persistence = createProfilePersistence(client);
 
-  const state: {
-    activeDialog: DialogId | null;
-    activeLocationId: string | null;
-    activeLocationViewMode: FileTreeMode;
-    profile: StorageProfileDraft;
-    providerDefinitions: ProviderDefinition[];
-    credentials: CredentialSummary[];
-    syncLocations: SyncLocation[];
-    status: SyncStatusWithLocations;
-    activity: ActivityItem[];
-    lastConnectAt: string | null;
-    debugLogState: ActivityDebugLogState;
-  } = {
+  // The store owns application state (backlog phase 4.1). Views extracted from
+  // this closure subscribe to it directly; nothing else can be pulled out while
+  // state lives in a scope only this function can see.
+  const store = createAppStore({
     activeDialog: null,
     activeLocationId: null,
     activeLocationViewMode: "live",
@@ -1256,7 +1240,16 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       logFilePath: null,
       logDirectoryPath: null,
     },
-  };
+  });
+
+  // Transitional read mirror. The ~180 `state.x` reads in this file keep
+  // working while the store becomes the single source of truth; each view
+  // extracted in 4.2 drops its share of them and reads the store directly.
+  // Subscribed first, so it is refreshed before any other listener runs.
+  let state = store.getState();
+  store.subscribe((next) => {
+    state = next;
+  });
 
   let fileTreeHandle: FileTreeHandle | null = null;
   const fileTreeSnapshots = new Map<string, FileTreeSnapshot>();
@@ -1729,7 +1722,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
         closeModal({ backdrop: dialog });
       }
     }
-    state.activeDialog = null;
+    store.setState({ activeDialog: null });
   }
 
   function openDialog(dialogId: DialogId) {
@@ -1737,19 +1730,19 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     if (dialogId === "locations") {
       resetLocationForm();
     }
-    state.activeDialog = dialogId;
+    store.setState({ activeDialog: dialogId });
     openModal({
       backdrop: dialogs[dialogId],
       onClose: () => {
         if (state.activeDialog === dialogId) {
-          state.activeDialog = null;
+          store.setState({ activeDialog: null });
         }
       },
     });
   }
 
   function addActivityItem(item: ActivityItem) {
-    state.activity = [item, ...state.activity].slice(0, 36);
+    store.setState({ activity: [item, ...state.activity].slice(0, 36) });
     debouncedRenderActivity();
   }
 
@@ -1902,23 +1895,27 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
                 context: buildCredentialTestContext(state.profile),
               });
 
-              state.credentials = state.credentials.map((item) =>
-                item.id === result.credential.id ? result.credential : item,
-              );
+              store.setState({
+                credentials: state.credentials.map((item) =>
+                  item.id === result.credential.id ? result.credential : item,
+                ),
+              });
               if (!state.credentials.some((item) => item.id === result.credential.id)) {
-                state.credentials = [...state.credentials, result.credential];
+                store.setState({ credentials: [...state.credentials, result.credential] });
               }
 
-              state.profile = syncProfileCredentialState(
-                normalizeProfileDraft({
-                  ...state.profile,
-                  selectedCredential:
-                    state.profile.credentialProfileId === result.credential.id
-                      ? result.credential
-                      : state.profile.selectedCredential,
-                }),
-                state.credentials,
-              );
+              store.setState({
+                profile: syncProfileCredentialState(
+                  normalizeProfileDraft({
+                    ...state.profile,
+                    selectedCredential:
+                      state.profile.credentialProfileId === result.credential.id
+                        ? result.credential
+                        : state.profile.selectedCredential,
+                  }),
+                  state.credentials,
+                ),
+              });
               renderProfileSummary();
 
               const baseMessage = result.ok
@@ -1974,16 +1971,18 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
               }
 
               if (wasSelected) {
-                state.profile = syncProfileCredentialState(
-                  normalizeProfileDraft({
-                    ...state.profile,
-                    credentialProfileId: result.profile.credentialProfileId,
-                    selectedCredential: result.profile.selectedCredential,
-                    selectedCredentialAvailable: result.profile.selectedCredentialAvailable,
-                    credentialsStoredSecurely: result.profile.credentialsStoredSecurely,
-                  }),
-                  state.credentials.filter((item) => item.id !== credential.id),
-                );
+                store.setState({
+                  profile: syncProfileCredentialState(
+                    normalizeProfileDraft({
+                      ...state.profile,
+                      credentialProfileId: result.profile.credentialProfileId,
+                      selectedCredential: result.profile.selectedCredential,
+                      selectedCredentialAvailable: result.profile.selectedCredentialAvailable,
+                      credentialsStoredSecurely: result.profile.credentialsStoredSecurely,
+                    }),
+                    state.credentials.filter((item) => item.id !== credential.id),
+                  ),
+                });
               }
 
               const message = `Deleted credential "${credential.name}".`;
@@ -2206,12 +2205,15 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   }
 
   function readSettingsFromDom() {
-    state.profile = normalizeProfileDraft({
-      ...state.profile,
-      remotePollingEnabled: dom.remotePollingInput.checked,
-      pollIntervalSeconds: Number(dom.pollIntervalInput.value),
-      conflictStrategy: dom.conflictStrategySelect.value as StorageProfileDraft["conflictStrategy"],
-      activityDebugModeEnabled: dom.activityDebugModeInput.checked,
+    store.setState({
+      profile: normalizeProfileDraft({
+        ...state.profile,
+        remotePollingEnabled: dom.remotePollingInput.checked,
+        pollIntervalSeconds: Number(dom.pollIntervalInput.value),
+        conflictStrategy: dom.conflictStrategySelect
+          .value as StorageProfileDraft["conflictStrategy"],
+        activityDebugModeEnabled: dom.activityDebugModeInput.checked,
+      }),
     });
   }
 
@@ -2294,37 +2296,39 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   }
 
   async function refreshStatus() {
-    state.status = await client.getSyncStatus();
+    store.setState({ status: await client.getSyncStatus() });
     renderStatus();
   }
 
   async function refreshDebugLogState() {
-    state.debugLogState = await client.getActivityDebugLogState();
+    store.setState({ debugLogState: await client.getActivityDebugLogState() });
     renderDebugLogState();
   }
 
   async function refreshProviderDefinitions() {
     const definitions = await client.listProviderCapabilities();
-    state.providerDefinitions = definitions;
+    store.setState({ providerDefinitions: definitions });
     const currentProvider = state.profile.provider;
     const currentDefinition =
       definitions.find((definition) => definition.provider === currentProvider) ??
       defaultProviderDefinition(currentProvider);
-    state.profile = normalizeProfileDraft({
-      ...state.profile,
-      providerDefinition: currentDefinition,
-      capabilities:
-        state.profile.capabilities ??
-        capabilitiesFromProviderDefinition(currentDefinition, currentProvider),
-      syncLocations: state.profile.syncLocations.map((location) =>
-        hydrateSyncLocationMetadata(location),
-      ),
+    store.setState({
+      profile: normalizeProfileDraft({
+        ...state.profile,
+        providerDefinition: currentDefinition,
+        capabilities:
+          state.profile.capabilities ??
+          capabilitiesFromProviderDefinition(currentDefinition, currentProvider),
+        syncLocations: state.profile.syncLocations.map((location) =>
+          hydrateSyncLocationMetadata(location),
+        ),
+      }),
     });
   }
 
   async function refreshCredentials() {
-    state.credentials = await client.listCredentials();
-    state.profile = syncProfileCredentialState(state.profile, state.credentials);
+    store.setState({ credentials: await client.listCredentials() });
+    store.setState({ profile: syncProfileCredentialState(state.profile, state.credentials) });
     syncCreateLocationFormProviderFromProfile();
     renderProfileSummary();
     renderLocationRemoteBinState();
@@ -2372,15 +2376,17 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     const hydratedSyncLocations = syncLocations.map((location) =>
       hydrateSyncLocationMetadata(location),
     );
-    state.syncLocations = hydratedSyncLocations;
-    state.activeLocationId =
-      syncLocations.length === 0
-        ? null
-        : activeLocationExists
-          ? preferredActiveLocationId
-          : hydratedSyncLocations[0].id;
+    store.setState({ syncLocations: hydratedSyncLocations });
+    store.setState({
+      activeLocationId:
+        syncLocations.length === 0
+          ? null
+          : activeLocationExists
+            ? preferredActiveLocationId
+            : hydratedSyncLocations[0].id,
+    });
     if (state.activeLocationId === null) {
-      state.activeLocationViewMode = "live";
+      store.setState({ activeLocationViewMode: "live" });
     } else {
       const activeLocation =
         hydratedSyncLocations.find((location) => location.id === state.activeLocationId) ?? null;
@@ -2389,13 +2395,15 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
         activeLocation &&
         !canViewLocationBin(activeLocation)
       ) {
-        state.activeLocationViewMode = "live";
+        store.setState({ activeLocationViewMode: "live" });
       }
     }
-    state.profile = normalizeProfileDraft({
-      ...state.profile,
-      syncLocations: hydratedSyncLocations,
-      activeLocationId: state.activeLocationId,
+    store.setState({
+      profile: normalizeProfileDraft({
+        ...state.profile,
+        syncLocations: hydratedSyncLocations,
+        activeLocationId: state.activeLocationId,
+      }),
     });
   }
 
@@ -2438,13 +2446,15 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
     try {
       const stored = await persistence.saveSettings(toStoredProfile(state.profile));
-      state.profile = syncProfileCredentialState(
-        normalizeProfileDraft({
-          ...state.profile,
-          ...stored,
-        }),
-        state.credentials,
-      );
+      store.setState({
+        profile: syncProfileCredentialState(
+          normalizeProfileDraft({
+            ...state.profile,
+            ...stored,
+          }),
+          state.credentials,
+        ),
+      });
       writeSettingsToDom();
       renderProfileSummary();
       await refreshStatus();
@@ -2512,15 +2522,17 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       dom.credentialSecretKeyInput.value = "";
       dom.credentialServiceAccountInput.value = "";
       await refreshCredentials();
-      state.profile = syncProfileCredentialState(
-        normalizeProfileDraft({
-          ...state.profile,
-          provider: created.provider,
-          credentialProfileId: created.id,
-          selectedCredential: created,
-        }),
-        state.credentials,
-      );
+      store.setState({
+        profile: syncProfileCredentialState(
+          normalizeProfileDraft({
+            ...state.profile,
+            provider: created.provider,
+            credentialProfileId: created.id,
+            selectedCredential: created,
+          }),
+          state.credentials,
+        ),
+      });
       syncCreateLocationFormProviderFromProfile();
       renderProfileSummary();
       renderLocationRemoteBinState();
@@ -2867,7 +2879,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
     try {
       const updatedProfile = await client.setSyncLocationVersioning(editingId, newEnabled);
-      state.syncLocations = updatedProfile.syncLocations;
+      store.setState({ syncLocations: updatedProfile.syncLocations });
       renderLocationsList();
       renderLocationDropdown();
       setObjectVersioningEnabled(newEnabled);
@@ -4094,15 +4106,17 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     conflictResolutionModal.close();
     const selection = decodeLocationSelectValue(dom.activeLocationSelect.value);
     clearBinSelection();
-    state.activeLocationId = selection.locationId;
+    store.setState({ activeLocationId: selection.locationId });
     const selectedLocation = selection.locationId
       ? (state.syncLocations.find((location) => location.id === selection.locationId) ?? null)
       : null;
-    state.activeLocationViewMode =
-      selection.mode === "bin" && selectedLocation && !canViewLocationBin(selectedLocation)
-        ? "live"
-        : selection.mode;
-    state.profile = { ...state.profile, activeLocationId: state.activeLocationId };
+    store.setState({
+      activeLocationViewMode:
+        selection.mode === "bin" && selectedLocation && !canViewLocationBin(selectedLocation)
+          ? "live"
+          : selection.mode,
+    });
+    store.setState({ profile: { ...state.profile, activeLocationId: state.activeLocationId } });
     void persistence.saveSettings(toStoredProfile(state.profile));
     renderProfileSummary();
     renderFileTreeViewState();
@@ -4228,7 +4242,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   });
 
   const unlistenStatus = await client.listenSyncStatus((status) => {
-    state.status = status;
+    store.setState({ status: status });
     renderStatus();
     addActivity(
       "info",
@@ -4249,8 +4263,8 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   window.addEventListener("beforeunload", handleBeforeUnload);
 
   const storedProfile = await persistence.load();
-  state.profile = applyStoredProfile(storedProfile);
-  state.activeLocationId = storedProfile.activeLocationId ?? null;
+  store.setState({ profile: applyStoredProfile(storedProfile) });
+  store.setState({ activeLocationId: storedProfile.activeLocationId ?? null });
   writeSettingsToDom();
   renderLocationRemoteBinState();
   renderFileTreeViewState();
