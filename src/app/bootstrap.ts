@@ -12,6 +12,7 @@ import {
 import { createNativeActivity, createUiActivity } from "./activity";
 import { createStorageGoblinClient } from "./client";
 import { debounce } from "../lib/debounce";
+import { createLatest, isSuperseded } from "../lib/latest";
 import { setButtonBusy } from "../lib/dom";
 import { createAppStore, type DialogId } from "../state/app-state";
 import { appendActivity, createActivityView } from "../views/activity/activity-view";
@@ -1191,7 +1192,12 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   let fileTreeHandle: FileTreeHandle | null = null;
   const fileTreeSnapshots = new Map<string, FileTreeSnapshot>();
   let selectedBinPaths = new Set<string>();
-  let fileTreeRequestSequence = 0;
+  // Only the newest file-tree load is allowed to touch the UI. Previously a
+  // hand-rolled counter with `if (sequence !== current) return` checks scattered
+  // through the body; `latest()` makes the same guard structural.
+  const fileTreeLatest = createLatest("file tree");
+  /** Identifies the in-flight load, so a stale timer cannot show its spinner. */
+  let fileTreeLoadToken = 0;
   /** Version counts per file path for the active versioned location. */
   let activeVersionCounts: Map<string, number> | undefined;
   const asyncConfirm = createAsyncConfirmController();
@@ -1319,19 +1325,21 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     }
   }
 
-  function beginFileTreeLoading(requestSequence: number) {
+  function beginFileTreeLoading(token: number) {
     clearFileTreeLoadingTimer();
     setFileTreeLoadingVisible(false);
+    // Delayed so a fast load never flashes a spinner.
     fileTreeLoadingTimer = setTimeout(() => {
       fileTreeLoadingTimer = null;
-      if (requestSequence === fileTreeRequestSequence) {
+      if (token === fileTreeLoadToken) {
         setFileTreeLoadingVisible(true);
       }
     }, FILE_TREE_LOADING_DELAY_MS);
   }
 
-  function endFileTreeLoading(requestSequence?: number) {
-    if (typeof requestSequence === "number" && requestSequence !== fileTreeRequestSequence) {
+  function endFileTreeLoading(token?: number) {
+    // A superseded load must not hide the spinner the newer one is showing.
+    if (typeof token === "number" && token !== fileTreeLoadToken) {
       return;
     }
 
@@ -3854,57 +3862,59 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       clearBinSelection();
     }
     const viewKey = getFileTreeViewKey(locationId, mode);
-    const requestSequence = ++fileTreeRequestSequence;
-    beginFileTreeLoading(requestSequence);
+    const token = ++fileTreeLoadToken;
+    beginFileTreeLoading(token);
 
     try {
-      const activeLocation = getActiveLocation() ?? getSavedActiveLocation();
-      const isVersioningEnabled =
-        mode === "live" && (activeLocation?.objectVersioningEnabled ?? false);
+      await fileTreeLatest.run(async () => {
+        const activeLocation = getActiveLocation() ?? getSavedActiveLocation();
+        const isVersioningEnabled =
+          mode === "live" && (activeLocation?.objectVersioningEnabled ?? false);
 
-      const [entries, versionCountEntries] = await Promise.all([
-        mode === "bin" ? client.listBinEntries(locationId) : client.listFileEntries(locationId),
-        isVersioningEnabled
-          ? client.listVersionCounts(locationId).catch(() => [] as VersionCountEntry[])
-          : Promise.resolve([] as VersionCountEntry[]),
-      ]);
+        const [entries, versionCountEntries] = await Promise.all([
+          mode === "bin" ? client.listBinEntries(locationId) : client.listFileEntries(locationId),
+          isVersioningEnabled
+            ? client.listVersionCounts(locationId).catch(() => [] as VersionCountEntry[])
+            : Promise.resolve([] as VersionCountEntry[]),
+        ]);
 
-      if (requestSequence !== fileTreeRequestSequence) {
-        return;
-      }
+        if (state.activeLocationId !== locationId || state.activeLocationViewMode !== mode) {
+          return;
+        }
 
-      if (state.activeLocationId !== locationId || state.activeLocationViewMode !== mode) {
-        return;
-      }
+        const nextVersionCounts = isVersioningEnabled
+          ? new Map(versionCountEntries.map((e) => [e.path, e.count]))
+          : undefined;
+        const nextVersionCountsJson = serializeVersionCounts(nextVersionCounts);
+        activeVersionCounts = nextVersionCounts;
 
-      const nextVersionCounts = isVersioningEnabled
-        ? new Map(versionCountEntries.map((e) => [e.path, e.count]))
-        : undefined;
-      const nextVersionCountsJson = serializeVersionCounts(nextVersionCounts);
-      activeVersionCounts = nextVersionCounts;
+        const entriesJson = JSON.stringify(entries);
+        const cachedSnapshot = getViewSnapshot(viewKey);
+        if (
+          cachedSnapshot?.entriesJson === entriesJson &&
+          cachedSnapshot.versionCountsJson === nextVersionCountsJson &&
+          fileTreeHandle
+        ) {
+          renderStatus();
+          return;
+        }
 
-      const entriesJson = JSON.stringify(entries);
-      const cachedSnapshot = getViewSnapshot(viewKey);
-      if (
-        cachedSnapshot?.entriesJson === entriesJson &&
-        cachedSnapshot.versionCountsJson === nextVersionCountsJson &&
-        fileTreeHandle
-      ) {
+        fileTreeSnapshots.set(viewKey, {
+          viewKey,
+          entries,
+          entriesJson,
+          versionCounts: nextVersionCounts,
+          versionCountsJson: nextVersionCountsJson,
+        });
+        renderFileTreeEntries(entries, mode, nextVersionCounts);
         renderStatus();
-        return;
-      }
-
-      fileTreeSnapshots.set(viewKey, {
-        viewKey,
-        entries,
-        entriesJson,
-        versionCounts: nextVersionCounts,
-        versionCountsJson: nextVersionCountsJson,
       });
-      renderFileTreeEntries(entries, mode, nextVersionCounts);
-      renderStatus();
+    } catch (error) {
+      // A superseded load is the expected outcome when the user clicks around;
+      // anything else is a real failure and must not be swallowed.
+      if (!isSuperseded(error)) throw error;
     } finally {
-      endFileTreeLoading(requestSequence);
+      endFileTreeLoading(token);
     }
   }
 
