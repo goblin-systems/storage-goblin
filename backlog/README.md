@@ -14,9 +14,14 @@ this directory with findings, workstreams, task breakdowns, acceptance criteria,
 | 5 | [phase-5-ux-overhaul.md](phase-5-ux-overhaul.md) | UX overhaul: onboarding, status model, conflict UX, language | 4 | not started |
 | 6 | [phase-6-flagship-distribution.md](phase-6-flagship-distribution.md) | Distribution: signing, auto-update, crash reporting, docs, Azure | 1–5 | not started |
 
-Every "landed" above means *landed on the unpushed `overhaul/phase-1` branch* — nothing has
-run in CI and nothing has been validated against a real bucket. Read each phase doc's Status
-section for the honest per-item picture; the checkboxes alone overstate completeness.
+Every "landed" above means *landed on the `overhaul/phase-1` branch* (pushed 2026-08-02, not
+merged). Functionality has been verified locally; nothing has run in CI and nothing has been
+validated against a real bucket. Read each phase doc's Status section for the honest per-item
+picture — the checkboxes alone overstate completeness.
+
+**[next-steps.md](next-steps.md) is the current plan.** The phase docs below are the detailed
+specs; that document is the sequencing argument for what to do next, grounded in the state of
+the code after phases 0–3 rather than the assumptions the phase docs were written under.
 
 ## Current-state assessment (evidence summary)
 
