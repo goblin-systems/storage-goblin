@@ -12,7 +12,7 @@ use std::{
 use super::error::SyncError;
 use super::remote_bin::{namespace_prefix, ManagedLifecycleRulePlan};
 use super::sanitizer::sanitize_sensitive_text;
-use super::transfer::DownloadWriter;
+use super::transfer::{DownloadExpectation, DownloadWriter};
 
 const STORAGE_SCOPE: &str = "https://www.googleapis.com/auth/devstorage.full_control";
 
@@ -573,6 +573,9 @@ impl GcsClient {
         key: &str,
         path: &Path,
     ) -> Result<(), SyncError> {
+        // Verified before the rename: a short body must not reach the
+        // destination path, where the next scan would read it as a local edit.
+        let expectation = DownloadExpectation::with_size(response.content_length());
         let mut writer = DownloadWriter::create(path)?;
 
         loop {
@@ -588,7 +591,7 @@ impl GcsClient {
             }
         }
 
-        writer.finish()?;
+        writer.finish_verified(&expectation)?;
         Ok(())
     }
 

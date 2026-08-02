@@ -133,6 +133,13 @@ pub(crate) struct DownloadWriter {
     file: Option<File>,
     bytes_written: u64,
     hasher: Sha256,
+    /// Set only once the temp file has been renamed into place.
+    ///
+    /// Deliberately not inferred from `file` being taken: verification happens
+    /// after the handle is closed but before the rename, so "handle closed" and
+    /// "committed" are different facts. Conflating them leaked the temp file on
+    /// every failed verification.
+    committed: bool,
 }
 
 impl DownloadWriter {
@@ -163,6 +170,7 @@ impl DownloadWriter {
             file: Some(file),
             bytes_written: 0,
             hasher: Sha256::new(),
+            committed: false,
         })
     }
 
@@ -191,7 +199,23 @@ impl DownloadWriter {
     /// contents are still only in the page cache, so a power loss would leave
     /// an empty-but-correctly-named file — exactly the corruption this module
     /// exists to prevent.
-    pub fn finish(mut self) -> Result<DownloadOutcome, SyncError> {
+    #[cfg(test)]
+    pub fn finish(self) -> Result<DownloadOutcome, SyncError> {
+        self.finish_verified(&DownloadExpectation::default())
+    }
+
+    /// Check what landed against what was promised, then commit it
+    /// (backlog phase 2.1 post-transfer verification).
+    ///
+    /// Verification happens **before** the rename, which is the entire point:
+    /// once the file is at its real path a corrupt download is indistinguishable
+    /// from a local edit, and the next cycle would faithfully upload the
+    /// corruption over the good remote copy. Failing here leaves the
+    /// destination untouched and the temp file discarded by `Drop`.
+    pub fn finish_verified(
+        mut self,
+        expectation: &DownloadExpectation,
+    ) -> Result<DownloadOutcome, SyncError> {
         let mut file = self
             .file
             .take()
@@ -211,6 +235,9 @@ impl DownloadWriter {
         })?;
         drop(file);
 
+        let fingerprint = self.hex_fingerprint();
+        expectation.check(&self.final_path, self.bytes_written, &fingerprint)?;
+
         // Windows will not rename onto an existing file.
         if self.final_path.exists() {
             fs::remove_file(&self.final_path).map_err(|error| {
@@ -227,25 +254,86 @@ impl DownloadWriter {
                 self.final_path.display()
             ))
         })?;
-
-        let digest = self.hasher.clone().finalize();
-        let mut fingerprint = String::with_capacity(digest.len() * 2);
-        for byte in digest {
-            use std::fmt::Write as _;
-            let _ = write!(&mut fingerprint, "{byte:02x}");
-        }
+        self.committed = true;
 
         Ok(DownloadOutcome {
             bytes_written: self.bytes_written,
             fingerprint,
         })
     }
+
+    fn hex_fingerprint(&self) -> String {
+        let digest = self.hasher.clone().finalize();
+        let mut fingerprint = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut fingerprint, "{byte:02x}");
+        }
+        fingerprint
+    }
+}
+
+/// What a download was promised to contain, for verification before commit.
+///
+/// Every field is optional because the providers differ in what they will tell
+/// us: GCS listings carry a content fingerprint, S3 listings do not, and an
+/// S3 ETag is only a content hash for objects that were not uploaded in parts.
+/// Whatever is known gets checked; nothing is invented.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DownloadExpectation {
+    /// Byte count the provider said the object has.
+    pub size: Option<u64>,
+    /// SHA-256 the provider recorded for the content, if any.
+    pub fingerprint: Option<String>,
+}
+
+impl DownloadExpectation {
+    pub fn with_size(size: Option<u64>) -> Self {
+        Self {
+            size,
+            fingerprint: None,
+        }
+    }
+
+    fn check(
+        &self,
+        final_path: &Path,
+        bytes_written: u64,
+        fingerprint: &str,
+    ) -> Result<(), SyncError> {
+        // Size is the cheap check and catches the failure that actually
+        // happens: a connection dropped mid-body, leaving a short file that
+        // otherwise looks perfectly valid.
+        if let Some(expected) = self.size {
+            if expected != bytes_written {
+                return Err(SyncError::transient(format!(
+                    "Download of '{}' is incomplete: expected {expected} bytes, received \
+                     {bytes_written}. The file was not written; the transfer will be retried.",
+                    final_path.display()
+                )));
+            }
+        }
+
+        if let Some(expected) = self.fingerprint.as_deref() {
+            if !expected.eq_ignore_ascii_case(fingerprint) {
+                return Err(SyncError::transient(format!(
+                    "Download of '{}' does not match the content the provider recorded \
+                     (expected {expected}, got {fingerprint}). The file was not written.",
+                    final_path.display()
+                )));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Drop for DownloadWriter {
     fn drop(&mut self) {
-        // Only reached when finish() was not called (error or early return).
-        if self.file.take().is_some() {
+        // Anything that did not reach the rename leaves debris behind: a
+        // failed verification, an early return, a `?`, or a panic.
+        if !self.committed {
+            self.file.take();
             let _ = fs::remove_file(&self.temp_path);
         }
     }
@@ -326,7 +414,117 @@ pub(crate) fn transfer_timeout(size_bytes: u64) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use super::{insufficient_space, local_write_failure_message};
+    use super::{insufficient_space, local_write_failure_message, DownloadExpectation};
+
+    #[test]
+    fn a_truncated_download_never_reaches_the_destination() {
+        let root = temp_dir("verify-truncated");
+        let destination = root.join("important.bin");
+        fs::write(&destination, b"the good original contents").expect("seed destination");
+
+        let mut writer = DownloadWriter::create(&destination).expect("writer should open");
+        writer.write_chunk(b"short").expect("write should succeed");
+
+        // The provider said 1000 bytes; the connection died after 5.
+        let error = writer
+            .finish_verified(&DownloadExpectation::with_size(Some(1000)))
+            .expect_err("a short body must be rejected");
+        assert!(
+            error.message.contains("incomplete"),
+            "got: {}",
+            error.message
+        );
+        // Retryable: a dropped connection deserves another attempt.
+        assert!(error.is_retryable());
+
+        // This is the assertion that matters. If the truncated file had landed,
+        // the next scan would read it as a local edit and upload five bytes
+        // over the good remote copy.
+        assert_eq!(
+            fs::read(&destination).expect("destination should still exist"),
+            b"the good original contents",
+            "the original file must be untouched after a failed verification"
+        );
+        assert_eq!(
+            fs::read_dir(&root).expect("read dir").count(),
+            1,
+            "the temp file must be discarded, not left behind"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_download_whose_content_does_not_match_is_rejected() {
+        let root = temp_dir("verify-fingerprint");
+        let destination = root.join("f.bin");
+
+        let mut writer = DownloadWriter::create(&destination).expect("writer should open");
+        writer.write_chunk(b"actual bytes").expect("write");
+
+        let error = writer
+            .finish_verified(&DownloadExpectation {
+                size: None,
+                fingerprint: Some(
+                    "0000000000000000000000000000000000000000000000000000000000000000".into(),
+                ),
+            })
+            .expect_err("a fingerprint mismatch must be rejected");
+
+        assert!(
+            error.message.contains("does not match"),
+            "got: {}",
+            error.message
+        );
+        assert!(
+            !destination.exists(),
+            "a corrupt download must not be written"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_download_matching_its_expectation_commits_normally() {
+        let root = temp_dir("verify-ok");
+        let destination = root.join("f.bin");
+
+        let mut writer = DownloadWriter::create(&destination).expect("writer should open");
+        writer.write_chunk(b"twelve bytes").expect("write");
+        let probe = writer.hex_fingerprint();
+
+        let mut writer = DownloadWriter::create(&destination).expect("writer should open");
+        writer.write_chunk(b"twelve bytes").expect("write");
+        let outcome = writer
+            .finish_verified(&DownloadExpectation {
+                size: Some(12),
+                fingerprint: Some(probe.clone()),
+            })
+            .expect("a matching download should commit");
+
+        assert_eq!(outcome.bytes_written, 12);
+        assert_eq!(outcome.fingerprint, probe);
+        assert_eq!(fs::read(&destination).expect("read"), b"twelve bytes");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_unknown_expectation_does_not_block_a_download() {
+        // S3 listings carry no content hash; a missing expectation must mean
+        // "cannot check", never "reject".
+        let root = temp_dir("verify-unknown");
+        let destination = root.join("f.bin");
+
+        let mut writer = DownloadWriter::create(&destination).expect("writer should open");
+        writer.write_chunk(b"anything").expect("write");
+        writer
+            .finish_verified(&DownloadExpectation::default())
+            .expect("an unverifiable download must still be written");
+
+        assert!(destination.exists());
+        fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn a_disk_full_write_says_so_and_says_nothing_was_overwritten() {

@@ -15,7 +15,7 @@ use std::path::Path;
 
 use super::error::{SyncError, SyncErrorKind};
 use super::now_iso;
-use super::transfer::DownloadWriter;
+use super::transfer::{DownloadExpectation, DownloadWriter};
 
 pub const LOCAL_FINGERPRINT_METADATA_KEY: &str = "storage-goblin-local-fingerprint";
 
@@ -409,7 +409,14 @@ pub async fn download_file(
             )
         })?;
 
-    stream_body_to_path(response.body, key, path).await
+    // The provider tells us how big the object is; check what we received
+    // against it before committing anything to the destination.
+    let expectation = DownloadExpectation::with_size(
+        response
+            .content_length()
+            .and_then(|length| u64::try_from(length).ok()),
+    );
+    stream_body_to_path(response.body, key, path, &expectation).await
 }
 
 /// Stream an S3 response body to disk through the atomic download writer,
@@ -418,6 +425,7 @@ async fn stream_body_to_path(
     mut body: aws_sdk_s3::primitives::ByteStream,
     key: &str,
     path: &Path,
+    expectation: &DownloadExpectation,
 ) -> Result<(), SyncError> {
     let mut writer = DownloadWriter::create(path)?;
 
@@ -428,7 +436,7 @@ async fn stream_body_to_path(
         writer.write_chunk(&chunk)?;
     }
 
-    writer.finish()?;
+    writer.finish_verified(expectation)?;
     Ok(())
 }
 
@@ -1117,10 +1125,16 @@ pub async fn download_file_version(
                 "failed to download version '{version_id}' of '{key}' from bucket '{bucket}': {error}"
             )))?;
 
+    let expectation = DownloadExpectation::with_size(
+        response
+            .content_length()
+            .and_then(|length| u64::try_from(length).ok()),
+    );
     stream_body_to_path(
         response.body,
         &format!("version '{version_id}' of '{key}'"),
         path,
+        &expectation,
     )
     .await
 }
