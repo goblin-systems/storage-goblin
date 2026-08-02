@@ -19,9 +19,9 @@ merged). Functionality has been verified locally; nothing has run in CI and noth
 validated against a real bucket. Read each phase doc's Status section for the honest per-item
 picture — the checkboxes alone overstate completeness.
 
-**[next-steps.md](next-steps.md) is the current plan.** The phase docs below are the detailed
-specs; that document is the sequencing argument for what to do next, grounded in the state of
-the code after phases 0–3 rather than the assumptions the phase docs were written under.
+**[overhaul-status.md](overhaul-status.md) is the single source of truth for progress and
+remaining work.** Start there: it says where every phase stands, what is left in each, and
+what to do next. The phase docs below are the detailed specs behind it.
 
 ## Current-state assessment (evidence summary)
 

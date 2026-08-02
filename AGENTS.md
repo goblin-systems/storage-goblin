@@ -2,9 +2,10 @@
 
 ## Overhaul status
 
-- **Phases 0–3 have landed on `overhaul/phase-1`** (all unpushed, no CI run, never validated
-  against a real bucket). Read each phase doc's Status section before building on this —
-  they list what is genuinely still open, which the checkboxes alone overstate.
+- **Read `backlog/overhaul-status.md` first.** It is the single source of truth for what is
+  done and what is left. Phases 0–3 have landed on `overhaul/phase-1` (pushed, not merged);
+  phase 4 is in progress. Nothing has run in CI and nothing has been validated against a real
+  bucket — the checkboxes in the phase docs overstate completeness on their own.
 - **Backend layout:** the 12,404-line `commands.rs` is now ~2,180 lines (Tauri command surface +
   shared DTOs). Concerns live in sibling modules: `sync_service`, `queue_service`,
   `transfer_service`, `bin_service`, `location_service`, `file_query_service`, `conflict_service`,
