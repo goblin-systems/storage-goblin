@@ -21,6 +21,7 @@ use super::platform::{
     rename_local_file_for_pair, resolve_local_download_path, trash_local_file_for_pair,
 };
 use super::profile_store::SyncPair;
+use super::progress::ProgressReporter;
 use super::remote_bin::deleted_object_key;
 use super::remote_index::{
     read_remote_index_snapshot_for_pair, write_remote_index_snapshot_for_pair, RemoteIndexSnapshot,
@@ -165,17 +166,23 @@ pub(crate) async fn perform_planned_upload_for_pair(
     }
 }
 
+/// Download one planned object.
+///
+/// `make_progress` is a factory rather than a value because `with_retry` may
+/// run the operation several times, and each attempt needs its own reporter —
+/// a retried transfer restarts at zero bytes and its progress must too.
 pub(crate) async fn perform_planned_download_for_pair(
     executor: &PairTransferExecutor,
     pair: &SyncPair,
     key: &str,
     _path: &str,
     local_path: &Path,
+    make_progress: impl Fn() -> Option<ProgressReporter>,
 ) -> Result<(), String> {
     match executor {
         PairTransferExecutor::Real(client) => with_retry(
             || format!("download '{key}'"),
-            || object_store::download_file(client, &pair.bucket, key, local_path),
+            || object_store::download_file(client, &pair.bucket, key, local_path, make_progress()),
         )
         .await
         .map_err(String::from),

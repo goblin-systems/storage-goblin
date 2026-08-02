@@ -23,6 +23,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 use super::error::SyncError;
+use super::progress::ProgressReporter;
 
 /// Marks in-progress downloads. Chosen so it cannot collide with a real
 /// synced file: the scanner skips this extension, and the sweeper removes it.
@@ -133,6 +134,8 @@ pub(crate) struct DownloadWriter {
     file: Option<File>,
     bytes_written: u64,
     hasher: Sha256,
+    /// Reports bytes as they land, at a rate a UI can consume.
+    progress: Option<ProgressReporter>,
     /// Set only once the temp file has been renamed into place.
     ///
     /// Deliberately not inferred from `file` being taken: verification happens
@@ -170,8 +173,25 @@ impl DownloadWriter {
             file: Some(file),
             bytes_written: 0,
             hasher: Sha256::new(),
+            progress: None,
             committed: false,
         })
+    }
+
+    /// Report progress as bytes land.
+    ///
+    /// `sink` is called only when the throttle allows it, so a caller cannot
+    /// accidentally make a chunked download emit millions of events.
+    pub fn with_progress(mut self, reporter: Option<ProgressReporter>) -> Self {
+        self.progress = reporter;
+        self
+    }
+
+    fn report_progress(&mut self, final_update: bool) {
+        let bytes = self.bytes_written;
+        if let Some(reporter) = self.progress.as_mut() {
+            reporter.report(bytes, final_update);
+        }
     }
 
     pub fn write_chunk(&mut self, chunk: &[u8]) -> Result<(), SyncError> {
@@ -190,6 +210,7 @@ impl DownloadWriter {
 
         self.hasher.update(chunk);
         self.bytes_written += chunk.len() as u64;
+        self.report_progress(false);
         Ok(())
     }
 
@@ -237,6 +258,9 @@ impl DownloadWriter {
 
         let fingerprint = self.hex_fingerprint();
         expectation.check(&self.final_path, self.bytes_written, &fingerprint)?;
+        // Only after verification passed: reporting 100% for a download that is
+        // about to be rejected would be a lie the user watches happen.
+        self.report_progress(true);
 
         // Windows will not rename onto an existing file.
         if self.final_path.exists() {

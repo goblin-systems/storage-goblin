@@ -10,8 +10,8 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use super::activity::ActivityDebugState;
 use super::commands::{
-    emit_error_activity, emit_info_activity, emit_success_activity, run_with_timeout,
-    PLANNED_UPLOAD_TIMEOUT,
+    emit_error_activity, emit_info_activity, emit_success_activity, emit_transfer_progress,
+    run_with_timeout, PLANNED_UPLOAD_TIMEOUT,
 };
 use super::coordinator::SyncCoordinator;
 use super::credentials_store::StoredCredentials;
@@ -21,6 +21,7 @@ use super::platform::{
     available_disk_space, resolve_local_download_path, resolve_local_upload_path,
 };
 use super::profile_store::SyncPair;
+use super::progress::{ProgressReporter, ProgressThrottle};
 use super::queue_schedule::{plan_stages, Schedulable, StageMode};
 use super::remote_index::read_remote_index_snapshot_for_pair;
 use super::s3_adapter;
@@ -801,7 +802,18 @@ async fn run_download_item<R: Runtime>(
 
     let download_budget = transfer_timeout(item.remote_size.unwrap_or_default());
     match run_with_timeout(
-        perform_planned_download_for_pair(executor, pair, &key, &item.path, &local_path),
+        perform_planned_download_for_pair(executor, pair, &key, &item.path, &local_path, || {
+            let app = app.clone();
+            Some(ProgressReporter::new(
+                ProgressThrottle::new(
+                    &pair.id,
+                    &item.path,
+                    item.remote_size,
+                    std::time::Instant::now(),
+                ),
+                move |update| emit_transfer_progress(&app, &update),
+            ))
+        }),
         download_budget,
         || {
             format!(

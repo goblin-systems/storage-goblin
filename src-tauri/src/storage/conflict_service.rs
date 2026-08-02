@@ -68,7 +68,7 @@ pub(crate) async fn download_remote_file_for_pair(
     }
 
     let client = object_store::build_client(&storage_config_for_pair(pair, credentials)).await?;
-    object_store::download_file(&client, &pair.bucket, key, destination_path)
+    object_store::download_file(&client, &pair.bucket, key, destination_path, None)
         .await
         .map_err(String::from)
 }

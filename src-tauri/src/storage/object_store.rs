@@ -6,6 +6,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use super::error::SyncError;
+use super::progress::ProgressReporter;
 use super::{
     credentials_store::StoredCredentials,
     gcs_adapter::{
@@ -567,12 +568,13 @@ pub async fn download_file(
     bucket: &str,
     key: &str,
     path: &Path,
+    progress: Option<ProgressReporter>,
 ) -> Result<(), SyncError> {
     match client {
         ObjectStoreClient::Aws(client) => {
-            s3_adapter::download_file(client, bucket, key, path).await
+            s3_adapter::download_file(client, bucket, key, path, progress).await
         }
-        ObjectStoreClient::Gcs(client) => client.download_object(bucket, key, path).await,
+        ObjectStoreClient::Gcs(client) => client.download_object(bucket, key, path, progress).await,
     }
 }
 

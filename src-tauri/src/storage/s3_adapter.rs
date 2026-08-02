@@ -15,6 +15,7 @@ use std::path::Path;
 
 use super::error::{SyncError, SyncErrorKind};
 use super::now_iso;
+use super::progress::ProgressReporter;
 use super::transfer::{DownloadExpectation, DownloadWriter};
 
 pub const LOCAL_FINGERPRINT_METADATA_KEY: &str = "storage-goblin-local-fingerprint";
@@ -395,6 +396,7 @@ pub async fn download_file(
     bucket: &str,
     key: &str,
     path: &Path,
+    progress: Option<ProgressReporter>,
 ) -> Result<(), SyncError> {
     let response = client
         .get_object()
@@ -416,7 +418,7 @@ pub async fn download_file(
             .content_length()
             .and_then(|length| u64::try_from(length).ok()),
     );
-    stream_body_to_path(response.body, key, path, &expectation).await
+    stream_body_to_path(response.body, key, path, &expectation, progress).await
 }
 
 /// Stream an S3 response body to disk through the atomic download writer,
@@ -426,8 +428,9 @@ async fn stream_body_to_path(
     key: &str,
     path: &Path,
     expectation: &DownloadExpectation,
+    progress: Option<ProgressReporter>,
 ) -> Result<(), SyncError> {
-    let mut writer = DownloadWriter::create(path)?;
+    let mut writer = DownloadWriter::create(path)?.with_progress(progress);
 
     while let Some(chunk) = body.next().await {
         let chunk = chunk.map_err(|error| {
@@ -1135,6 +1138,7 @@ pub async fn download_file_version(
         &format!("version '{version_id}' of '{key}'"),
         path,
         &expectation,
+        None,
     )
     .await
 }

@@ -31,6 +31,7 @@ pub mod pair_backoff;
 pub mod platform;
 pub mod polling_service;
 pub mod profile_store;
+pub mod progress;
 pub mod provider;
 pub mod queue_schedule;
 pub mod queue_service;

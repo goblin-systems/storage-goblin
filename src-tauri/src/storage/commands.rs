@@ -222,6 +222,40 @@ pub struct ConflictResolutionDetails {
 pub(crate) const PLANNED_UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 pub(crate) const DIRTY_PAIR_DEBOUNCE: Duration = Duration::from_millis(750);
 pub(crate) const LOCAL_SNAPSHOT_STALE_TTL: Duration = Duration::from_secs(300);
+/// Byte-level transfer progress for the UI (backlog phase 2.1).
+///
+/// Separate from the status event because it fires orders of magnitude more
+/// often; folding it into `SyncStatus` would mean re-serializing the whole
+/// status object several times a second per in-flight file.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TransferProgressEvent {
+    pub location_id: String,
+    pub path: String,
+    pub bytes_done: u64,
+    pub bytes_total: Option<u64>,
+    pub bytes_per_second: Option<u64>,
+    /// 0.0..=1.0, absent when the object size is unknown.
+    pub fraction: Option<f64>,
+}
+
+pub(crate) fn emit_transfer_progress<R: Runtime>(
+    app: &AppHandle<R>,
+    progress: &crate::storage::progress::TransferProgress,
+) {
+    let _ = app.emit(
+        "storage://transfer-progress",
+        TransferProgressEvent {
+            location_id: progress.pair_id.clone(),
+            path: progress.path.clone(),
+            bytes_done: progress.bytes_done,
+            bytes_total: progress.bytes_total,
+            bytes_per_second: progress.bytes_per_second,
+            fraction: progress.fraction(),
+        },
+    );
+}
+
 pub(crate) fn emit_status<R: Runtime>(app: &AppHandle<R>, status: &SyncStatus) {
     let _ = app.emit("storage://sync-status-changed", status);
 }
@@ -1948,7 +1982,7 @@ pub async fn toggle_local_copy(
                 }
             }
             if let Err(e) =
-                object_store::download_file(&client, &pair.bucket, &key, &local_path).await
+                object_store::download_file(&client, &pair.bucket, &key, &local_path, None).await
             {
                 errors.push(String::from(e));
             }
@@ -4415,7 +4449,6 @@ mod tauri_command_tests {
             credential_profile_id: None,
             object_versioning_enabled: false,
             enabled: false,
-            failure_kind: None,
             remote_polling_enabled: false,
             poll_interval_seconds: 60,
             conflict_strategy: "preserve-both".into(),
@@ -4441,7 +4474,6 @@ mod tauri_command_tests {
             bucket: bucket.into(),
             credential_profile_id: Some(credential_id.into()),
             enabled: true,
-            failure_kind: None,
             remote_polling_enabled: false,
             poll_interval_seconds: 60,
             conflict_strategy: "preserve-both".into(),
@@ -4659,7 +4691,6 @@ mod tauri_command_tests {
                 credential_profile_id: None,
                 object_versioning_enabled: false,
                 enabled: false,
-                failure_kind: None,
                 remote_polling_enabled: true,
                 poll_interval_seconds: 120,
                 conflict_strategy: "prefer-local".into(),
@@ -4721,7 +4752,6 @@ mod tauri_command_tests {
                 credential_profile_id: None,
                 object_versioning_enabled: false,
                 enabled: false,
-                failure_kind: None,
                 remote_polling_enabled: true,
                 poll_interval_seconds: 120,
                 conflict_strategy: "ignored-by-normalization".into(),
@@ -5003,7 +5033,6 @@ mod tauri_command_tests {
                     local_folder: "C:/docs".into(),
                     bucket: "bucket-docs".into(),
                     enabled: true,
-                    failure_kind: None,
                     remote_polling_enabled: true,
                     poll_interval_seconds: 30,
                     ..SyncPair::default()
@@ -5014,7 +5043,6 @@ mod tauri_command_tests {
                     local_folder: "C:/photos".into(),
                     bucket: "bucket-photos".into(),
                     enabled: true,
-                    failure_kind: None,
                     remote_polling_enabled: false,
                     poll_interval_seconds: 120,
                     ..SyncPair::default()

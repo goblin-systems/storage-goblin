@@ -10,6 +10,7 @@ use std::{
 };
 
 use super::error::SyncError;
+use super::progress::ProgressReporter;
 use super::remote_bin::{namespace_prefix, ManagedLifecycleRulePlan};
 use super::sanitizer::sanitize_sensitive_text;
 use super::transfer::{DownloadExpectation, DownloadWriter};
@@ -546,6 +547,7 @@ impl GcsClient {
         bucket: &str,
         key: &str,
         path: &Path,
+        progress: Option<ProgressReporter>,
     ) -> Result<(), SyncError> {
         let response = self
             .authorized_get(&format!(
@@ -563,7 +565,7 @@ impl GcsClient {
             .await);
         }
 
-        Self::stream_response_to_path(response, key, path).await
+        Self::stream_response_to_path(response, key, path, progress).await
     }
 
     /// Stream a GCS response body to disk through the atomic download writer,
@@ -572,11 +574,12 @@ impl GcsClient {
         mut response: reqwest::Response,
         key: &str,
         path: &Path,
+        progress: Option<ProgressReporter>,
     ) -> Result<(), SyncError> {
         // Verified before the rename: a short body must not reach the
         // destination path, where the next scan would read it as a local edit.
         let expectation = DownloadExpectation::with_size(response.content_length());
-        let mut writer = DownloadWriter::create(path)?;
+        let mut writer = DownloadWriter::create(path)?.with_progress(progress);
 
         loop {
             let chunk = response.chunk().await.map_err(|error| {
@@ -878,7 +881,7 @@ impl GcsClient {
             .await);
         }
 
-        Self::stream_response_to_path(response, key, path).await
+        Self::stream_response_to_path(response, key, path, None).await
     }
 
     pub async fn copy_object_version(

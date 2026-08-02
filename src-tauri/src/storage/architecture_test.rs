@@ -26,6 +26,7 @@ const TAURI_FREE_CORE: &[&str] = &[
     "pair_backoff.rs",
     "coordinator.rs",
     "queue_schedule.rs",
+    "progress.rs",
     "retry.rs",
     "s3_upload.rs",
 ];
