@@ -42,7 +42,7 @@ const LEGACY_CAPS: Record<string, number> = {
   // Hand-written types + normalizers; shrinks as generation expands (4.1).
   "app/types.ts": 810,
   // The IPC client; splits by domain in 4.1.
-  "app/client.ts": 600,
+  "app/client.ts": 535,
   "app/client.test.ts": 605,
 };
 

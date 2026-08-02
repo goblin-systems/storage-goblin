@@ -1,4 +1,12 @@
-import { DEFAULT_STORED_PROFILE, normalizeStoredProfile } from "./profile";
+import { createBrowserStatus, phaseAfterBrowserSave } from "./browser-status";
+import {
+  EVENT_CHANNELS,
+  loadEventBackend,
+  onTransferProgress,
+  subscribe,
+  type TransferProgressEvent,
+} from "../ipc/events";
+import { normalizeStoredProfile } from "./profile";
 import {
   loadStoredProfileFromBrowserStorage,
   saveStoredProfileToBrowserStorage,
@@ -16,7 +24,6 @@ import type {
   DeleteCredentialResult,
   ConflictResolutionDetails,
   FileVersionEntry,
-  InventoryComparisonSummary,
   VersionComparisonDetails,
   NativeActivityEvent,
   ProviderDefinition,
@@ -24,7 +31,6 @@ import type {
   StorageProfileDraft,
   SyncLocation,
   SyncLocationDraft,
-  SyncPhase,
   SyncStatus,
   VersionCountEntry,
 } from "./types";
@@ -42,6 +48,7 @@ declare global {
 
 type StatusListener = (status: SyncStatus) => void;
 type ActivityListener = (event: NativeActivityEvent) => void;
+type TransferProgressListener = (event: TransferProgressEvent) => void;
 
 const browserListeners = new Set<StatusListener>();
 const browserActivityListeners = new Set<ActivityListener>();
@@ -87,82 +94,6 @@ function mockValidateConnection(profile: StorageProfileDraft): ConnectionValidat
       ? `Stub validation succeeded for ${profile.bucket}.`
       : "Stub validation requires folder, bucket, and a selected saved credential.",
   };
-}
-
-function createEmptyComparison(): InventoryComparisonSummary {
-  return {
-    comparedAt: "",
-    localFileCount: 0,
-    remoteObjectCount: 0,
-    exactMatchCount: 0,
-    localOnlyCount: 0,
-    remoteOnlyCount: 0,
-    sizeMismatchCount: 0,
-  };
-}
-
-function createOverview(comparison: InventoryComparisonSummary, pendingOperationCount: number) {
-  return {
-    localFiles: comparison.localFileCount,
-    remoteFiles: comparison.remoteObjectCount,
-    inSync: comparison.exactMatchCount,
-    notInSync: pendingOperationCount,
-  };
-}
-
-function createBrowserStatus(profile: StoredStorageProfile = DEFAULT_STORED_PROFILE): SyncStatus {
-  const comparison = createEmptyComparison();
-  const configured = Boolean(profile.localFolder && profile.bucket);
-  const pendingOperationCount = 0;
-  return {
-    phase: configured ? "idle" : "unconfigured",
-    lastSyncAt: null,
-    lastRescanAt: null,
-    lastRemoteRefreshAt: null,
-    lastError: null,
-    currentFolder: profile.localFolder || null,
-    currentBucket: profile.bucket || null,
-    currentPrefix: null,
-    remotePollingEnabled: profile.remotePollingEnabled,
-    pollIntervalSeconds: profile.pollIntervalSeconds,
-    pendingOperations: 0,
-    indexedFileCount: 0,
-    indexedDirectoryCount: 0,
-    indexedTotalBytes: 0,
-    remoteObjectCount: 0,
-    remoteTotalBytes: 0,
-    comparison,
-    overview: createOverview(comparison, pendingOperationCount),
-    plan: {
-      lastPlannedAt: null,
-      observedPathCount: 0,
-      uploadCount: 0,
-      downloadCount: 0,
-      conflictCount: 0,
-      noopCount: 0,
-      pendingOperationCount,
-      credentialsAvailable: profile.selectedCredentialAvailable,
-    },
-  };
-}
-
-function phaseAfterBrowserSave(profile: StoredStorageProfile, previousPhase: SyncPhase): SyncPhase {
-  if (!profile.localFolder || !profile.bucket) {
-    return "unconfigured";
-  }
-
-  switch (previousPhase) {
-    case "paused":
-      return "paused";
-    case "polling":
-      return profile.remotePollingEnabled ? "polling" : "idle";
-    case "syncing":
-      return profile.remotePollingEnabled ? "idle" : "syncing";
-    case "error":
-    case "unconfigured":
-    case "idle":
-      return "idle";
-  }
 }
 
 function applyBrowserProfileSave(profile: StoredStorageProfile): StoredStorageProfile {
@@ -220,6 +151,8 @@ export interface StorageGoblinClient {
   pauseSync(): Promise<SyncStatus>;
   listenSyncStatus(listener: StatusListener): Promise<() => void>;
   listenNativeActivity(listener: ActivityListener): Promise<() => void>;
+  /** Byte-level transfer progress (backlog phase 2.1). */
+  listenTransferProgress(listener: TransferProgressListener): Promise<() => void>;
   getActivityDebugLogState(): Promise<ActivityDebugLogState>;
   listProviderCapabilities(): Promise<ProviderDefinition[]>;
   openActivityDebugLogFolder(): Promise<void>;
@@ -400,6 +333,9 @@ export function createStorageGoblinClient(): StorageGoblinClient {
       }
       return invokeCommand<SyncStatus>("pause_sync");
     },
+    // Both subscriptions go through ipc/events, which owns the channel names
+    // and the dynamic import. The browser-preview fallback stays here because
+    // it is a property of *this* client, not of the event layer.
     async listenSyncStatus(listener) {
       if (!native) {
         browserListeners.add(listener);
@@ -408,17 +344,7 @@ export function createStorageGoblinClient(): StorageGoblinClient {
         };
       }
 
-      const event = await import("@tauri-apps/api/event");
-      const unlisten = await event.listen<SyncStatus>(
-        "storage://sync-status-changed",
-        (payload) => {
-          listener(payload.payload);
-        },
-      );
-
-      return () => {
-        unlisten();
-      };
+      return subscribe<SyncStatus>(await loadEventBackend(), EVENT_CHANNELS.syncStatus, listener);
     },
     async listenNativeActivity(listener) {
       if (!native) {
@@ -428,14 +354,16 @@ export function createStorageGoblinClient(): StorageGoblinClient {
         };
       }
 
-      const event = await import("@tauri-apps/api/event");
-      const unlisten = await event.listen<NativeActivityEvent>("storage://activity", (payload) => {
-        listener(payload.payload);
-      });
-
-      return () => {
-        unlisten();
-      };
+      return subscribe<NativeActivityEvent>(
+        await loadEventBackend(),
+        EVENT_CHANNELS.activity,
+        listener,
+      );
+    },
+    async listenTransferProgress(listener) {
+      // No browser-preview equivalent: nothing transfers there.
+      if (!native) return () => undefined;
+      return onTransferProgress(await loadEventBackend(), listener);
     },
     async getActivityDebugLogState() {
       if (!native) {
