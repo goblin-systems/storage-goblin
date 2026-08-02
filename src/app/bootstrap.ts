@@ -11,7 +11,9 @@ import {
 } from "@goblin-systems/goblin-design-system";
 import { createNativeActivity, createUiActivity } from "./activity";
 import { createStorageGoblinClient } from "./client";
+import { setButtonBusy } from "../lib/dom";
 import { createAppStore, type DialogId } from "../state/app-state";
+import { createSettingsView } from "../views/settings/settings-view";
 import { createAppDom, type AppDom } from "./dom";
 import {
   renderFileTree,
@@ -25,6 +27,7 @@ import {
   DEFAULT_REMOTE_BIN_RETENTION_DAYS,
   DEFAULT_PROFILE_DRAFT,
   normalizeProfileDraft,
+  syncProfileCredentialState,
   toStoredProfile,
 } from "./profile";
 import { createProfilePersistence } from "./persistence";
@@ -287,11 +290,6 @@ function createInitialStatus(): SyncStatus {
       credentialsAvailable: false,
     },
   };
-}
-
-function setButtonBusy(button: HTMLButtonElement, busy: boolean) {
-  button.classList.toggle("is-loading", busy);
-  button.disabled = busy;
 }
 
 const FILE_TREE_LOADING_DELAY_MS = 150;
@@ -879,23 +877,6 @@ function createAsyncConfirmController(): AsyncConfirmController {
   };
 }
 
-function createUnavailableCredential(
-  id: string,
-  provider: Provider,
-  name?: string | null,
-): CredentialSummary {
-  return {
-    id,
-    name: (name ?? "").trim() || "Missing credential",
-    provider,
-    ready: false,
-    validationStatus: "untested",
-    lastTestedAt: null,
-    lastTestMessage: null,
-    summary: null,
-  };
-}
-
 function describeCredentialSummary(credential: CredentialSummary): string | null {
   if (credential.provider === "aws") {
     return credential.summary?.accessKeyIdPreview ?? null;
@@ -1163,48 +1144,6 @@ function buildCredentialCreateMessage(credential: CredentialSummary): string {
   }
 
   return `${savedState} It was tested and failed.`;
-}
-
-function syncProfileCredentialState(
-  profile: StorageProfileDraft,
-  credentials: CredentialSummary[],
-): StorageProfileDraft {
-  const trimmedCredentialProfileId = profile.credentialProfileId?.trim() ?? "";
-  const credentialProfileId = trimmedCredentialProfileId === "" ? null : trimmedCredentialProfileId;
-
-  if (!credentialProfileId) {
-    return normalizeProfileDraft({
-      ...profile,
-      credentialProfileId: null,
-      selectedCredential: null,
-      selectedCredentialAvailable: false,
-      credentialsStoredSecurely: false,
-    });
-  }
-
-  const availableCredential =
-    credentials.find((credential) => credential.id === credentialProfileId) ?? null;
-  const fallbackProvider =
-    profile.selectedCredential?.id === credentialProfileId
-      ? profile.selectedCredential.provider
-      : profile.provider;
-  const selectedCredential =
-    availableCredential ??
-    (profile.selectedCredential?.id === credentialProfileId
-      ? createUnavailableCredential(
-          credentialProfileId,
-          fallbackProvider,
-          profile.selectedCredential.name,
-        )
-      : createUnavailableCredential(credentialProfileId, fallbackProvider));
-
-  return normalizeProfileDraft({
-    ...profile,
-    credentialProfileId,
-    selectedCredential,
-    selectedCredentialAvailable: Boolean(availableCredential?.ready),
-    credentialsStoredSecurely: Boolean(availableCredential?.ready),
-  });
 }
 
 type BootstrapCleanup = () => void;
@@ -1750,25 +1689,6 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     addActivityItem(createUiActivity(level, message, details));
   }
 
-  function renderDebugLogState() {
-    const { enabled, logDirectoryPath, logFilePath } = state.debugLogState;
-
-    dom.activityDebugModeInput.checked = state.profile.activityDebugModeEnabled;
-    dom.debugLogStatusBadge.textContent = enabled
-      ? "Enabled"
-      : client.supportsNativeProfilePersistence
-        ? "Disabled"
-        : "Unavailable";
-    dom.debugLogStatusBadge.className = `badge ${enabled ? "success" : "default"}`;
-    dom.debugLogStatusText.textContent = client.supportsNativeProfilePersistence
-      ? enabled
-        ? "Detailed native activity logging is on. Open Activity from the menu to inspect richer event details."
-        : "Detailed native activity logging is off. Turn it on and save settings to capture extra troubleshooting detail."
-      : "Debug logging is not available in the browser preview.";
-    dom.debugLogFilePath.textContent = logFilePath ?? logDirectoryPath ?? "Unavailable";
-    dom.openDebugLogFolderBtn.disabled = !logDirectoryPath;
-  }
-
   function renderActivity() {
     dom.activityList.innerHTML = "";
     const hasItems = state.activity.length > 0;
@@ -2197,26 +2117,6 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     dom.locationProviderInfo.hidden = true;
   }
 
-  function writeSettingsToDom() {
-    dom.remotePollingInput.checked = state.profile.remotePollingEnabled;
-    dom.pollIntervalInput.value = String(state.profile.pollIntervalSeconds);
-    dom.conflictStrategySelect.value = state.profile.conflictStrategy;
-    dom.activityDebugModeInput.checked = state.profile.activityDebugModeEnabled;
-  }
-
-  function readSettingsFromDom() {
-    store.setState({
-      profile: normalizeProfileDraft({
-        ...state.profile,
-        remotePollingEnabled: dom.remotePollingInput.checked,
-        pollIntervalSeconds: Number(dom.pollIntervalInput.value),
-        conflictStrategy: dom.conflictStrategySelect
-          .value as StorageProfileDraft["conflictStrategy"],
-        activityDebugModeEnabled: dom.activityDebugModeInput.checked,
-      }),
-    });
-  }
-
   function isObjectVersioningEnabled(): boolean {
     return dom.locationObjectVersioningEnabledInput.value === "true";
   }
@@ -2302,7 +2202,6 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
 
   async function refreshDebugLogState() {
     store.setState({ debugLogState: await client.getActivityDebugLogState() });
-    renderDebugLogState();
   }
 
   async function refreshProviderDefinitions() {
@@ -2438,38 +2337,6 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
       : state.activeLocationId
         ? encodeLocationSelectValue(state.activeLocationId, "live")
         : "";
-  }
-
-  async function handleSaveSettings(btn: HTMLButtonElement, resultEl: HTMLElement) {
-    readSettingsFromDom();
-    setButtonBusy(btn, true);
-
-    try {
-      const stored = await persistence.saveSettings(toStoredProfile(state.profile));
-      store.setState({
-        profile: syncProfileCredentialState(
-          normalizeProfileDraft({
-            ...state.profile,
-            ...stored,
-          }),
-          state.credentials,
-        ),
-      });
-      writeSettingsToDom();
-      renderProfileSummary();
-      await refreshStatus();
-      await refreshDebugLogState();
-
-      const message = client.supportsNativeProfilePersistence
-        ? "Settings saved. Preferences are updated."
-        : "Settings saved locally in the browser preview.";
-
-      resultEl.textContent = message;
-      toast(message, "success");
-      addActivity("success", message);
-    } finally {
-      setButtonBusy(btn, false);
-    }
   }
 
   async function handleCreateCredential() {
@@ -4138,18 +4005,6 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   });
   dom.restoreSelectedBtn.addEventListener("click", () => void handleBulkBinRestore());
   dom.purgeSelectedBtn.addEventListener("click", () => void handleBulkBinPurge());
-  dom.savePollingBtn.addEventListener(
-    "click",
-    () => void handleSaveSettings(dom.savePollingBtn, dom.pollingResult),
-  );
-  dom.saveDebugBtn.addEventListener(
-    "click",
-    () => void handleSaveSettings(dom.saveDebugBtn, dom.debugResult),
-  );
-  dom.saveConflictBtn.addEventListener(
-    "click",
-    () => void handleSaveSettings(dom.saveConflictBtn, dom.conflictResult),
-  );
   dom.locationProviderSelect.addEventListener("change", () => {
     renderLocationProviderState();
     renderLocationRemoteBinState();
@@ -4191,10 +4046,6 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
         }
         dom.locationLocalFolderInput.value = selected;
       })(),
-  );
-  dom.openDebugLogFolderBtn.addEventListener(
-    "click",
-    () => void client.openActivityDebugLogFolder(),
   );
 
   bindNavigation({
@@ -4265,7 +4116,27 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
   const storedProfile = await persistence.load();
   store.setState({ profile: applyStoredProfile(storedProfile) });
   store.setState({ activeLocationId: storedProfile.activeLocationId ?? null });
-  writeSettingsToDom();
+  const settingsView = createSettingsView({
+    dom,
+    store,
+    supportsNativePersistence: client.supportsNativeProfilePersistence,
+    saveSettings: (profile) => persistence.saveSettings(profile),
+    openDebugLogFolder: () => client.openActivityDebugLogFolder(),
+    applySavedProfile: (stored) =>
+      syncProfileCredentialState(
+        normalizeProfileDraft({ ...store.getState().profile, ...stored }),
+        store.getState().credentials,
+      ),
+    toStoredProfile,
+    normalizeProfileDraft,
+    onSaved: async () => {
+      renderProfileSummary();
+      await refreshStatus();
+      await refreshDebugLogState();
+    },
+    toast,
+    addActivity,
+  });
   renderLocationRemoteBinState();
   renderFileTreeViewState();
   await refreshProviderDefinitions();
@@ -4309,6 +4180,7 @@ export async function bootstrapStorageGoblin(): Promise<BootstrapCleanup> {
     endFileTreeLoading();
 
     destroyFileTree();
+    settingsView.destroy();
     asyncConfirm.destroy();
     conflictResolutionModal.destroy();
 

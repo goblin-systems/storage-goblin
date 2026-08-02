@@ -7,6 +7,7 @@ import {
   normalizeProviderCapabilities,
   type ConflictStrategy,
   type CredentialSummary,
+  type Provider,
   type StoredStorageProfile,
   type StorageProfileDraft,
   type SyncLocation,
@@ -196,4 +197,63 @@ export function describeProfileTarget(profile: StoredStorageProfile): string {
   const remoteTarget = profile.bucket || "bucket not set";
   const localTarget = profile.localFolder || "folder not set";
   return `${remoteTarget} ↔ ${localTarget}`;
+}
+
+function createUnavailableCredential(
+  id: string,
+  provider: Provider,
+  name?: string | null,
+): CredentialSummary {
+  return {
+    id,
+    name: (name ?? "").trim() || "Missing credential",
+    provider,
+    ready: false,
+    validationStatus: "untested",
+    lastTestedAt: null,
+    lastTestMessage: null,
+    summary: null,
+  };
+}
+
+export function syncProfileCredentialState(
+  profile: StorageProfileDraft,
+  credentials: CredentialSummary[],
+): StorageProfileDraft {
+  const trimmedCredentialProfileId = profile.credentialProfileId?.trim() ?? "";
+  const credentialProfileId = trimmedCredentialProfileId === "" ? null : trimmedCredentialProfileId;
+
+  if (!credentialProfileId) {
+    return normalizeProfileDraft({
+      ...profile,
+      credentialProfileId: null,
+      selectedCredential: null,
+      selectedCredentialAvailable: false,
+      credentialsStoredSecurely: false,
+    });
+  }
+
+  const availableCredential =
+    credentials.find((credential) => credential.id === credentialProfileId) ?? null;
+  const fallbackProvider =
+    profile.selectedCredential?.id === credentialProfileId
+      ? profile.selectedCredential.provider
+      : profile.provider;
+  const selectedCredential =
+    availableCredential ??
+    (profile.selectedCredential?.id === credentialProfileId
+      ? createUnavailableCredential(
+          credentialProfileId,
+          fallbackProvider,
+          profile.selectedCredential.name,
+        )
+      : createUnavailableCredential(credentialProfileId, fallbackProvider));
+
+  return normalizeProfileDraft({
+    ...profile,
+    credentialProfileId,
+    selectedCredential,
+    selectedCredentialAvailable: Boolean(availableCredential?.ready),
+    credentialsStoredSecurely: Boolean(availableCredential?.ready),
+  });
 }
